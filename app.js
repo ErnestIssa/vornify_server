@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const dbRoutes = require('./routes/db');
 const paymentRoutes = require('./routes/payment');
 require('dotenv').config();
@@ -19,6 +20,7 @@ app.use(cors({
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
 
 // Health check endpoint
 app.get('/health', (req, res) => {

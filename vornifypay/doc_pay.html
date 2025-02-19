@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VornifyPay API Documentation</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -47,10 +48,30 @@
             border-left: 4px solid #ffc107;
             margin: 15px 0;
         }
+        .logo {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .logo svg {
+            margin-right: 10px;
+            transition: transform 0.2s;
+        }
+        
+        .logo:hover svg {
+            transform: scale(1.1);
+        }
     </style>
 </head>
 <body>
-    <h1>VornifyPay API Documentation</h1>
+    <div class="logo">
+        <svg width="32" height="28" viewBox="0 0 67 58" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M25.0134 5.61606C28.9281 -0.664659 38.0719 -0.664669 41.9866 5.61605L65.1066 42.7105C69.2582 49.3714 64.4689 58 56.6201 58H10.3799C2.5311 58 -2.25824 49.3714 1.89335 42.7105L25.0134 5.61606Z" fill="#2196F3"/>
+            <path d="M44.9876 25.1599C49.0198 25.204 51.5789 29.4242 49.5217 32.6368L37.7091 51.0833C35.7115 54.2027 30.8308 54.0314 28.8546 50.7726L17.515 32.0731C15.5388 28.8142 17.9202 24.8642 21.8353 24.9069L44.9876 25.1599Z" fill="white"/>
+        </svg>
+        <h1>VornifyPay API Documentation</h1>
+    </div>
     
     <div class="note">
         <strong>Base URL:</strong> http://localhost:3010/api/vornifypay
