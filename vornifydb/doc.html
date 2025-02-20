@@ -46,7 +46,7 @@
 
     <h2>Base Configuration</h2>
     <pre><code>
-const BASE_URL = 'http://localhost:3010/api/vornifydb';
+const BASE_URL = 'https://api.vornify.se/api/vornifydb';
     </code></pre>
 
     <h2>Request Format</h2>
@@ -68,7 +68,7 @@ const BASE_URL = 'http://localhost:3010/api/vornifydb';
         <div class="example">
             <h4>Example 1: Create a User</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -91,7 +91,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 2: Create a Project</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -119,7 +119,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 1: Get All Records</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -135,7 +135,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 2: Get Records with Filter</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -159,7 +159,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 1: Get All Projects</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -199,7 +199,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 2: Get All Users</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -243,7 +243,7 @@ import requests
 import json
 
 def read_all_records(collection_name):
-    url = "http://localhost:3010/api/vornifydb"
+    url = "https://api.vornify.se/api/vornifydb"
     
     payload = {
         "database_name": "VornifyDB",
@@ -288,7 +288,7 @@ result = read_all_records("projects")
         <div class="example">
             <h4>Example 1: Update User Profile</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -310,7 +310,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 2: Update Project Status</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -337,7 +337,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 1: Delete User</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -353,7 +353,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 2: Delete Completed Projects</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -374,7 +374,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <div class="example">
             <h4>Example 1: Verify User Credentials</h4>
             <pre><code>
-fetch('http://localhost:3010/api/vornifydb', {
+fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -428,7 +428,7 @@ fetch('http://localhost:3010/api/vornifydb', {
         <pre><code>
 async function safeDBOperation(requestData) {
     try {
-        const response = await fetch('http://localhost:3010/api/vornifydb', {
+        const response = await fetch('https://api.vornify.se/api/vornifydb', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestData)

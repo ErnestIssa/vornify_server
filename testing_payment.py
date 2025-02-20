@@ -2,7 +2,7 @@ import requests
 import json
 from datetime import datetime
 
-BASE_URL = "http://localhost:3010/api/vornifypay"
+BASE_URL = "https://api.vornify.se/api/vornifypay"
 
 def print_request(title, payload):
     """Helper function to print request details"""
