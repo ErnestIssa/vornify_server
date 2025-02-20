@@ -72,6 +72,11 @@ class VornifyPay {
                     }
                     return await this.verifyPayment(data);
 
+                case 'create_subscription':
+                    return await this.createSubscription(data);
+                case 'complete_subscription':
+                    return await this.completeSubscription(data);
+
                 default:
                     return { status: false, error: 'Invalid command' };
             }
@@ -237,6 +242,139 @@ class VornifyPay {
             };
         } catch (error) {
             return this.handleError(error);
+        }
+    }
+
+    async createSubscription(data) {
+        try {
+            const {
+                customer_email,
+                amount,
+                currency,
+                trial_days = 0,
+                billing_interval = 'month',
+                product_data
+            } = data;
+
+            // Create or get customer
+            const customer = await this.getOrCreateCustomer(customer_email, {
+                name: product_data.customer_name || '',
+                metadata: this.prepareMetadata(product_data)
+            });
+
+            // Create product if it doesn't exist
+            const product = await this.stripe.products.create({
+                name: product_data.name,
+                description: product_data.description,
+                metadata: this.prepareMetadata({
+                    features: JSON.stringify(product_data.features),
+                    ...product_data.metadata
+                })
+            });
+
+            // Create price
+            const price = await this.stripe.prices.create({
+                product: product.id,
+                unit_amount: this.convertAmount(amount),
+                currency: currency.toLowerCase(),
+                recurring: {
+                    interval: billing_interval,
+                    interval_count: 1
+                },
+                metadata: {
+                    product_name: product_data.name
+                }
+            });
+
+            // Calculate trial end
+            const trial_end = trial_days > 0 
+                ? Math.floor(Date.now() / 1000) + (trial_days * 24 * 60 * 60)
+                : undefined;
+
+            // Create subscription
+            const subscription = await this.stripe.subscriptions.create({
+                customer: customer.id,
+                items: [{ price: price.id }],
+                trial_end,
+                payment_behavior: 'default_incomplete',
+                payment_settings: { 
+                    payment_method_types: ['card'],
+                    save_default_payment_method: 'on_subscription' 
+                },
+                metadata: this.prepareMetadata({
+                    ...product_data,
+                    subscription_type: 'recurring'
+                }),
+                expand: ['latest_invoice.payment_intent']
+            });
+
+            return {
+                status: true,
+                subscription_id: subscription.id,
+                client_secret: subscription.latest_invoice.payment_intent.client_secret,
+                public_key: this.publicKey,
+                subscription_details: {
+                    amount,
+                    currency,
+                    trial_end: trial_end ? new Date(trial_end * 1000).toISOString() : null,
+                    billing_interval,
+                    product_name: product_data.name,
+                    customer_email,
+                    status: subscription.status
+                }
+            };
+        } catch (error) {
+            console.error('Subscription creation error:', error);
+            return {
+                status: false,
+                error: error.message,
+                code: error.code || 'subscription_creation_failed'
+            };
+        }
+    }
+
+    async completeSubscription(data) {
+        try {
+            const { subscription_id, payment_method } = data;
+
+            const subscription = await this.stripe.subscriptions.retrieve(subscription_id);
+            
+            if (!subscription) {
+                return {
+                    status: false,
+                    error: 'Subscription not found'
+                };
+            }
+
+            // Update subscription with payment method
+            const updatedSubscription = await this.stripe.subscriptions.update(
+                subscription_id,
+                {
+                    default_payment_method: payment_method.id,
+                    metadata: {
+                        payment_method_added: 'true'
+                    }
+                }
+            );
+
+            return {
+                status: true,
+                subscription: {
+                    id: updatedSubscription.id,
+                    status: updatedSubscription.status,
+                    current_period_end: new Date(updatedSubscription.current_period_end * 1000).toISOString(),
+                    trial_end: updatedSubscription.trial_end 
+                        ? new Date(updatedSubscription.trial_end * 1000).toISOString()
+                        : null
+                }
+            };
+        } catch (error) {
+            console.error('Complete subscription error:', error);
+            return {
+                status: false,
+                error: error.message,
+                code: error.code || 'subscription_completion_failed'
+            };
         }
     }
 
