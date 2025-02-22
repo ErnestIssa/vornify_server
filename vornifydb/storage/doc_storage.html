@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VornifyDB Storage API Documentation</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <style>
+        :root {
+            --primary-color: #2196F3;
+            --secondary-color: #4CAF50;
+            --background-color: #ffffff;
+            --text-color: #333333;
+            --code-background: #272822;
+            --code-color: #f8f8f2;
+            --border-color: #e0e0e0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            color: var(--text-color);
+            background-color: var(--background-color);
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 40px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .logo svg {
+            width: 40px;
+            height: 40px;
+            transition: transform 0.3s ease;
+        }
+
+        .logo:hover svg {
+            transform: scale(1.1);
+        }
+
+        .endpoint {
+            background: #f8f9fa;
+            padding: 30px;
+            border-radius: 10px;
+            margin: 30px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .method {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        .url {
+            color: var(--secondary-color);
+            font-family: 'Consolas', monospace;
+            padding: 5px 10px;
+            background: rgba(76, 175, 80, 0.1);
+            border-radius: 5px;
+        }
+
+        pre {
+            background: var(--code-background);
+            color: var(--code-color);
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            position: relative;
+        }
+
+        pre code {
+            font-family: 'Consolas', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .example {
+            background: #e8f5e9;
+            border-left: 4px solid var(--secondary-color);
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        h1, h2, h3, h4 {
+            color: var(--primary-color);
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin: 0;
+        }
+
+        h2 {
+            font-size: 1.8em;
+            margin-top: 40px;
+        }
+
+        h3 {
+            font-size: 1.4em;
+            margin-top: 30px;
+        }
+
+        ul {
+            list-style-type: none;
+            padding-left: 0;
+        }
+
+        ul li {
+            margin: 10px 0;
+            padding-left: 25px;
+            position: relative;
+        }
+
+        ul li:before {
+            content: "•";
+            color: var(--primary-color);
+            font-weight: bold;
+            position: absolute;
+            left: 0;
+        }
+
+        .copy-button {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: #fff;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.3s ease;
+        }
+
+        .copy-button:hover {
+            background: rgba(255,255,255,0.2);
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 15px;
+            }
+
+            .endpoint {
+                padding: 20px;
+            }
+
+            h1 {
+                font-size: 2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            <svg width="40" height="40" viewBox="0 0 67 58" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M25.0134 5.61606C28.9281 -0.664659 38.0719 -0.664669 41.9866 5.61605L65.1066 42.7105C69.2582 49.3714 64.4689 58 56.6201 58H10.3799C2.5311 58 -2.25824 49.3714 1.89335 42.7105L25.0134 5.61606Z" fill="#2196F3"/>
+                <path d="M44.9876 25.1599C49.0198 25.204 51.5789 29.4242 49.5217 32.6368L37.7091 51.0833C35.7115 54.2027 30.8308 54.0314 28.8546 50.7726L17.515 32.0731C15.5388 28.8142 17.9202 24.8642 21.8353 24.9069L44.9876 25.1599Z" fill="white"/>
+            </svg>
+            <h1>VornifyDB Storage API</h1>
+        </div>
+    </div>
+
+    <div class="endpoint">
+        <h2>Get Storage Statistics</h2>
+        <p><span class="method">POST</span> <span class="url">https://api.vornify.se/api/storage</span></p>
+        
+        <div class="note">
+            <h4>Overview</h4>
+            <p>The Storage API provides detailed information about your database's storage usage, including:</p>
+            <ul>
+                <li>Total database size and storage metrics</li>
+                <li>Collection-level statistics</li>
+                <li>Index information</li>
+                <li>Historical usage data (30-day history)</li>
+            </ul>
+        </div>
+
+        <div class="example">
+            <h3>Request Format:</h3>
+            <pre><code>{
+    "database_name": "your_database_name"
+}</code><button class="copy-button">Copy</button></pre>
+        </div>
+
+        <div class="example">
+            <h3>Response Format Explained:</h3>
+            <pre><code>{
+    "status": true,              // Operation success status
+    "database": "MyDatabase",    // Database name
+    "timestamp": "2024-02-13T12:00:00.000Z",  // Current timestamp
+    "stats": {
+        "totalSize": 1234567,    // Total size in bytes
+        "storageSize": 2345678,  // Allocated storage size
+        "indexes": 5,            // Number of indexes
+        "totalIndexSize": 345678, // Total size of all indexes
+        "avgDocumentSize": 1024,  // Average document size
+        "collections": [
+            {
+                "name": "users",  // Collection name
+                "size": 123456,   // Data size in bytes
+                "storageSize": 234567,  // Allocated storage
+                "documentCount": 1000,   // Number of documents
+                "avgDocumentSize": 1024, // Avg doc size in bytes
+                "indexes": 2,            // Number of indexes
+                "indexSize": 34567       // Index size in bytes
+            }
+        ]
+    },
+    "history": [
+        {
+            "timestamp": "2024-02-12T12:00:00.000Z",
+            "totalSize": 1234000,    // Historical size
+            "documentCount": 990      // Historical doc count
+        }
+    ]
+}</code><button class="copy-button">Copy</button></pre>
+        </div>
+
+        <div class="example">
+            <h3>Real-World Examples</h3>
+            
+            <h4>1. User Database Stats</h4>
+            <pre><code>// Request
+{
+    "database_name": "UserDB"
+}
+
+// Response
+{
+    "status": true,
+    "database": "UserDB",
+    "timestamp": "2024-02-13T12:00:00.000Z",
+    "stats": {
+        "totalSize": 52428800,     // 50 MB
+        "storageSize": 67108864,   // 64 MB
+        "indexes": 3,
+        "totalIndexSize": 8388608, // 8 MB
+        "avgDocumentSize": 2048,   // 2 KB
+        "collections": [
+            {
+                "name": "users",
+                "size": 31457280,   // 30 MB
+                "storageSize": 41943040, // 40 MB
+                "documentCount": 15000,
+                "avgDocumentSize": 2048,
+                "indexes": 2,
+                "indexSize": 5242880 // 5 MB
+            }
+        ]
+    }
+}</code><button class="copy-button">Copy</button></pre>
+
+            <h4>2. E-commerce Database Stats</h4>
+            <pre><code>// Request
+{
+    "database_name": "ShopDB"
+}
+
+// Response
+{
+    "status": true,
+    "database": "ShopDB",
+    "stats": {
+        "totalSize": 209715200,    // 200 MB
+        "storageSize": 268435456,  // 256 MB
+        "indexes": 8,
+        "totalIndexSize": 41943040, // 40 MB
+        "avgDocumentSize": 5120,    // 5 KB
+        "collections": [
+            {
+                "name": "products",
+                "size": 104857600,   // 100 MB
+                "documentCount": 20000,
+                "avgDocumentSize": 5120
+            },
+            {
+                "name": "orders",
+                "size": 83886080,    // 80 MB
+                "documentCount": 15000,
+                "avgDocumentSize": 5120
+            }
+        ]
+    }
+}</code><button class="copy-button">Copy</button></pre>
+        </div>
+
+        <div class="note">
+            <h4>Understanding the Metrics</h4>
+            <ul>
+                <li><strong>totalSize</strong>: Actual size of your data</li>
+                <li><strong>storageSize</strong>: Space allocated on disk (includes preallocated space)</li>
+                <li><strong>avgDocumentSize</strong>: Average size of documents in the collection</li>
+                <li><strong>indexSize</strong>: Size of all indexes in the collection</li>
+                <li><strong>documentCount</strong>: Total number of documents</li>
+            </ul>
+        </div>
+
+        <div class="note" style="background: #e8f5e9; border-left-color: var(--secondary-color);">
+            <h4>Best Practices</h4>
+            <ul>
+                <li>Monitor storage growth trends using the history data</li>
+                <li>Check index sizes relative to data size</li>
+                <li>Watch for unexpected growth in specific collections</li>
+                <li>Use avgDocumentSize to optimize document structure</li>
+            </ul>
+        </div>
+
+        <h3>Example Usage:</h3>
+        <div class="example">
+            <h4>JavaScript</h4>
+            <pre><code>fetch('https://api.vornify.se/api/storage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        database_name: 'MyDatabase'
+    })
+})
+.then(response => response.json())
+.then(data => console.log(data));</code><button class="copy-button">Copy</button></pre>
+        </div>
+
+        <div class="example">
+            <h4>Python</h4>
+            <pre><code>import requests
+
+response = requests.post('https://api.vornify.se/api/storage', 
+    json={'database_name': 'MyDatabase'})
+    
+print(response.json())</code><button class="copy-button">Copy</button></pre>
+        </div>
+    </div>
+
+    <script>
+        // Add copy functionality
+        document.querySelectorAll('.copy-button').forEach(button => {
+            button.addEventListener('click', () => {
+                const code = button.previousSibling.textContent;
+                navigator.clipboard.writeText(code);
+                
+                button.textContent = 'Copied!';
+                setTimeout(() => {
+                    button.textContent = 'Copy';
+                }, 2000);
+            });
+        });
+    </script>
+</body>
+</html> 
