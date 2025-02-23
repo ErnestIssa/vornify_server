@@ -4,6 +4,7 @@ const path = require('path');
 const dbRoutes = require('./routes/db');
 const paymentRoutes = require('./routes/payment');
 const storageRoutes = require('./routes/storage');
+const emailRoutes = require('./routes/email');
 require('dotenv').config();
 
 const app = express();
@@ -37,6 +38,7 @@ app.get('/', (req, res) => {
 app.use('/api/vornifydb', dbRoutes);
 app.use('/api/vornifypay', paymentRoutes);
 app.use('/api/storage', storageRoutes);
+app.use('/api/email', emailRoutes);
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
