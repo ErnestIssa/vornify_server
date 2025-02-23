@@ -356,6 +356,97 @@ response = requests.post('https://api.vornify.se/api/storage',
     
 print(response.json())</code><button class="copy-button">Copy</button></pre>
         </div>
+
+        <div class="example">
+            <h3>Real-World Response Example</h3>
+            <h4>VornifyDB Storage Statistics</h4>
+            <pre><code>// Request
+{
+    "database_name": "VornifyDB"
+}
+
+// Response
+{
+    "status": true,
+    "database": "VornifyDB",
+    "timestamp": "2025-02-23T19:04:40.789Z",
+    "stats": {
+        "totalSize": 93841,          // Total size in bytes
+        "storageSize": 237568,       // Allocated storage
+        "indexes": 16,               // Total number of indexes
+        "totalIndexSize": 524288,    // Total size of all indexes
+        "collections": [
+            {
+                "name": "users",
+                "size": 9560,         // Collection data size
+                "storageSize": 45056, // Allocated storage
+                "documentCount": 10,   // Number of documents
+                "avgDocumentSize": 956, // Average document size
+                "indexes": 4,          // Number of indexes
+                "indexSize": 147456    // Size of indexes
+            },
+            {
+                "name": "projects",
+                "size": 59541,
+                "storageSize": 126976,
+                "documentCount": 9,
+                "avgDocumentSize": 6615,
+                "indexes": 4,
+                "indexSize": 147456
+            },
+            {
+                "name": "subscriptions",
+                "size": 24390,
+                "storageSize": 45056,
+                "documentCount": 90,
+                "avgDocumentSize": 271,
+                "indexes": 4,
+                "indexSize": 147456
+            },
+            {
+                "name": "categories",
+                "size": 350,
+                "storageSize": 20480,
+                "documentCount": 2,
+                "avgDocumentSize": 175,
+                "indexes": 4,
+                "indexSize": 81920
+            }
+        ],
+        "avgDocumentSize": 845.41,   // Average document size across all collections
+        "freeSpace": 0,              // Available space
+        "scaleFactor": 1             // Scaling factor for sizes
+    },
+    "history": []                    // Historical data (last 30 days)
+}</code><button class="copy-button">Copy</button></pre>
+
+            <div class="note">
+                <h4>Understanding the Response:</h4>
+                <ul>
+                    <li><strong>totalSize (93.8 KB)</strong>: Actual data size across all collections</li>
+                    <li><strong>storageSize (232 KB)</strong>: Total space allocated on disk</li>
+                    <li><strong>indexes (16)</strong>: Total number of indexes across all collections</li>
+                    <li><strong>totalIndexSize (512 KB)</strong>: Total space used by all indexes</li>
+                </ul>
+                <h5>Collection Breakdown:</h5>
+                <ul>
+                    <li><strong>users</strong>: 10 documents, ~956 bytes each</li>
+                    <li><strong>projects</strong>: 9 documents, ~6.6 KB each</li>
+                    <li><strong>subscriptions</strong>: 90 documents, ~271 bytes each</li>
+                    <li><strong>categories</strong>: 2 documents, ~175 bytes each</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="note" style="background: #e8f5e9; border-left-color: var(--secondary-color);">
+            <h4>Storage Insights:</h4>
+            <ul>
+                <li>Each collection has 4 indexes for optimal query performance</li>
+                <li>Projects collection has the largest average document size (6.6 KB)</li>
+                <li>Subscriptions collection has the most documents (90)</li>
+                <li>Total storage efficiency: ~39.5% (totalSize/storageSize)</li>
+            </ul>
+        </div>
     </div>
 
     <script>
