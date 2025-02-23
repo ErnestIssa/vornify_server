@@ -27,4 +27,12 @@ router.post('/', async (req, res) => {
     }
 });
 
+// Add a GET route for testing
+router.get('/test', (req, res) => {
+    res.json({
+        status: true,
+        message: 'Storage API is working'
+    });
+});
+
 module.exports = router; 

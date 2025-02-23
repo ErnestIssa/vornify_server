@@ -3,6 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const dbRoutes = require('./routes/db');
 const paymentRoutes = require('./routes/payment');
+const storageRoutes = require('./routes/storage');
 require('dotenv').config();
 
 const app = express();
@@ -35,6 +36,12 @@ app.get('/', (req, res) => {
 // Routes
 app.use('/api/vornifydb', dbRoutes);
 app.use('/api/vornifypay', paymentRoutes);
+app.use('/api/storage', storageRoutes);
+
+// Documentation routes
+app.get('/storage/docs', (req, res) => {
+    res.sendFile(__dirname + '/vornifydb/storage/doc_storage.html');
+});
 
 // Error handling
 app.use((err, req, res, next) => {

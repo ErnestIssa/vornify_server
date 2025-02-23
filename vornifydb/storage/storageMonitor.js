@@ -13,13 +13,16 @@ class StorageMonitor {
             const db = this.client.db(dbName);
             
             // Get database stats
-            const dbStats = await db.stats();
+            const dbStats = await db.command({ dbStats: 1 });
             
             // Get collection stats
             const collections = await db.listCollections().toArray();
             const collectionStats = await Promise.all(
                 collections.map(async (collection) => {
-                    const stats = await db.collection(collection.name).stats();
+                    const stats = await db.command({ 
+                        collStats: collection.name,
+                        scale: 1
+                    });
                     return {
                         name: collection.name,
                         size: stats.size,
@@ -46,6 +49,8 @@ class StorageMonitor {
                     totalIndexSize: dbStats.indexSize,
                     collections: collectionStats,
                     avgDocumentSize: dbStats.avgObjSize || 0,
+                    freeSpace: dbStats.freeStorageSize || 0,
+                    scaleFactor: dbStats.scaleFactor || 1
                 },
                 history: storageHistory
             };
@@ -97,8 +102,8 @@ class StorageMonitor {
             const statsDb = this.client.db('VornifyDB');
             const storageHistory = statsDb.collection('storage_history');
 
-            // Get current stats
-            const dbStats = await targetDb.stats();
+            // Get current stats using command
+            const dbStats = await targetDb.command({ dbStats: 1 });
 
             // Record stats
             await storageHistory.insertOne({
