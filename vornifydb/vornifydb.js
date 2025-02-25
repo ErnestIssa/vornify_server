@@ -312,23 +312,19 @@ class VortexDB {
     // Verify Record
     async verifyRecord(collection, query) {
         try {
-            const result = await collection.findOne(query);
+            // Only check if record exists, don't return the data
+            const count = await collection.countDocuments(query, { limit: 1 });
             
-            if (!result) {
-                return {
-                    status: false,
-                    error: 'Record not found'
-                };
-            }
-
             return {
-                status: true,
-                data: result
+                success: true,
+                data: {
+                    acknowledged: count > 0
+                }
             };
         } catch (error) {
             console.error('Error in verifyRecord:', error);
             return {
-                status: false,
+                success: false,
                 error: error.message
             };
         }
