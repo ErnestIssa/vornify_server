@@ -151,7 +151,8 @@ class VortexDB {
                 '--read': this.readRecords.bind(this),
                 '--update': this.updateRecord.bind(this),
                 '--delete': this.deleteRecord.bind(this),
-                '--verify': this.verifyRecord.bind(this)
+                '--verify': this.verifyRecord.bind(this),
+                '--append': this.appendRecord.bind(this)
             };
 
             const handler = commandMap[command];
@@ -323,6 +324,41 @@ class VortexDB {
             };
         } catch (error) {
             console.error('Error in verifyRecord:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    // Add new appendRecord method
+    async appendRecord(collection, data) {
+        try {
+            if (!data.existing || !data.append) {
+                throw new Error("Both 'existing' and 'append' fields are required");
+            }
+
+            // First verify the record exists
+            const existingRecord = await collection.findOne(data.existing);
+            if (!existingRecord) {
+                return {
+                    success: false,
+                    error: "Record not found"
+                };
+            }
+
+            // Use $set to append new data without overwriting existing fields
+            const result = await collection.updateOne(
+                data.existing,
+                { $set: data.append }
+            );
+            
+            return {
+                success: true,
+                data: result
+            };
+        } catch (error) {
+            console.error('Error in appendRecord:', error);
             return {
                 success: false,
                 error: error.message

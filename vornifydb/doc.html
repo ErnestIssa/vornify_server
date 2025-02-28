@@ -54,16 +54,61 @@ const BASE_URL = 'https://api.vornify.se/api/vornifydb';
 {
     "database_name": "your_database",  // Optional, defaults to "VornifyDB"
     "collection_name": "your_collection",  // Required
-    "command": "--operation",  // Required: --create, --read, --update, --delete, --verify
+    "command": "--operation",  // Required: --create, --read, --update, --delete, --verify, --append
     "data": {}  // Operation-specific data
 }
     </code></pre>
+
+    <div class="example">
+        <h4>Field Descriptions</h4>
+        <ul>
+            <li><code>database_name</code>: 
+                <ul>
+                    <li>The MongoDB database to use</li>
+                    <li>Optional - defaults to "VornifyDB"</li>
+                    <li>Example: "VornifyDB", "TestDB"</li>
+                </ul>
+            </li>
+            <li><code>collection_name</code>: 
+                <ul>
+                    <li>The collection within the database to operate on</li>
+                    <li>Required for all operations</li>
+                    <li>Example: "users", "projects_ideation", "settings"</li>
+                </ul>
+            </li>
+            <li><code>command</code>: 
+                <ul>
+                    <li><code>--create</code>: Create new records</li>
+                    <li><code>--read</code>: Retrieve existing records</li>
+                    <li><code>--update</code>: Modify existing records</li>
+                    <li><code>--delete</code>: Remove records</li>
+                    <li><code>--verify</code>: Check if records exist</li>
+                    <li><code>--append</code>: Add new data to existing records</li>
+                </ul>
+            </li>
+            <li><code>data</code>: 
+                <ul>
+                    <li>Operation-specific payload</li>
+                    <li>Structure varies based on the command</li>
+                    <li>For <code>--append</code>: Requires <code>existing</code> and <code>append</code> fields</li>
+                    <li>Example for append:
+                        <pre><code>{
+    existing: { id: "record_id" },
+    append: { 
+        "new.field": "value",
+        "nested.data": { ... }
+    }
+}</code></pre>
+                </ul>
+            </li>
+        </ul>
+    </div>
 
     <h2>Commands and Examples</h2>
 
     <div class="endpoint">
         <h3>Create Record (--create)</h3>
-        <p>Creates a new record in the specified collection.</p>
+        <p>Creates a new record or updates an existing record in the specified collection.</p>
         
         <div class="example">
             <h4>Example 1: Create a User</h4>
@@ -86,6 +131,21 @@ fetch('https://api.vornify.se/api/vornifydb', {
     })
 });
             </code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "insertedId": "65df8a7b2d83f98c3e8b4567"
+    }
+}</code></pre>
+
+            <h5>Error Response:</h5>
+            <pre><code>{
+    "success": false,
+    "error": "Duplicate key error: Email already exists"
+}</code></pre>
         </div>
 
         <div class="example">
@@ -110,6 +170,54 @@ fetch('https://api.vornify.se/api/vornifydb', {
 });
             </code></pre>
         </div>
+
+        <div class="example">
+            <h4>Example 3: Update Existing Record</h4>
+            <pre><code>
+fetch('https://api.vornify.se/api/vornifydb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        database_name: "VornifyDB",
+        collection_name: "projects_ideation",
+        command: "--create",
+        data: {
+            existing: {
+                id: "proj_2ab6ea0a-05c5-4222-aa44-ca8032ab7605"  // Identify existing record
+            },
+            update: {                                             // New data to update/append
+                "pages.user": {
+                    id: "page_1740731351457",
+                    name: "Home",
+                    created_at: "2025-02-28T08:29:11.457Z"
+                }
+            }
+        }
+    })
+});
+            </code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "modifiedCount": 1,
+        "matchedCount": 1,
+        "upsertedId": null
+    }
+}</code></pre>
+
+            <h5>Important Notes:</h5>
+            <ul>
+                <li>Use <code>existing</code> to identify the record to update</li>
+                <li>Use <code>update</code> instead of <code>append</code> for updating nested objects</li>
+                <li>For nested updates, use dot notation (e.g., "pages.user")</li>
+                <li>The operation will merge new data with existing data</li>
+                <li>Existing fields with the same path will be updated</li>
+                <li>New fields will be added without affecting other existing data</li>
+            </ul>
+        </div>
     </div>
 
     <div class="endpoint">
@@ -130,6 +238,28 @@ fetch('https://api.vornify.se/api/vornifydb', {
     })
 });
             </code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": [
+        {
+            "_id": "65df8a7b2d83f98c3e8b4567",
+            "id": "user_1709123195000",
+            "name": "John Doe",
+            "email": "john@example.com",
+            "created_at": "2024-02-28T12:13:15.000Z",
+            "isPrivate": true
+        },
+        // ... more records
+    ]
+}</code></pre>
+
+            <h5>Error Response:</h5>
+            <pre><code>{
+    "success": false,
+    "error": "Collection not found"
+}</code></pre>
         </div>
 
         <div class="example">
@@ -305,6 +435,22 @@ fetch('https://api.vornify.se/api/vornifydb', {
     })
 });
             </code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "modifiedCount": 1,
+        "matchedCount": 1
+    }
+}</code></pre>
+
+            <h5>Error Response:</h5>
+            <pre><code>{
+    "success": false,
+    "error": "Invalid update operation"
+}</code></pre>
         </div>
 
         <div class="example">
@@ -348,6 +494,21 @@ fetch('https://api.vornify.se/api/vornifydb', {
     })
 });
             </code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "deletedCount": 1
+    }
+}</code></pre>
+
+            <h5>Error Response:</h5>
+            <pre><code>{
+    "success": false,
+    "error": "Delete operation failed"
+}</code></pre>
         </div>
 
         <div class="example">
@@ -369,10 +530,10 @@ fetch('https://api.vornify.se/api/vornifydb', {
 
     <div class="endpoint">
         <h3>Verify Record (--verify)</h3>
-        <p>Checks if a record exists and returns it if found.</p>
+        <p>Checks if a record exists in the collection.</p>
 
         <div class="example">
-            <h4>Example 1: Verify User Credentials</h4>
+            <h4>Example 1: Verify User Email</h4>
             <pre><code>
 fetch('https://api.vornify.se/api/vornifydb', {
     method: 'POST',
@@ -388,6 +549,86 @@ fetch('https://api.vornify.se/api/vornifydb', {
     })
 });
             </code></pre>
+
+            <h5>Success Response (Record Exists):</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true
+    }
+}</code></pre>
+
+            <h5>Success Response (Record Does Not Exist):</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": false
+    }
+}</code></pre>
+
+            <h5>Error Response:</h5>
+            <pre><code>{
+    "success": false,
+    "error": "Verification failed"
+}</code></pre>
+        </div>
+    </div>
+
+    <div class="endpoint">
+        <h3>Append Data (--append)</h3>
+        <p>Appends new data to an existing record in the specified collection.</p>
+        
+        <div class="example">
+            <h4>Example: Append Data to Existing Record</h4>
+            <pre><code>
+fetch('https://api.vornify.se/api/vornifydb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        database_name: "VornifyDB",
+        collection_name: "projects_ideation",
+        command: "--append",
+        data: {
+            existing: {
+                id: "proj_2ab6ea0a-05c5-4222-aa44-ca8032ab7605"
+            },
+            append: {
+                "pages.user": {
+                    id: "page_1740731351457",
+                    name: "Home",
+                    created_at: "2025-02-28T08:29:11.457Z"
+                }
+            }
+        }
+    })
+});</code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "modifiedCount": 1,
+        "matchedCount": 1,
+        "upsertedId": null
+    }
+}</code></pre>
+
+            <h5>Error Response:</h5>
+            <pre><code>{
+    "success": false,
+    "error": "Record not found"
+}</code></pre>
+
+            <h5>Important Notes:</h5>
+            <ul>
+                <li>The <code>existing</code> field is used to identify the record to append to</li>
+                <li>The <code>append</code> field contains the new data to add</li>
+                <li>Existing data will not be overwritten</li>
+                <li>Supports nested objects using dot notation</li>
+                <li>Operation is atomic - either all data is appended or none</li>
+                <li>Returns error if the record is not found</li>
+            </ul>
         </div>
     </div>
 
