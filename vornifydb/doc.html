@@ -632,6 +632,113 @@ fetch('https://api.vornify.se/api/vornifydb', {
         </div>
     </div>
 
+    <div class="endpoint">
+        <h3>Update Specific Field (--update-field)</h3>
+        <p>Updates a specific field in an existing record.</p>
+        
+        <div class="example">
+            <h4>Example: Update Last Name</h4>
+            <pre><code>
+fetch('https://api.vornify.se/api/vornifydb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        database_name: "VornifyDB",
+        collection_name: "users",
+        command: "--update-field",
+        data: {
+            existing: {
+                id: "user_123"
+            },
+            field: "last_name",
+            value: "Smith"
+        }
+    })
+});</code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "modifiedCount": 1,
+        "matchedCount": 1
+    }
+}</code></pre>
+        </div>
+
+        <div class="example">
+            <h4>Example: Update Nested Field</h4>
+            <pre><code>
+// Update nested field using dot notation
+{
+    "command": "--update-field",
+    "data": {
+        "existing": { "id": "user_123" },
+        "field": "address.city",
+        "value": "New York"
+    }
+}</code></pre>
+        </div>
+    </div>
+
+    <div class="endpoint">
+        <h3>Delete Specific Field (--delete-field)</h3>
+        <p>Removes a specific field from an existing record.</p>
+        
+        <div class="example">
+            <h4>Example: Delete Last Name</h4>
+            <pre><code>
+fetch('https://api.vornify.se/api/vornifydb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        database_name: "VornifyDB",
+        collection_name: "users",
+        command: "--delete-field",
+        data: {
+            existing: {
+                id: "user_123"
+            },
+            field: "last_name"
+        }
+    })
+});</code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "modifiedCount": 1,
+        "matchedCount": 1
+    }
+}</code></pre>
+        </div>
+
+        <div class="example">
+            <h4>Example: Delete Nested Field</h4>
+            <pre><code>
+// Delete nested field using dot notation
+{
+    "command": "--delete-field",
+    "data": {
+        "existing": { "id": "user_123" },
+        "field": "address.zipcode"
+    }
+}</code></pre>
+        </div>
+
+        <h5>Important Notes:</h5>
+        <ul>
+            <li>Use dot notation for nested fields (e.g., "address.city", "profile.social.twitter")</li>
+            <li>The operation is atomic - it either succeeds completely or fails</li>
+            <li>Deleting a field permanently removes it from the record</li>
+            <li>Returns error if the record or field doesn't exist</li>
+            <li>Can be used with any level of nested data</li>
+        </ul>
+    </div>
+
     <h2>Response Formats</h2>
     <div class="example">
         <h4>Success Response</h4>

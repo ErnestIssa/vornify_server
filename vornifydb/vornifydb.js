@@ -152,7 +152,9 @@ class VortexDB {
                 '--update': this.updateRecord.bind(this),
                 '--delete': this.deleteRecord.bind(this),
                 '--verify': this.verifyRecord.bind(this),
-                '--append': this.appendRecord.bind(this)
+                '--append': this.appendRecord.bind(this),
+                '--update-field': this.updateField.bind(this),
+                '--delete-field': this.deleteField.bind(this)
             };
 
             const handler = commandMap[command];
@@ -359,6 +361,76 @@ class VortexDB {
             };
         } catch (error) {
             console.error('Error in appendRecord:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    // Add method to update specific field
+    async updateField(collection, data) {
+        try {
+            if (!data.existing || !data.field || !data.value) {
+                throw new Error("'existing', 'field', and 'value' are required");
+            }
+
+            // First verify the record exists
+            const existingRecord = await collection.findOne(data.existing);
+            if (!existingRecord) {
+                return {
+                    success: false,
+                    error: "Record not found"
+                };
+            }
+
+            // Use $set to update specific field
+            const result = await collection.updateOne(
+                data.existing,
+                { $set: { [data.field]: data.value } }
+            );
+            
+            return {
+                success: true,
+                data: result
+            };
+        } catch (error) {
+            console.error('Error in updateField:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    // Add method to delete specific field
+    async deleteField(collection, data) {
+        try {
+            if (!data.existing || !data.field) {
+                throw new Error("'existing' and 'field' are required");
+            }
+
+            // First verify the record exists
+            const existingRecord = await collection.findOne(data.existing);
+            if (!existingRecord) {
+                return {
+                    success: false,
+                    error: "Record not found"
+                };
+            }
+
+            // Use $unset to remove the field
+            const result = await collection.updateOne(
+                data.existing,
+                { $unset: { [data.field]: "" } }
+            );
+            
+            return {
+                success: true,
+                data: result
+            };
+        } catch (error) {
+            console.error('Error in deleteField:', error);
             return {
                 success: false,
                 error: error.message
