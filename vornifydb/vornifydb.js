@@ -1,10 +1,18 @@
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const ffprobePath = require('@ffmpeg-installer/ffmpeg').path;
 const fs = require('fs');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 class VortexDB {
     constructor() {
+        // Set ffmpeg paths
+        ffmpeg.setFfmpegPath(ffmpegPath);
+        ffmpeg.setFfprobePath(ffprobePath);
+
         this.dbCache = new Map();
         this.collectionCache = new Map();
         this.indexCache = new Set();
@@ -25,11 +33,17 @@ class VortexDB {
             this.client = new MongoClient(uri, {
                 maxPoolSize: 100,
                 minPoolSize: 20,
-                serverSelectionTimeoutMS: 5000,
-                connectTimeoutMS: 5000,
-                socketTimeoutMS: 5000,
+                serverSelectionTimeoutMS: 30000,
+                connectTimeoutMS: 30000,
+                socketTimeoutMS: 360000,
+                maxIdleTimeMS: 360000,
                 retryWrites: true,
                 retryReads: true,
+                writeConcern: {
+                    w: 1,
+                    j: true,
+                    wtimeout: 60000
+                }
             });
 
             await this.verifyConnection();
@@ -104,9 +118,14 @@ class VortexDB {
                     continue;
                 }
             }
+
+            // Create index for video chunks
+            const chunksCollection = this.client.db().collection('video_chunks');
+            await chunksCollection.createIndex({ videoId: 1, index: 1 });
+            await chunksCollection.createIndex({ type: 1 });
+
         } catch (error) {
-            // Log error but don't throw - indexes are helpful but not critical
-            console.warn('Warning: Error setting up indexes:', error.message);
+            console.error('Error setting up indexes:', error);
         }
     }
 
@@ -154,7 +173,10 @@ class VortexDB {
                 '--verify': this.verifyRecord.bind(this),
                 '--append': this.appendRecord.bind(this),
                 '--update-field': this.updateField.bind(this),
-                '--delete-field': this.deleteField.bind(this)
+                '--delete-field': this.deleteField.bind(this),
+                '--create_video': this.createVideo.bind(this),
+                '--delete_video': this.deleteVideo.bind(this),
+                '--get_video': this.getVideo.bind(this)
             };
 
             const handler = commandMap[command];
@@ -431,6 +453,180 @@ class VortexDB {
             };
         } catch (error) {
             console.error('Error in deleteField:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    async createVideo(collection, data) {
+        try {
+            if (!data.video || !data.metadata) {
+                throw new Error("Video data and metadata are required");
+            }
+
+            // Generate a unique video ID
+            const videoUUID = `video_${uuidv4()}`;
+
+            // Convert video to Buffer if it's base64
+            let videoBuffer;
+            try {
+                if (data.video.startsWith('data:video')) {
+                    const base64Data = data.video.split(',')[1];
+                    videoBuffer = Buffer.from(base64Data, 'base64');
+                } else {
+                    videoBuffer = Buffer.from(data.video);
+                }
+            } catch (error) {
+                throw new Error("Invalid video data format");
+            }
+
+            // Create smaller chunks
+            const chunkSize = 100 * 1024; // 100KB chunks
+            const chunks = [];
+            
+            for (let i = 0; i < videoBuffer.length; i += chunkSize) {
+                chunks.push(videoBuffer.slice(i, Math.min(i + chunkSize, videoBuffer.length)));
+            }
+
+            console.log(`Splitting video into ${chunks.length} chunks...`);
+
+            // Create video document with metadata
+            const videoDoc = {
+                videoId: videoUUID,
+                ...data.metadata,
+                size: videoBuffer.length,
+                created_at: new Date().toISOString(),
+                isPrivate: data.isPrivate ?? true,
+                chunkCount: chunks.length,
+                type: 'metadata'  // Add type field to distinguish metadata from chunks
+            };
+
+            // Create a separate collection for chunks
+            const chunksCollection = collection.s.db.collection('video_chunks');
+
+            // Insert metadata
+            await collection.insertOne(videoDoc);
+
+            // Then insert chunks in batches
+            const batchSize = 50;
+            for (let i = 0; i < chunks.length; i += batchSize) {
+                const batch = chunks.slice(i, i + batchSize).map((chunk, index) => ({
+                    videoId: videoUUID,
+                    index: i + index,
+                    data: chunk,  // chunk is already a Buffer
+                    type: 'chunk'
+                }));
+
+                await chunksCollection.insertMany(batch, { ordered: true });
+                console.log(`Uploaded chunks ${i} to ${Math.min(i + batchSize, chunks.length)}`);
+            }
+
+            return {
+                success: true,
+                data: {
+                    id: videoUUID,
+                    size: videoBuffer.length,
+                    filename: data.metadata.filename
+                }
+            };
+        } catch (error) {
+            console.error('Error in createVideo:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    async deleteVideo(collection, data) {
+        try {
+            if (!data.id) {
+                throw new Error("Video ID is required");
+            }
+
+            const result = await collection.deleteOne({ _id: data.id });
+            
+            return {
+                success: true,
+                data: result
+            };
+        } catch (error) {
+            console.error('Error in deleteVideo:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    async getVideo(collection, data) {
+        try {
+            if (!data.id) {
+                throw new Error("Video ID is required");
+            }
+
+            console.log('Fetching video with ID:', data.id);
+
+            // Get video metadata
+            const videoMetadata = await collection.findOne({ 
+                videoId: data.id,
+                type: 'metadata'
+            });
+
+            if (!videoMetadata) {
+                console.log('Video metadata not found');
+                throw new Error("Video not found");
+            }
+
+            console.log('Found video metadata:', videoMetadata.filename);
+
+            // Get chunks from separate collection
+            const chunksCollection = collection.s.db.collection('video_chunks');
+            const chunks = await chunksCollection
+                .find({ 
+                    videoId: data.id,
+                    type: 'chunk'
+                })
+                .sort({ index: 1 })
+                .toArray();
+
+            if (chunks.length === 0) {
+                console.log('No chunks found for video');
+                throw new Error("Video chunks not found");
+            }
+
+            console.log(`Found ${chunks.length} chunks`);
+
+            // Reconstruct video buffer
+            const bufferChunks = chunks.map(chunk => chunk.data.buffer);
+            const videoBuffer = Buffer.concat(bufferChunks);
+            
+            console.log(`Reconstructed video buffer size: ${videoBuffer.length} bytes`);
+            console.log(`Expected size from metadata: ${videoMetadata.size} bytes`);
+
+            // Verify the buffer contains valid video data
+            if (videoBuffer.length === 0 || videoBuffer.length !== videoMetadata.size) {
+                throw new Error("Invalid video data reconstructed");
+            }
+
+            // Convert to base64 with proper MIME type
+            const base64Video = `data:video/mp4;base64,${videoBuffer.toString('base64')}`;
+
+            return {
+                success: true,
+                data: {
+                    video: base64Video,
+                    metadata: {
+                        filename: videoMetadata.filename,
+                        size: videoBuffer.length,
+                        created_at: videoMetadata.created_at
+                    }
+                }
+            };
+        } catch (error) {
+            console.error('Error in getVideo:', error);
             return {
                 success: false,
                 error: error.message

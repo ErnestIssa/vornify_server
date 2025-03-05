@@ -19,9 +19,11 @@ app.use(cors({
     maxAge: 86400 // 24 hours
 }));
 
+// Increase payload size limit for video uploads (set to 200MB)
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ extended: true, limit: '200mb' }));
+
 // Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
 
 // Health check endpoint

@@ -739,6 +739,78 @@ fetch('https://api.vornify.se/api/vornifydb', {
         </ul>
     </div>
 
+    <div class="endpoint">
+        <h3>Video Operations</h3>
+        <p>Store and manage video files up to 3 minutes in length.</p>
+
+        <div class="example">
+            <h4>Create Video (--create_video)</h4>
+            <pre><code>
+fetch('https://api.vornify.se/api/vornifydb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        database_name: "VornifyDB",
+        collection_name: "videos",
+        command: "--create_video",
+        data: {
+            video: "base64_encoded_video_data",  // Base64 encoded video file
+            metadata: {
+                title: "My Video",
+                description: "Video description",
+                tags: ["tag1", "tag2"]
+            },
+            extractAudio: true,  // Optional: extract and store audio separately
+            isPrivate: true      // Optional: default is true
+        }
+    })
+});</code></pre>
+
+            <h5>Success Response:</h5>
+            <pre><code>{
+    "success": true,
+    "data": {
+        "id": "video_id",
+        "duration": 120.5,
+        "hasAudio": true
+    }
+}</code></pre>
+
+            <h5>Error Response:</h5>
+            <pre><code>{
+    "success": false,
+    "error": "Video duration exceeds 3 minutes limit"
+}</code></pre>
+        </div>
+
+        <div class="example">
+            <h4>Delete Video (--delete_video)</h4>
+            <pre><code>
+fetch('https://api.vornify.se/api/vornifydb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        database_name: "VornifyDB",
+        collection_name: "videos",
+        command: "--delete_video",
+        data: {
+            id: "video_id"
+        }
+    })
+});</code></pre>
+        </div>
+
+        <h5>Important Notes:</h5>
+        <ul>
+            <li>Maximum video duration: 3 minutes</li>
+            <li>Supported video formats: MP4, WebM, MOV</li>
+            <li>Videos must be base64 encoded when sending</li>
+            <li>Optional audio extraction available</li>
+            <li>Metadata can include any additional information</li>
+            <li>Videos are stored securely with access controls</li>
+        </ul>
+    </div>
+
     <h2>Response Formats</h2>
     <div class="example">
         <h4>Success Response</h4>
