@@ -546,11 +546,25 @@ class VortexDB {
                 throw new Error("Video ID is required");
             }
 
-            const result = await collection.deleteOne({ _id: data.id });
-            
+            // Delete metadata
+            const metadataResult = await collection.deleteOne({ 
+                videoId: data.id,
+                type: 'metadata'
+            });
+
+            // Delete chunks from chunks collection
+            const chunksCollection = collection.s.db.collection('video_chunks');
+            const chunksResult = await chunksCollection.deleteMany({ 
+                videoId: data.id,
+                type: 'chunk'
+            });
+
             return {
                 success: true,
-                data: result
+                data: {
+                    metadata: metadataResult,
+                    chunks: chunksResult
+                }
             };
         } catch (error) {
             console.error('Error in deleteVideo:', error);

@@ -35,6 +35,18 @@
             border-radius: 5px;
             margin: 10px 0;
         }
+        .code-block {
+            background-color: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .response-example {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #e8f5e9;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
@@ -739,76 +751,185 @@ fetch('https://api.vornify.se/api/vornifydb', {
         </ul>
     </div>
 
+    <h2>Video Operations</h2>
+
     <div class="endpoint">
-        <h3>Video Operations</h3>
-        <p>Store and manage video files up to 3 minutes in length.</p>
+        <h3>Upload Video</h3>
+        <p>Upload a video file to VornifyDB.</p>
+        
+        <h4>Endpoint</h4>
+        <code>POST /api/vornifydb</code>
 
-        <div class="example">
-            <h4>Create Video (--create_video)</h4>
-            <pre><code>
-fetch('https://api.vornify.se/api/vornifydb', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-        database_name: "VornifyDB",
-        collection_name: "videos",
-        command: "--create_video",
-        data: {
-            video: "base64_encoded_video_data",  // Base64 encoded video file
-            metadata: {
-                title: "My Video",
-                description: "Video description",
-                tags: ["tag1", "tag2"]
-            },
-            extractAudio: true,  // Optional: extract and store audio separately
-            isPrivate: true      // Optional: default is true
-        }
-    })
-});</code></pre>
+        <h4>Request Body</h4>
+        <pre class="code-block">
+{
+    "database_name": "VornifyDB",
+    "collection_name": "videos",
+    "command": "--create_video",
+    "data": {
+        "video": "data:video/mp4;base64,BASE64_ENCODED_VIDEO_DATA",
+        "metadata": {
+            "title": "Video Title",
+            "description": "Video Description",
+            "tags": ["tag1", "tag2"],
+            "filename": "video.mp4"
+        },
+        "isPrivate": true
+    }
+}
+        </pre>
 
-            <h5>Success Response:</h5>
-            <pre><code>{
+        <h4>Response</h4>
+        <pre class="response-example">
+{
     "success": true,
     "data": {
-        "id": "video_id",
-        "duration": 120.5,
-        "hasAudio": true
+        "id": "video_uuid",
+        "size": 1048576,
+        "filename": "video.mp4"
     }
-}</code></pre>
+}
+        </pre>
+    </div>
 
-            <h5>Error Response:</h5>
-            <pre><code>{
-    "success": false,
-    "error": "Video duration exceeds 3 minutes limit"
-}</code></pre>
-        </div>
+    <div class="endpoint">
+        <h3>Get Video by UUID</h3>
+        <p>Retrieve a video using its UUID.</p>
+        
+        <h4>Endpoint</h4>
+        <code>POST /api/vornifydb</code>
 
-        <div class="example">
-            <h4>Delete Video (--delete_video)</h4>
-            <pre><code>
-fetch('https://api.vornify.se/api/vornifydb', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-        database_name: "VornifyDB",
-        collection_name: "videos",
-        command: "--delete_video",
-        data: {
-            id: "video_id"
+        <h4>Request Body</h4>
+        <pre class="code-block">
+{
+    "database_name": "VornifyDB",
+    "collection_name": "videos",
+    "command": "--get_video",
+    "data": {
+        "id": "video_uuid"
+    }
+}
+        </pre>
+
+        <h4>Response</h4>
+        <pre class="response-example">
+{
+    "success": true,
+    "data": {
+        "video": "data:video/mp4;base64,BASE64_ENCODED_VIDEO_DATA",
+        "metadata": {
+            "filename": "video.mp4",
+            "size": 1048576,
+            "created_at": "2024-03-04T12:00:00.000Z"
         }
-    })
-});</code></pre>
-        </div>
+    }
+}
+        </pre>
+    </div>
 
-        <h5>Important Notes:</h5>
-        <ul>
-            <li>Maximum video duration: 3 minutes</li>
-            <li>Supported video formats: MP4, WebM, MOV</li>
-            <li>Videos must be base64 encoded when sending</li>
-            <li>Optional audio extraction available</li>
-            <li>Metadata can include any additional information</li>
-            <li>Videos are stored securely with access controls</li>
-        </ul>
+    <div class="endpoint">
+        <h3>Get All Videos</h3>
+        <p>Retrieve all videos from a collection.</p>
+        
+        <h4>Endpoint</h4>
+        <code>POST /api/vornifydb</code>
+
+        <h4>Request Body</h4>
+        <pre class="code-block">
+{
+    "database_name": "VornifyDB",
+    "collection_name": "videos",
+    "command": "--read",
+    "data": {
+        "query": {
+            "type": "metadata"
+        }
+    }
+}
+        </pre>
+
+        <h4>Response</h4>
+        <pre class="response-example">
+{
+    "success": true,
+    "data": [
+        {
+            "videoId": "video_uuid1",
+            "title": "Video 1",
+            "filename": "video1.mp4",
+            "size": 1048576,
+            "created_at": "2024-03-04T12:00:00.000Z"
+        },
+        {
+            "videoId": "video_uuid2",
+            "title": "Video 2",
+            "filename": "video2.mp4",
+            "size": 2097152,
+            "created_at": "2024-03-04T13:00:00.000Z"
+        }
+    ]
+}
+        </pre>
+    </div>
+
+    <div class="endpoint">
+        <h3>Delete Video</h3>
+        <p>Delete a video using its UUID.</p>
+        
+        <h4>Endpoint</h4>
+        <code>POST /api/vornifydb</code>
+
+        <h4>Request Body</h4>
+        <pre class="code-block">
+{
+    "database_name": "VornifyDB",
+    "collection_name": "videos",
+    "command": "--delete_video",
+    "data": {
+        "id": "video_uuid"
+    }
+}
+        </pre>
+
+        <h4>Response</h4>
+        <pre class="response-example">
+{
+    "success": true,
+    "data": {
+        "acknowledged": true,
+        "deletedCount": 1
+    }
+}
+        </pre>
+    </div>
+
+    <div class="endpoint">
+        <h3>Error Responses</h3>
+        <p>Example error responses for video operations.</p>
+        
+        <h4>Video Not Found</h4>
+        <pre class="response-example">
+{
+    "success": false,
+    "error": "Video not found"
+}
+        </pre>
+
+        <h4>Invalid Video Data</h4>
+        <pre class="response-example">
+{
+    "success": false,
+    "error": "Invalid video data format"
+}
+        </pre>
+
+        <h4>Missing Required Fields</h4>
+        <pre class="response-example">
+{
+    "success": false,
+    "error": "Video data and metadata are required"
+}
+        </pre>
     </div>
 
     <h2>Response Formats</h2>
