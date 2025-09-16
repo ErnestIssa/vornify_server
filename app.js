@@ -5,10 +5,11 @@ const dbRoutes = require('./routes/db');
 const paymentRoutes = require('./routes/payment');
 const storageRoutes = require('./routes/storage');
 const emailRoutes = require('./routes/email');
+const uploadRoutes = require('./routes/upload');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3010;
+const port = process.env.PORT || 10000;
 
 // CORS configuration for production
 app.use(cors({
@@ -25,6 +26,7 @@ app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
 // Middleware
 app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve uploaded images
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -41,6 +43,7 @@ app.use('/api/vornifydb', dbRoutes);
 app.use('/api/vornifypay', paymentRoutes);
 app.use('/api/storage', storageRoutes);
 app.use('/api/email', emailRoutes);
+app.use('/api/upload', uploadRoutes);
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
