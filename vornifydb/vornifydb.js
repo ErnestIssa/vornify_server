@@ -55,6 +55,39 @@ class VortexDB {
         }
     }
 
+    // Utility function to convert string _id to ObjectId
+    convertObjectId(query) {
+        if (query && typeof query === 'object') {
+            // Handle direct _id field
+            if (query._id && typeof query._id === 'string') {
+                try {
+                    query._id = new ObjectId(query._id);
+                } catch (error) {
+                    console.warn('Invalid ObjectId string:', query._id);
+                }
+            }
+            
+            // Handle nested _id fields (e.g., in filter objects)
+            if (query.filter && query.filter._id && typeof query.filter._id === 'string') {
+                try {
+                    query.filter._id = new ObjectId(query.filter._id);
+                } catch (error) {
+                    console.warn('Invalid ObjectId string in filter:', query.filter._id);
+                }
+            }
+            
+            // Handle existing field in update operations
+            if (query.existing && query.existing._id && typeof query.existing._id === 'string') {
+                try {
+                    query.existing._id = new ObjectId(query.existing._id);
+                } catch (error) {
+                    console.warn('Invalid ObjectId string in existing:', query.existing._id);
+                }
+            }
+        }
+        return query;
+    }
+
     async verifyConnection(maxRetries = 3, initialDelay = 1000) {
         for (let attempt = 0; attempt < maxRetries; attempt++) {
             try {
@@ -191,6 +224,11 @@ class VortexDB {
                 } else if (Array.isArray(data)) {
                     data.forEach(item => item.isPrivate = item.isPrivate ?? true);
                 }
+            }
+
+            // Convert string _id to ObjectId for query operations
+            if (['--read', '--update', '--delete', '--verify', '--update-field', '--delete-field'].includes(command)) {
+                data = this.convertObjectId(data);
             }
 
             // Implement retry logic
