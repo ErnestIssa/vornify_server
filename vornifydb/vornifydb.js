@@ -298,7 +298,7 @@ class VortexDB {
                 });
                 
                 return {
-                    status: true,
+                    success: true,
                     data: formattedResults
                 };
             }
@@ -308,7 +308,7 @@ class VortexDB {
             
             if (!result) {
                 return {
-                    status: false,
+                    success: false,
                     error: 'Record not found'
                 };
             }
@@ -323,14 +323,14 @@ class VortexDB {
             }
 
             return {
-                status: true,
+                success: true,
                 data: result
             };
             
         } catch (error) {
             console.error('Error in readRecords:', error);
             return {
-                status: false,
+                success: false,
                 error: error.message
             };
         }
