@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const VornifyDB = require('../vornifydb/vornifydb');
+const VortexDB = require('../vornifydb/vornifydb');
 
-const db = new VornifyDB();
+const db = new VortexDB();
 
 router.post('/', async (req, res) => {
     try {
@@ -11,7 +11,7 @@ router.post('/', async (req, res) => {
     } catch (error) {
         console.error('Database operation error:', error);
         res.status(500).json({
-            status: false,
+            success: false,
             error: 'Internal server error'
         });
     }

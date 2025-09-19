@@ -55,51 +55,6 @@ class VortexDB {
         }
     }
 
-    // Utility function to convert string _id to ObjectId
-    convertObjectId(query) {
-        try {
-            if (!query || typeof query !== 'object') {
-                return query;
-            }
-            
-            // Create a new object to avoid modifying the original
-            const convertedQuery = Object.assign({}, query);
-            
-            // Handle direct _id field
-            if (convertedQuery._id && typeof convertedQuery._id === 'string') {
-                try {
-                    convertedQuery._id = new ObjectId(convertedQuery._id);
-                } catch (error) {
-                    console.warn('Invalid ObjectId string:', convertedQuery._id, error.message);
-                }
-            }
-            
-            // Handle nested _id fields (e.g., in filter objects)
-            if (convertedQuery.filter && convertedQuery.filter._id && typeof convertedQuery.filter._id === 'string') {
-                convertedQuery.filter = Object.assign({}, convertedQuery.filter);
-                try {
-                    convertedQuery.filter._id = new ObjectId(convertedQuery.filter._id);
-                } catch (error) {
-                    console.warn('Invalid ObjectId string in filter:', convertedQuery.filter._id, error.message);
-                }
-            }
-            
-            // Handle existing field in update operations
-            if (convertedQuery.existing && convertedQuery.existing._id && typeof convertedQuery.existing._id === 'string') {
-                convertedQuery.existing = Object.assign({}, convertedQuery.existing);
-                try {
-                    convertedQuery.existing._id = new ObjectId(convertedQuery.existing._id);
-                } catch (error) {
-                    console.warn('Invalid ObjectId string in existing:', convertedQuery.existing._id, error.message);
-                }
-            }
-            
-            return convertedQuery;
-        } catch (error) {
-            console.error('Error in convertObjectId:', error);
-            return query; // Return original query if conversion fails
-        }
-    }
 
     async verifyConnection(maxRetries = 3, initialDelay = 1000) {
         for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -200,7 +155,8 @@ class VortexDB {
 
     async executeOperation(requestData) {
         try {
-            const { database_name = 'VortexDB', collection_name, command, data = {} } = requestData;
+            const { database_name = 'VortexDB', collection_name, command } = requestData;
+            let { data = {} } = requestData;
 
             if (!collection_name) {
                 return { status: false, message: 'Collection name is required' };
@@ -239,15 +195,6 @@ class VortexDB {
                 }
             }
 
-            // Convert string _id to ObjectId for query operations (except read for now)
-            if (['--update', '--delete', '--verify', '--update-field', '--delete-field'].includes(command)) {
-                data = this.convertObjectId(data);
-            }
-            
-            // For read operations, only convert if there's actually an _id field
-            if (command === '--read' && data && data._id) {
-                data = this.convertObjectId(data);
-            }
 
             // Implement retry logic
             const maxRetries = 3;
@@ -358,7 +305,14 @@ class VortexDB {
     // Update Record
     async updateRecord(collection, data) {
         try {
-            const result = await collection.updateOne({}, { $set: data });
+            if (!data.filter || !data.update) {
+                return {
+                    success: false,
+                    error: 'Filter and update fields are required'
+                };
+            }
+            
+            const result = await collection.updateOne(data.filter, { $set: data.update });
             
             return {
                 success: true,
