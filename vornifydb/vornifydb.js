@@ -57,35 +57,48 @@ class VortexDB {
 
     // Utility function to convert string _id to ObjectId
     convertObjectId(query) {
-        if (query && typeof query === 'object') {
+        try {
+            if (!query || typeof query !== 'object') {
+                return query;
+            }
+            
+            // Create a new object to avoid modifying the original
+            const convertedQuery = Object.assign({}, query);
+            
             // Handle direct _id field
-            if (query._id && typeof query._id === 'string') {
+            if (convertedQuery._id && typeof convertedQuery._id === 'string') {
                 try {
-                    query._id = new ObjectId(query._id);
+                    convertedQuery._id = new ObjectId(convertedQuery._id);
                 } catch (error) {
-                    console.warn('Invalid ObjectId string:', query._id);
+                    console.warn('Invalid ObjectId string:', convertedQuery._id, error.message);
                 }
             }
             
             // Handle nested _id fields (e.g., in filter objects)
-            if (query.filter && query.filter._id && typeof query.filter._id === 'string') {
+            if (convertedQuery.filter && convertedQuery.filter._id && typeof convertedQuery.filter._id === 'string') {
+                convertedQuery.filter = Object.assign({}, convertedQuery.filter);
                 try {
-                    query.filter._id = new ObjectId(query.filter._id);
+                    convertedQuery.filter._id = new ObjectId(convertedQuery.filter._id);
                 } catch (error) {
-                    console.warn('Invalid ObjectId string in filter:', query.filter._id);
+                    console.warn('Invalid ObjectId string in filter:', convertedQuery.filter._id, error.message);
                 }
             }
             
             // Handle existing field in update operations
-            if (query.existing && query.existing._id && typeof query.existing._id === 'string') {
+            if (convertedQuery.existing && convertedQuery.existing._id && typeof convertedQuery.existing._id === 'string') {
+                convertedQuery.existing = Object.assign({}, convertedQuery.existing);
                 try {
-                    query.existing._id = new ObjectId(query.existing._id);
+                    convertedQuery.existing._id = new ObjectId(convertedQuery.existing._id);
                 } catch (error) {
-                    console.warn('Invalid ObjectId string in existing:', query.existing._id);
+                    console.warn('Invalid ObjectId string in existing:', convertedQuery.existing._id, error.message);
                 }
             }
+            
+            return convertedQuery;
+        } catch (error) {
+            console.error('Error in convertObjectId:', error);
+            return query; // Return original query if conversion fails
         }
-        return query;
     }
 
     async verifyConnection(maxRetries = 3, initialDelay = 1000) {
@@ -226,8 +239,13 @@ class VortexDB {
                 }
             }
 
-            // Convert string _id to ObjectId for query operations
-            if (['--read', '--update', '--delete', '--verify', '--update-field', '--delete-field'].includes(command)) {
+            // Convert string _id to ObjectId for query operations (except read for now)
+            if (['--update', '--delete', '--verify', '--update-field', '--delete-field'].includes(command)) {
+                data = this.convertObjectId(data);
+            }
+            
+            // For read operations, only convert if there's actually an _id field
+            if (command === '--read' && data && data._id) {
                 data = this.convertObjectId(data);
             }
 
@@ -250,6 +268,7 @@ class VortexDB {
             }
         } catch (error) {
             console.error('Execute operation error:', error);
+            console.error('Error details:', error.stack);
             return { status: false, message: 'Request could not be processed' };
         }
     }
