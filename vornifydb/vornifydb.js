@@ -188,8 +188,11 @@ class VortexDB {
 
             // Handle isPrivate flag for create operations
             if (command === '--create') {
-                if (typeof data === 'object') {
-                    data.isPrivate = data.isPrivate ?? true;
+                if (typeof data === 'object' && !Array.isArray(data)) {
+                    // Create a deep copy to avoid mutation
+                    const dataCopy = JSON.parse(JSON.stringify(data));
+                    dataCopy.isPrivate = dataCopy.isPrivate ?? true;
+                    data = dataCopy;
                 } else if (Array.isArray(data)) {
                     data.forEach(item => item.isPrivate = item.isPrivate ?? true);
                 }
@@ -220,9 +223,111 @@ class VortexDB {
         }
     }
 
+    // Process Inventory Data
+    processInventoryData(data) {
+        try {
+            if (!data.inventory) {
+                return data;
+            }
+
+            const inventory = data.inventory;
+            
+            // Validate required inventory structure
+            if (!inventory.colors || !Array.isArray(inventory.colors)) {
+                throw new Error('Inventory must have a colors array');
+            }
+            if (!inventory.sizes || !Array.isArray(inventory.sizes)) {
+                throw new Error('Inventory must have a sizes array');
+            }
+            if (!inventory.variants || !Array.isArray(inventory.variants)) {
+                throw new Error('Inventory must have a variants array');
+            }
+
+            // Create a deep copy to avoid mutation issues
+            const processedData = JSON.parse(JSON.stringify(data));
+            const processedInventory = processedData.inventory;
+
+            // Process colors
+            processedInventory.colors = processedInventory.colors.map((color, index) => {
+                return {
+                    id: color.id || `color_${Date.now()}_${index}`,
+                    name: color.name || 'Unnamed Color',
+                    hex: color.hex || '#000000',
+                    available: color.available !== undefined ? color.available : true,
+                    sortOrder: color.sortOrder !== undefined ? color.sortOrder : index
+                };
+            });
+
+            // Process sizes
+            processedInventory.sizes = processedInventory.sizes.map((size, index) => {
+                return {
+                    id: size.id || `size_${Date.now()}_${index}`,
+                    name: size.name || 'Unnamed Size',
+                    description: size.description || '',
+                    available: size.available !== undefined ? size.available : true,
+                    sortOrder: size.sortOrder !== undefined ? size.sortOrder : index
+                };
+            });
+
+            // Process variants
+            processedInventory.variants = processedInventory.variants.map((variant, index) => {
+                // Find corresponding color and size
+                const color = processedInventory.colors.find(c => c.id === variant.colorId);
+                const size = processedInventory.sizes.find(s => s.id === variant.sizeId);
+                
+                if (!color || !size) {
+                    throw new Error(`Variant ${index}: Invalid colorId or sizeId`);
+                }
+
+                // Generate SKU if not provided
+                const sku = variant.sku || this.generateSKU(processedData.name, color.name, size.name);
+
+                return {
+                    id: variant.id || `variant_${color.id}_${size.id}`,
+                    colorId: variant.colorId,
+                    sizeId: variant.sizeId,
+                    sku: sku,
+                    quantity: variant.quantity || 0,
+                    price: variant.price !== undefined ? variant.price : processedData.price,
+                    available: variant.available !== undefined ? variant.available : true
+                };
+            });
+
+            // Calculate total quantity
+            processedInventory.totalQuantity = processedInventory.variants.reduce((total, variant) => {
+                return total + (variant.quantity || 0);
+            }, 0);
+
+            // Set trackPerVariant flag
+            processedInventory.trackPerVariant = processedInventory.trackPerVariant !== undefined ? processedInventory.trackPerVariant : true;
+
+            // Add timestamp
+            processedInventory.lastUpdated = new Date().toISOString();
+
+            return processedData;
+        } catch (error) {
+            console.error('Error processing inventory data:', error);
+            throw new Error(`Inventory processing failed: ${error.message}`);
+        }
+    }
+
+    // Generate SKU
+    generateSKU(productName, colorName, sizeName) {
+        const productPrefix = productName ? productName.replace(/[^A-Z0-9]/gi, '').substring(0, 6).toUpperCase() : 'PROD';
+        const colorPrefix = colorName ? colorName.replace(/[^A-Z0-9]/gi, '').substring(0, 3).toUpperCase() : 'COL';
+        const sizePrefix = sizeName ? sizeName.replace(/[^A-Z0-9]/gi, '').substring(0, 2).toUpperCase() : 'SZ';
+        
+        return `${productPrefix}-${colorPrefix}-${sizePrefix}`;
+    }
+
     // Create Record
     async createRecord(collection, data) {
         try {
+            // Process inventory data if present
+            if (data.inventory) {
+                data = this.processInventoryData(data);
+            }
+            
             const result = await collection.insertOne(data);
             
             return {
@@ -243,6 +348,11 @@ class VortexDB {
         try {
             let query = data || {};
             let result;
+            
+            // Check for inventory-specific queries
+            if (data && data.inventoryFilter) {
+                return await this.handleInventoryQuery(collection, data);
+            }
             
             // If data is empty or undefined, return all records
             if (!data || Object.keys(data).length === 0) {
@@ -302,6 +412,88 @@ class VortexDB {
         }
     }
 
+    // Handle Inventory Query
+    async handleInventoryQuery(collection, data) {
+        try {
+            const { inventoryFilter } = data;
+            let query = { ...data };
+            delete query.inventoryFilter;
+
+            // Build inventory-specific query - only include products that have inventory
+            query['inventory'] = { $exists: true };
+
+            if (inventoryFilter.availableOnly) {
+                query['inventory.variants.available'] = true;
+            }
+
+            if (inventoryFilter.minQuantity) {
+                query['inventory.variants.quantity'] = { $gte: inventoryFilter.minQuantity };
+            }
+
+            if (inventoryFilter.colorId) {
+                query['inventory.variants.colorId'] = inventoryFilter.colorId;
+            }
+
+            if (inventoryFilter.sizeId) {
+                query['inventory.variants.sizeId'] = inventoryFilter.sizeId;
+            }
+
+            if (inventoryFilter.sku) {
+                query['inventory.variants.sku'] = inventoryFilter.sku;
+            }
+
+            // Execute query
+            const result = await collection.find(query).toArray();
+
+            // Format results
+            const formattedResults = result.map(doc => {
+                doc._id = doc._id.toString();
+                
+                // Filter variants based on inventory filter
+                if (doc.inventory && doc.inventory.variants) {
+                    let filteredVariants = doc.inventory.variants;
+
+                    if (inventoryFilter.availableOnly) {
+                        filteredVariants = filteredVariants.filter(v => v.available);
+                    }
+
+                    if (inventoryFilter.minQuantity) {
+                        filteredVariants = filteredVariants.filter(v => v.quantity >= inventoryFilter.minQuantity);
+                    }
+
+                    if (inventoryFilter.colorId) {
+                        filteredVariants = filteredVariants.filter(v => v.colorId === inventoryFilter.colorId);
+                    }
+
+                    if (inventoryFilter.sizeId) {
+                        filteredVariants = filteredVariants.filter(v => v.sizeId === inventoryFilter.sizeId);
+                    }
+
+                    if (inventoryFilter.sku) {
+                        filteredVariants = filteredVariants.filter(v => v.sku === inventoryFilter.sku);
+                    }
+
+                    // Update total quantity based on filtered variants
+                    doc.inventory.totalQuantity = filteredVariants.reduce((total, variant) => total + variant.quantity, 0);
+                    doc.inventory.variants = filteredVariants;
+                }
+
+                return doc;
+            });
+
+            return {
+                success: true,
+                data: formattedResults
+            };
+        } catch (error) {
+            console.error('Error in handleInventoryQuery:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
     // Update Record
     async updateRecord(collection, data) {
         try {
@@ -310,6 +502,11 @@ class VortexDB {
                     success: false,
                     error: 'Filter and update fields are required'
                 };
+            }
+            
+            // Process inventory data if present in update
+            if (data.update.inventory) {
+                data.update = this.processInventoryData(data.update);
             }
             
             const result = await collection.updateOne(data.filter, { $set: data.update });
@@ -660,4 +857,4 @@ class VortexDB {
     }
 }
 
-module.exports = VortexDB; 
+module.exports = VortexDB;  i c
