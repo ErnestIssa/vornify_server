@@ -6,6 +6,7 @@ const paymentRoutes = require('./routes/payment');
 const storageRoutes = require('./routes/storage');
 const emailRoutes = require('./routes/email');
 const uploadRoutes = require('./routes/upload');
+const { createAdminRouter } = require('./admin');
 require('dotenv').config();
 
 const app = express();
@@ -36,6 +37,14 @@ app.get('/health', (req, res) => {
 // API documentation endpoint
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/vornifypay/doc_pay.html');
+});
+
+// AdminJS route (must be before other routes)
+createAdminRouter().then(({ adminJs, adminRouter }) => {
+    app.use(adminJs.options.rootPath, adminRouter);
+    console.log(`AdminJS available at http://localhost:${port}${adminJs.options.rootPath}`);
+}).catch(err => {
+    console.error('Failed to create AdminJS router:', err);
 });
 
 // Routes
