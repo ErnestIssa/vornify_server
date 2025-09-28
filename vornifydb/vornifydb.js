@@ -857,4 +857,4 @@ class VortexDB {
     }
 }
 
-module.exports = VortexDB;  i c
+module.exports = VortexDB;
