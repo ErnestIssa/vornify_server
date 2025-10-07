@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Request - Peak Mode</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Arial', sans-serif;
+            background-color: #f8f9fa;
+            color: #333;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+        }
+        .header {
+            background: linear-gradient(135deg, #000000 0%, #333333 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+        }
+        .logo {
+            font-size: 32px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+        }
+        .tagline {
+            font-size: 14px;
+            opacity: 0.9;
+            letter-spacing: 1px;
+        }
+        .content {
+            padding: 40px 30px;
+        }
+        .greeting {
+            font-size: 24px;
+            font-weight: bold;
+            color: #000;
+            margin-bottom: 20px;
+        }
+        .review-badge {
+            background-color: #ffc107;
+            color: #000;
+            padding: 15px 25px;
+            border-radius: 25px;
+            display: inline-block;
+            font-weight: bold;
+            margin: 20px 0;
+            text-align: center;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .review-section {
+            background-color: #f8f9fa;
+            padding: 30px;
+            border-radius: 8px;
+            margin: 30px 0;
+            text-align: center;
+            border-left: 4px solid #000;
+        }
+        .review-section h3 {
+            color: #000;
+            margin: 0 0 20px 0;
+            font-size: 20px;
+        }
+        .review-message {
+            font-size: 16px;
+            color: #666;
+            margin: 20px 0;
+            line-height: 1.6;
+        }
+        .stars {
+            font-size: 24px;
+            color: #ffc107;
+            margin: 20px 0;
+        }
+        .cta-button {
+            display: inline-block;
+            background-color: #000;
+            color: white;
+            padding: 15px 30px;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+            margin: 20px 0;
+            text-align: center;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .cta-button:hover {
+            background-color: #333;
+        }
+        .cta-button.secondary {
+            background-color: #ffc107;
+            color: #000;
+        }
+        .cta-button.secondary:hover {
+            background-color: #e0a800;
+        }
+        .benefits {
+            background-color: #e8f5e8;
+            padding: 25px;
+            border-radius: 8px;
+            margin: 30px 0;
+        }
+        .benefits h3 {
+            color: #000;
+            margin: 0 0 15px 0;
+            font-size: 18px;
+        }
+        .benefits ul {
+            margin: 0;
+            padding-left: 20px;
+            color: #666;
+        }
+        .benefits li {
+            margin: 10px 0;
+        }
+        .social-section {
+            background-color: #f8f9fa;
+            padding: 30px;
+            border-radius: 8px;
+            margin: 30px 0;
+            text-align: center;
+        }
+        .social-section h3 {
+            color: #000;
+            margin: 0 0 20px 0;
+            font-size: 18px;
+        }
+        .social-buttons {
+            margin: 20px 0;
+        }
+        .social-buttons a {
+            display: inline-block;
+            background-color: #000;
+            color: white;
+            padding: 12px 25px;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+            margin: 5px 10px;
+        }
+        .social-buttons a:hover {
+            background-color: #333;
+        }
+        .footer {
+            background-color: #f8f9fa;
+            padding: 30px;
+            text-align: center;
+            border-top: 1px solid #eee;
+        }
+        .footer p {
+            margin: 5px 0;
+            color: #666;
+            font-size: 14px;
+        }
+        .social-links {
+            margin: 20px 0;
+        }
+        .social-links a {
+            color: #000;
+            text-decoration: none;
+            margin: 0 10px;
+            font-weight: bold;
+        }
+        .unsubscribe {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #999;
+        }
+        .unsubscribe a {
+            color: #999;
+            text-decoration: none;
+        }
+        @media (max-width: 600px) {
+            .container {
+                width: 100% !important;
+            }
+            .content {
+                padding: 20px 15px;
+            }
+            .header {
+                padding: 30px 20px;
+            }
+            .logo {
+                font-size: 28px;
+            }
+            .social-buttons a {
+                display: block;
+                margin: 10px 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">PEAK MODE</div>
+            <div class="tagline">NO LIMITS. JUST PEAKS</div>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">How Was Your Peak Mode Gear?</div>
+            
+            <div class="review-badge">⭐ REVIEW REQUEST</div>
+            
+            <p>Hi {{customer_name}},</p>
+            
+            <div class="review-section">
+                <h3>We'd Love to Hear Your Feedback!</h3>
+                <div class="review-message">
+                    We hope you're enjoying your Peak Mode gear! Your experience matters to us and helps other athletes make informed decisions about their training equipment.
+                </div>
+                <div class="stars">⭐⭐⭐⭐⭐</div>
+                <p>Please take a moment to share your thoughts about your recent purchase.</p>
+            </div>
+            
+            <div class="benefits">
+                <h3>Why Your Review Matters</h3>
+                <ul>
+                    <li>Help other athletes find the perfect gear</li>
+                    <li>Share your training experience and results</li>
+                    <li>Help us improve our products and service</li>
+                    <li>Join our community of Peak Mode athletes</li>
+                </ul>
+            </div>
+            
+            <a href="{{review_url}}" class="cta-button">Leave a Review</a>
+            <a href="{{website_url}}" class="cta-button secondary">Shop More Gear</a>
+            
+            <div class="social-section">
+                <h3>Share Your Peak Mode Journey</h3>
+                <p>We'd love to see you in action! Tag us in your photos and stories to be featured on our social media.</p>
+                <div class="social-buttons">
+                    <a href="{{instagram_url}}">Follow on Instagram</a>
+                    <a href="{{tiktok_url}}">Follow on TikTok</a>
+                </div>
+            </div>
+            
+            <p><strong>Questions About Your Order?</strong></p>
+            <p>If you have any questions about your Peak Mode products or need assistance, please don't hesitate to contact us at <strong>support@peakmode.se</strong></p>
+            
+            <p>Thank you for being part of the Peak Mode community!</p>
+            <p><strong>The Peak Mode Team</strong></p>
+        </div>
+        
+        <div class="footer">
+            <div class="social-links">
+                <a href="{{website_url}}">Website</a>
+                <a href="{{instagram_url}}">Instagram</a>
+                <a href="{{tiktok_url}}">TikTok</a>
+            </div>
+            
+            <p><strong>Peak Mode</strong></p>
+            <p>No Limits. Just Peaks</p>
+            <p>Kapellgatan 10, 746 49 Uppsala, Sweden</p>
+            <p>support@peakmode.se</p>
+            
+            <div class="unsubscribe">
+                <p>You received this email because you made a purchase from Peak Mode.</p>
+                <p><a href="{{unsubscribe_url}}">Unsubscribe</a> | <a href="{{privacy_url}}">Privacy Policy</a></p>
+                <p>&copy; {{year}} Peak Mode. All rights reserved.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

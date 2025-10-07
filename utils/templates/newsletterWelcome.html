@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Welcome to Peak Mode</title>
+  <style>
+    body {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      background-color: #f9f9f9;
+      color: #111;
+      margin: 0;
+      padding: 0;
+    }
+    .container {
+      max-width: 600px;
+      margin: 40px auto;
+      background-color: #ffffff;
+      border-radius: 12px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+      overflow: hidden;
+    }
+    .header {
+      background-color: #000;
+      color: #fff;
+      text-align: center;
+      padding: 40px 20px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 1px;
+    }
+    .content {
+      padding: 30px;
+      line-height: 1.6;
+      text-align: center;
+    }
+    .content h2 {
+      font-size: 22px;
+      margin-top: 0;
+    }
+    .discount-box {
+      background-color: #f4f4f4;
+      border-radius: 10px;
+      padding: 20px;
+      margin: 25px 0;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      color: #000;
+    }
+    .discount-code {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: #000;
+      margin-top: 10px;
+    }
+    .button {
+      display: inline-block;
+      background-color: #000;
+      color: #fff !important;
+      text-decoration: none;
+      padding: 14px 30px;
+      border-radius: 6px;
+      margin-top: 25px;
+      font-weight: 600;
+      font-size: 16px;
+    }
+    .footer {
+      background-color: #000;
+      color: #fff;
+      text-align: center;
+      padding: 20px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Welcome to Peak Mode</h1>
+      <p>No Limits. Just Peaks.</p>
+    </div>
+
+    <div class="content">
+      <h2>Hey {{customer_name}},</h2>
+      <p>Welcome to the movement — where limits break and new levels begin.</p>
+      <p>As promised, here's your exclusive <strong>10% OFF</strong> discount for your first order.</p>
+
+      <div class="discount-box">
+        Your Unique Discount Code:
+        <div class="discount-code">{{discount_code}}</div>
+        <p style="font-size:14px; color:#555;">Use this code at checkout. Valid for one-time use only.</p>
+      </div>
+
+      <a href="{{website_url}}" class="button">Shop Now & Activate Discount</a>
+
+      <p style="margin-top:25px;">Because discipline deserves rewards — and your next level starts now.</p>
+    </div>
+
+    <div class="footer">
+      <p>Peak Mode © {{year}} | No Limits. Just Peaks.</p>
+      <p><a href="{{website_url}}" style="color:#fff; text-decoration:underline;">Visit Our Store</a></p>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order Confirmation - Peak Mode</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Arial', sans-serif;
+            background-color: #f8f9fa;
+            color: #333;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+        }
+        .header {
+            background: linear-gradient(135deg, #000000 0%, #333333 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+        }
+        .logo {
+            font-size: 32px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+        }
+        .tagline {
+            font-size: 14px;
+            opacity: 0.9;
+            letter-spacing: 1px;
+        }
+        .content {
+            padding: 40px 30px;
+        }
+        .greeting {
+            font-size: 24px;
+            font-weight: bold;
+            color: #000;
+            margin-bottom: 20px;
+        }
+        .order-number {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            text-align: center;
+            border-left: 4px solid #000;
+        }
+        .order-number h3 {
+            margin: 0 0 10px 0;
+            color: #000;
+            font-size: 18px;
+        }
+        .order-number .number {
+            font-size: 24px;
+            font-weight: bold;
+            color: #000;
+            letter-spacing: 2px;
+        }
+        .order-details {
+            margin: 30px 0;
+        }
+        .order-details h3 {
+            color: #000;
+            font-size: 18px;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #000;
+            padding-bottom: 5px;
+        }
+        .item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .item:last-child {
+            border-bottom: none;
+        }
+        .item-name {
+            font-weight: 500;
+            color: #000;
+        }
+        .item-price {
+            font-weight: bold;
+            color: #000;
+        }
+        .total {
+            background-color: #000;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .total h3 {
+            margin: 0 0 10px 0;
+            font-size: 18px;
+        }
+        .total .amount {
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .shipping-info {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .shipping-info h3 {
+            color: #000;
+            margin: 0 0 15px 0;
+            font-size: 16px;
+        }
+        .address {
+            line-height: 1.6;
+            color: #666;
+        }
+        .cta-button {
+            display: inline-block;
+            background-color: #000;
+            color: white;
+            padding: 15px 30px;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+            margin: 20px 0;
+            text-align: center;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .cta-button:hover {
+            background-color: #333;
+        }
+        .footer {
+            background-color: #f8f9fa;
+            padding: 30px;
+            text-align: center;
+            border-top: 1px solid #eee;
+        }
+        .footer p {
+            margin: 5px 0;
+            color: #666;
+            font-size: 14px;
+        }
+        .social-links {
+            margin: 20px 0;
+        }
+        .social-links a {
+            color: #000;
+            text-decoration: none;
+            margin: 0 10px;
+            font-weight: bold;
+        }
+        .unsubscribe {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #999;
+        }
+        .unsubscribe a {
+            color: #999;
+            text-decoration: none;
+        }
+        @media (max-width: 600px) {
+            .container {
+                width: 100% !important;
+            }
+            .content {
+                padding: 20px 15px;
+            }
+            .header {
+                padding: 30px 20px;
+            }
+            .logo {
+                font-size: 28px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">PEAK MODE</div>
+            <div class="tagline">NO LIMITS. JUST PEAKS</div>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">Thank You for Your Order!</div>
+            
+            <p>Hi {{customer_name}},</p>
+            
+            <p>We're excited to confirm that your order has been received and is being prepared. Your Peak Mode gear is on its way to elevate your performance!</p>
+            
+            <div class="order-number">
+                <h3>Order Number</h3>
+                <div class="number">{{order_number}}</div>
+            </div>
+            
+            <div class="order-details">
+                <h3>Order Details</h3>
+                {{order_items}}
+            </div>
+            
+            <div class="total">
+                <h3>Total Amount</h3>
+                <div class="amount">{{order_total}}</div>
+            </div>
+            
+            <div class="shipping-info">
+                <h3>Shipping Address</h3>
+                <div class="address">{{shipping_address}}</div>
+            </div>
+            
+            <p><strong>What's Next?</strong></p>
+            <p>We'll send you another email when your order ships with tracking information. You can also check your order status anytime using the link below.</p>
+            
+            <a href="{{order_status_url}}" class="cta-button">Track Your Order</a>
+            
+            <p>If you have any questions about your order, please don't hesitate to contact us at <strong>support@peakmode.se</strong></p>
+            
+            <p>Thank you for choosing Peak Mode!</p>
+            <p><strong>The Peak Mode Team</strong></p>
+        </div>
+        
+        <div class="footer">
+            <div class="social-links">
+                <a href="{{website_url}}">Website</a>
+                <a href="{{instagram_url}}">Instagram</a>
+                <a href="{{tiktok_url}}">TikTok</a>
+            </div>
+            
+            <p><strong>Peak Mode</strong></p>
+            <p>No Limits. Just Peaks</p>
+            <p>Kapellgatan 10, 746 49 Uppsala, Sweden</p>
+            <p>support@peakmode.se</p>
+            
+            <div class="unsubscribe">
+                <p>You received this email because you made a purchase from Peak Mode.</p>
+                <p><a href="{{unsubscribe_url}}">Unsubscribe</a> | <a href="{{privacy_url}}">Privacy Policy</a></p>
+                <p>&copy; {{year}} Peak Mode. All rights reserved.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
