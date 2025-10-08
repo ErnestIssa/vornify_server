@@ -1,0 +1,23 @@
+EMAIL TESTING COMMANDS
+======================
+
+Replace YOUR_EMAIL@example.com with your actual email address
+
+1. TEST ALL EMAIL TEMPLATES AT ONCE
+   curl "http://localhost:10000/api/email-test/test-all?email=YOUR_EMAIL@example.com"
+
+2. VERIFY SENDGRID CONNECTION
+   curl http://localhost:10000/api/email/verify
+
+3. TEST INDIVIDUAL EMAIL TEMPLATES
+   curl "http://localhost:10000/api/email-test/test/confirmation?email=YOUR_EMAIL@example.com"
+   curl "http://localhost:10000/api/email-test/test/processing?email=YOUR_EMAIL@example.com"
+   curl "http://localhost:10000/api/email-test/test/shipping?email=YOUR_EMAIL@example.com"
+   curl "http://localhost:10000/api/email-test/test/delivery?email=YOUR_EMAIL@example.com"
+   curl "http://localhost:10000/api/email-test/test/review?email=YOUR_EMAIL@example.com"
+   curl "http://localhost:10000/api/email-test/test/newsletter-welcome?email=YOUR_EMAIL@example.com"
+   curl "http://localhost:10000/api/email-test/test/discount-reminder?email=YOUR_EMAIL@example.com"
+
+4. CHECK ENVIRONMENT VARIABLES
+   curl http://localhost:10000/api/email-test/debug-env
+
