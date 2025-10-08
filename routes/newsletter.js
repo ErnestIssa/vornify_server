@@ -1,6 +1,6 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { sendNewsletterWelcome, sendDiscountReminder } = require('../utils/sendEmail');
+const emailService = require('../services/emailService');
 const VortexDB = require('../vornifydb/vornifydb');
 
 const router = express.Router();
@@ -67,7 +67,11 @@ router.post('/subscribe', async (req, res) => {
         }
 
         // Send welcome email with discount code
-        const emailResult = await sendNewsletterWelcome(subscriberData);
+        const emailResult = await emailService.sendNewsletterWelcomeEmail(
+            subscriberData.email,
+            subscriberData.name,
+            subscriberData.discountCode
+        );
         
         if (!emailResult.success) {
             console.error('Failed to send welcome email:', emailResult.error);
@@ -134,7 +138,11 @@ router.post('/send-reminder', async (req, res) => {
         }
 
         // Send reminder email
-        const emailResult = await sendDiscountReminder(subscriberData);
+        const emailResult = await emailService.sendDiscountReminderEmail(
+            subscriberData.email,
+            subscriberData.name,
+            subscriberData.discountCode
+        );
         
         if (!emailResult.success) {
             return res.status(500).json({

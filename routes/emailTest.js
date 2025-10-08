@@ -1,14 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { 
-  sendOrderConfirmation, 
-  sendOrderProcessing, 
-  sendShippingNotification, 
-  sendDeliveryConfirmation, 
-  sendReviewRequest,
-  sendNewsletterWelcome,
-  sendDiscountReminder
-} = require('../utils/sendEmail');
+const emailService = require('../services/emailService');
 
 // Test email templates
 router.get('/test/:template', async (req, res) => {
@@ -83,35 +75,49 @@ router.get('/test/:template', async (req, res) => {
     
     switch (template) {
       case 'confirmation':
-        result = await sendOrderConfirmation(testOrderData);
+        result = await emailService.sendOrderConfirmationEmail(
+          testOrderData.customer.email,
+          testOrderData.customer.name,
+          testOrderData
+        );
         break;
       case 'processing':
-        result = await sendOrderProcessing(testOrderData);
+        result = await emailService.sendOrderProcessingEmail(
+          testOrderData.customer.email,
+          testOrderData
+        );
         break;
       case 'shipping':
-        result = await sendShippingNotification(testOrderData);
+        result = await emailService.sendShippingNotificationEmail(
+          testOrderData.customer.email,
+          testOrderData
+        );
         break;
       case 'delivery':
-        result = await sendDeliveryConfirmation(testOrderData);
+        result = await emailService.sendDeliveryConfirmationEmail(
+          testOrderData.customer.email,
+          testOrderData
+        );
         break;
       case 'review':
-        result = await sendReviewRequest(testOrderData);
+        result = await emailService.sendReviewRequestEmail(
+          testOrderData.customer.email,
+          testOrderData
+        );
         break;
       case 'newsletter-welcome':
-        const subscriberData = {
-          email: testEmail,
-          name: 'Test User',
-          discountCode: 'PEAK10-TEST123'
-        };
-        result = await sendNewsletterWelcome(subscriberData);
+        result = await emailService.sendNewsletterWelcomeEmail(
+          testEmail,
+          'Test User',
+          'PEAK10-TEST123'
+        );
         break;
       case 'discount-reminder':
-        const reminderData = {
-          email: testEmail,
-          name: 'Test User',
-          discountCode: 'PEAK10-TEST123'
-        };
-        result = await sendDiscountReminder(reminderData);
+        result = await emailService.sendDiscountReminderEmail(
+          testEmail,
+          'Test User',
+          'PEAK10-TEST123'
+        );
         break;
       default:
         return res.status(400).json({
@@ -189,11 +195,27 @@ router.get('/test-all', async (req, res) => {
     const results = {};
     
     // Test all templates
-    results.confirmation = await sendOrderConfirmation(testOrderData);
-    results.processing = await sendOrderProcessing(testOrderData);
-    results.shipping = await sendShippingNotification(testOrderData);
-    results.delivery = await sendDeliveryConfirmation(testOrderData);
-    results.review = await sendReviewRequest(testOrderData);
+    results.confirmation = await emailService.sendOrderConfirmationEmail(
+      testOrderData.customer.email,
+      testOrderData.customer.name,
+      testOrderData
+    );
+    results.processing = await emailService.sendOrderProcessingEmail(
+      testOrderData.customer.email,
+      testOrderData
+    );
+    results.shipping = await emailService.sendShippingNotificationEmail(
+      testOrderData.customer.email,
+      testOrderData
+    );
+    results.delivery = await emailService.sendDeliveryConfirmationEmail(
+      testOrderData.customer.email,
+      testOrderData
+    );
+    results.review = await emailService.sendReviewRequestEmail(
+      testOrderData.customer.email,
+      testOrderData
+    );
 
     res.json({
       success: true,
@@ -209,6 +231,20 @@ router.get('/test-all', async (req, res) => {
       details: error.message
     });
   }
+});
+
+// Debug environment variables
+router.get('/debug-env', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Environment variables debug',
+        data: {
+            SENDGRID_API_KEY: process.env.SENDGRID_API_KEY ? 'Present (length: ' + process.env.SENDGRID_API_KEY.length + ')' : 'Missing',
+            NODE_ENV: process.env.NODE_ENV,
+            hasApiKey: !!process.env.SENDGRID_API_KEY,
+            apiKeyPrefix: process.env.SENDGRID_API_KEY ? process.env.SENDGRID_API_KEY.substring(0, 10) + '...' : 'N/A'
+        }
+    });
 });
 
 module.exports = router;

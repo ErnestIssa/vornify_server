@@ -1,14 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const VortexDB = require('../vornifydb/vornifydb');
-const { 
-  sendOrderConfirmation, 
-  sendOrderProcessing, 
-  sendShippingNotification, 
-  sendDeliveryConfirmation, 
-  sendReviewRequest,
-  sendAdminNotification 
-} = require('../utils/sendEmail');
+const emailService = require('../services/emailService');
 
 const db = new VortexDB();
 
@@ -91,19 +84,14 @@ router.post('/create', async (req, res) => {
         if (result.success) {
             // Send order confirmation email
             try {
-                await sendOrderConfirmation(order);
+                await emailService.sendOrderConfirmationEmail(
+                    order.customer.email,
+                    order.customer.name,
+                    order
+                );
                 console.log(`Order confirmation email sent to ${order.customer.email}`);
             } catch (emailError) {
                 console.error('Failed to send order confirmation email:', emailError);
-                // Don't fail the order creation if email fails
-            }
-
-            // Send admin notification
-            try {
-                await sendAdminNotification(order, 'new_order');
-                console.log('Admin notification sent for new order');
-            } catch (emailError) {
-                console.error('Failed to send admin notification:', emailError);
                 // Don't fail the order creation if email fails
             }
 
@@ -191,21 +179,33 @@ router.post('/update-status', async (req, res) => {
                 
                 switch (status) {
                     case 'processing':
-                        await sendOrderProcessing(updatedOrder);
+                        await emailService.sendOrderProcessingEmail(
+                            order.customer.email,
+                            updatedOrder
+                        );
                         console.log(`Order processing email sent to ${order.customer.email}`);
                         break;
                     case 'shipped':
-                        await sendShippingNotification(updatedOrder);
+                        await emailService.sendShippingNotificationEmail(
+                            order.customer.email,
+                            updatedOrder
+                        );
                         console.log(`Shipping notification email sent to ${order.customer.email}`);
                         break;
                     case 'delivered':
-                        await sendDeliveryConfirmation(updatedOrder);
+                        await emailService.sendDeliveryConfirmationEmail(
+                            order.customer.email,
+                            updatedOrder
+                        );
                         console.log(`Delivery confirmation email sent to ${order.customer.email}`);
                         
                         // Schedule review request email (2-3 days later)
                         setTimeout(async () => {
                             try {
-                                await sendReviewRequest(updatedOrder);
+                                await emailService.sendReviewRequestEmail(
+                                    order.customer.email,
+                                    updatedOrder
+                                );
                                 console.log(`Review request email sent to ${order.customer.email}`);
                             } catch (reviewError) {
                                 console.error('Failed to send review request email:', reviewError);
@@ -213,10 +213,6 @@ router.post('/update-status', async (req, res) => {
                         }, 2 * 24 * 60 * 60 * 1000); // 2 days in milliseconds
                         break;
                 }
-
-                // Send admin notification for status update
-                await sendAdminNotification(updatedOrder, 'status_update');
-                console.log('Admin notification sent for status update');
             } catch (emailError) {
                 console.error('Failed to send status update email:', emailError);
                 // Don't fail the status update if email fails
