@@ -1,3 +1,9 @@
+# Node modules and logs
 node_modules/
+*.log
+
+# Build and deployment folders
 .vercel
-*.log .env
+
+# Environment variables
+.env
