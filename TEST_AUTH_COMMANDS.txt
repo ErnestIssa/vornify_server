@@ -1,0 +1,34 @@
+# AUTHENTICATION TESTING COMMANDS (Windows PowerShell)
+# =====================================================
+
+# 1. TEST REGISTRATION
+Invoke-RestMethod -Uri "http://localhost:10000/api/auth/register" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"email":"ernestissa32@gmail.com","password":"password123","name":"Ernie"}'
+
+# 2. TEST LOGIN (after verifying email)
+Invoke-RestMethod -Uri "http://localhost:10000/api/auth/login" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"email":"ernestissa32@gmail.com","password":"password123"}'
+
+# 3. TEST PASSWORD RESET REQUEST
+Invoke-RestMethod -Uri "http://localhost:10000/api/auth/request-password-reset" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"email":"ernestissa32@gmail.com"}'
+
+# 4. RESEND VERIFICATION EMAIL
+Invoke-RestMethod -Uri "http://localhost:10000/api/auth/resend-verification" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"email":"ernestissa32@gmail.com"}'
+
+# =====================================================
+# SHORTER VERSION (Using Invoke-WebRequest)
+# =====================================================
+
+# Test Registration
+$body = @{
+    email = "ernestissa32@gmail.com"
+    password = "password123"
+    name = "Ernie"
+} | ConvertTo-Json
+
+Invoke-WebRequest -Uri "http://localhost:10000/api/auth/register" -Method POST -ContentType "application/json" -Body $body
+
+# =====================================================
+# OR Use This Simple One-Liner for Registration:
+# =====================================================
+
+Invoke-RestMethod -Uri "http://localhost:10000/api/auth/register" -Method POST -ContentType "application/json" -Body (@{email="ernestissa32@gmail.com";password="password123";name="Ernie"} | ConvertTo-Json)
+

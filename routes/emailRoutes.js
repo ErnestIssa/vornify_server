@@ -478,6 +478,132 @@ router.post('/discount-reminder', async (req, res) => {
 });
 
 /**
+ * POST /api/email/account-setup
+ * Send account setup confirmation email
+ * 
+ * Body:
+ * {
+ *   "to": "user@example.com",
+ *   "name": "John Doe",
+ *   "hubUrl": "https://peakmode.se/hub/dashboard"
+ * }
+ */
+router.post('/account-setup', async (req, res) => {
+    try {
+        const { to, name, hubUrl } = req.body;
+
+        if (!to) {
+            return res.status(400).json({
+                success: false,
+                error: 'Recipient email address is required'
+            });
+        }
+
+        const result = await emailService.sendAccountSetupEmail(to, name, hubUrl);
+
+        if (result.success) {
+            return res.status(200).json(result);
+        } else {
+            return res.status(500).json(result);
+        }
+
+    } catch (error) {
+        console.error('Account setup email error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * POST /api/email/verify-email
+ * Send email verification email
+ * 
+ * Body:
+ * {
+ *   "to": "user@example.com",
+ *   "name": "John Doe",
+ *   "verificationLink": "https://peakmode.se/verify?token=xxx"
+ * }
+ */
+router.post('/verify-email', async (req, res) => {
+    try {
+        const { to, name, verificationLink } = req.body;
+
+        if (!to) {
+            return res.status(400).json({
+                success: false,
+                error: 'Recipient email address is required'
+            });
+        }
+
+        if (!verificationLink) {
+            return res.status(400).json({
+                success: false,
+                error: 'Verification link is required'
+            });
+        }
+
+        const result = await emailService.sendEmailVerificationEmail(to, name, verificationLink);
+
+        if (result.success) {
+            return res.status(200).json(result);
+        } else {
+            return res.status(500).json(result);
+        }
+
+    } catch (error) {
+        console.error('Email verification error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * POST /api/email/password-reset-success
+ * Send password reset success confirmation
+ * 
+ * Body:
+ * {
+ *   "to": "user@example.com",
+ *   "name": "John Doe"
+ * }
+ */
+router.post('/password-reset-success', async (req, res) => {
+    try {
+        const { to, name } = req.body;
+
+        if (!to) {
+            return res.status(400).json({
+                success: false,
+                error: 'Recipient email address is required'
+            });
+        }
+
+        const result = await emailService.sendPasswordResetSuccessEmail(to, name);
+
+        if (result.success) {
+            return res.status(200).json(result);
+        } else {
+            return res.status(500).json(result);
+        }
+
+    } catch (error) {
+        console.error('Password reset success email error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+/**
  * GET /api/email/verify
  * Verify SendGrid connection
  */

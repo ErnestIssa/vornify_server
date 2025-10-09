@@ -123,7 +123,7 @@ class EmailService {
                 order_total: orderDetails.totals?.total || '0',
                 order_items: orderDetails.items || [],
                 shipping_address: this.formatAddress(orderDetails.shippingAddress),
-                order_status_url: `https://peakmode.se/track-order?id=${orderDetails.orderId}`,
+                order_status_url: `https://peakmode.se/track-order?orderId=${orderDetails.orderId}`,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -338,7 +338,7 @@ class EmailService {
             const dynamicData = {
                 customer_name: orderDetails.customer?.name || 'Valued Customer',
                 order_number: orderDetails.orderId,
-                review_url: `https://peakmode.se/review?order=${orderDetails.orderId}`,
+                review_url: `https://peakmode.se/review?orderId=${orderDetails.orderId}`,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -390,6 +390,112 @@ class EmailService {
             return {
                 success: false,
                 error: 'Failed to send discount reminder email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send account setup confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {string} hubUrl - Direct login/dashboard link
+     * @returns {Promise<object>} Result object
+     */
+    async sendAccountSetupEmail(to, name, hubUrl) {
+        try {
+            const templateId = process.env.SENDGRID_ACCOUNT_SETUP_TEMPLATE_ID || 'd-6ddabc33045c47a3933e9bcf0d1a3501';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                hub_url: hubUrl || 'https://peakmode.se/hub/dashboard',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Welcome to Peak Mode Hub',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Account setup email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send account setup email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send email verification email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {string} verificationLink - Email verification link
+     * @returns {Promise<object>} Result object
+     */
+    async sendEmailVerificationEmail(to, name, verificationLink) {
+        try {
+            const templateId = process.env.SENDGRID_EMAIL_VERIFICATION_TEMPLATE_ID || 'd-7916d8a52f404e20b3c331bf12548582';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                verification_link: verificationLink,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Verify Your Peak Mode Email',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Email verification email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send email verification email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send password reset success confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @returns {Promise<object>} Result object
+     */
+    async sendPasswordResetSuccessEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_PASSWORD_RESET_SUCCESS_TEMPLATE_ID || 'd-ecb71179b34e463bb596a7e17892117d';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                reset_link: 'https://peakmode.se/reset-password',
+                support_email: 'support@peakmode.se',
+                website_url: 'https://peakmode.se',
+                hub_login_url: 'https://peakmode.se/hub/auth',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Password Successfully Reset',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Password reset success email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send password reset success email',
                 details: error.message
             };
         }
