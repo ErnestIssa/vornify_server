@@ -10,6 +10,7 @@ const ordersRoutes = require('./routes/orders');
 const emailTestRoutes = require('./routes/emailTest');
 const newsletterRoutes = require('./routes/newsletter');
 const authRoutes = require('./routes/auth');
+const emailStatsRoutes = require('./routes/emailStats');
 require('dotenv').config();
 
 const app = express();
@@ -52,6 +53,7 @@ app.use('/api/orders', ordersRoutes);
 app.use('/api/email-test', emailTestRoutes);
 app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/email', emailStatsRoutes); // Email stats and logs
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
