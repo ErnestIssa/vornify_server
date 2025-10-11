@@ -90,7 +90,7 @@ router.post('/register', async (req, res) => {
 
         // Send email verification email
         try {
-            const verificationLink = `${req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
+            const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
             
             await emailService.sendEmailVerificationEmail(
                 email,
@@ -188,7 +188,7 @@ router.post('/verify-email', async (req, res) => {
 
         // Send account setup confirmation email
         try {
-            const hubUrl = `${req.headers.origin || 'https://peakmode.se'}/hub/dashboard`;
+            const hubUrl = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/hub/dashboard`;
             
             await emailService.sendAccountSetupEmail(
                 user.email,
@@ -344,7 +344,7 @@ router.post('/request-password-reset', async (req, res) => {
 
         // Send password reset email
         try {
-            const resetLink = `${req.headers.origin || 'https://peakmode.se'}/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
+            const resetLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
             
             await emailService.sendPasswordResetEmail(
                 email,
@@ -527,7 +527,7 @@ router.post('/resend-verification', async (req, res) => {
         });
 
         // Send verification email
-        const verificationLink = `${req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
+        const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
         
         await emailService.sendEmailVerificationEmail(
             email,

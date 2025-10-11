@@ -123,7 +123,7 @@ class EmailService {
                 order_total: orderDetails.totals?.total || '0',
                 order_items: orderDetails.items || [],
                 shipping_address: this.formatAddress(orderDetails.shippingAddress),
-                order_status_url: `https://peakmode.se/track-order?orderId=${orderDetails.orderId}`,
+                order_status_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/track-order?orderId=${orderDetails.orderId}`,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -338,7 +338,7 @@ class EmailService {
             const dynamicData = {
                 customer_name: orderDetails.customer?.name || 'Valued Customer',
                 order_number: orderDetails.orderId,
-                review_url: `https://peakmode.se/review?orderId=${orderDetails.orderId}`,
+                review_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/review?orderId=${orderDetails.orderId}`,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -408,7 +408,7 @@ class EmailService {
             
             const dynamicData = {
                 customer_name: name || 'Valued Customer',
-                hub_url: hubUrl || 'https://peakmode.se/hub/dashboard',
+                hub_url: hubUrl || `${process.env.FRONTEND_URL || 'https://peakmode.se'}/hub/dashboard`,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -477,10 +477,10 @@ class EmailService {
             
             const dynamicData = {
                 customer_name: name || 'Valued Customer',
-                reset_link: 'https://peakmode.se/reset-password',
+                reset_link: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/reset-password`,
                 support_email: 'support@peakmode.se',
                 website_url: 'https://peakmode.se',
-                hub_login_url: 'https://peakmode.se/hub/auth',
+                hub_login_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/hub/auth`,
                 year: new Date().getFullYear()
             };
 
