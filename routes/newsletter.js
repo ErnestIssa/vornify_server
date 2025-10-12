@@ -15,7 +15,7 @@ const generateDiscountCode = () => {
 // Subscribe to newsletter
 router.post('/subscribe', async (req, res) => {
     try {
-        const { email, name } = req.body;
+        const { email, name, source } = req.body;
 
         if (!email) {
             return res.status(400).json({ 
@@ -24,45 +24,56 @@ router.post('/subscribe', async (req, res) => {
             });
         }
 
-        // Generate unique discount code
-        const discountCode = generateDiscountCode();
+        // 1. NORMALIZE EMAIL (trim + lowercase)
+        const normalizedEmail = email.trim().toLowerCase();
         
-        // Check if email already exists
+        // 2. Check if email already exists (with normalized email)
         const existingSubscriber = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'newsletter_subscribers',
             command: '--read',
-            data: { filter: { email: email } }
+            data: { filter: { email: normalizedEmail } }
         });
 
         if (existingSubscriber.success && existingSubscriber.data) {
             // User already subscribed - return their existing discount code
             const subscriber = existingSubscriber.data;
             
-            // Check if code is still valid
-            const codeExpired = new Date() > new Date(subscriber.expiresAt);
+            // Check if code expired (14 days from subscribedAt)
+            const subscribedDate = new Date(subscriber.subscribedAt);
+            const daysSince = (Date.now() - subscribedDate.getTime()) / (1000 * 60 * 60 * 24);
+            const codeExpired = daysSince > 14;
+            
+            console.log(`✅ Email already subscribed: ${normalizedEmail}, returning existing code: ${subscriber.discountCode}`);
             
             return res.json({
                 success: true,
                 message: "You're already subscribed! Here's your discount code.",
                 discountCode: subscriber.discountCode,
-                isUsed: subscriber.isUsed,
+                isUsed: subscriber.isUsed || false,
                 expired: codeExpired,
                 alreadySubscribed: true,
-                expiresAt: subscriber.expiresAt
+                expiresAt: subscriber.expiresAt,
+                daysRemaining: codeExpired ? 0 : Math.ceil(14 - daysSince)
             });
         }
 
-        // Create subscriber record
+        // 3. Create NEW subscriber (email doesn't exist)
+        const discountCode = generateDiscountCode();
+
+        // Create subscriber record with NORMALIZED email
         const subscriberData = {
-            email: email,
+            email: normalizedEmail,  // Use normalized email
             name: name || '',
             status: 'active',
-            source: req.body.source || 'website',
+            source: source || 'website',
             discountCode: discountCode,
             isUsed: false,
+            expired: false,
             subscribedAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() // 14 days
+            expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days
+            usedAt: null,
+            expiredAt: null
         };
 
         const result = await db.executeOperation({
@@ -185,23 +196,28 @@ router.post('/validate-discount', async (req, res) => {
 
         if (!discountCode) {
             return res.status(400).json({ 
-                success: false, 
+                success: false,
+                valid: false,
                 error: 'Discount code is required' 
             });
         }
+
+        // Normalize discount code
+        const normalizedCode = discountCode.trim().toUpperCase();
 
         // Find discount code
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'newsletter_subscribers',
             command: '--read',
-            data: { filter: { discountCode: discountCode } }
+            data: { filter: { discountCode: normalizedCode } }
         });
 
         if (!result.success || !result.data) {
-            return res.status(404).json({
+            return res.json({
                 success: false,
-                error: 'Invalid discount code'
+                valid: false,
+                error: 'Discount code not found'
             });
         }
 
@@ -209,24 +225,56 @@ router.post('/validate-discount', async (req, res) => {
 
         // Check if code is used
         if (subscriber.isUsed) {
-            return res.status(400).json({
+            return res.json({
                 success: false,
-                error: 'Discount code already used'
+                valid: false,
+                error: 'This discount code has already been used',
+                usedAt: subscriber.usedAt
             });
         }
 
-        // Check if code is expired
-        if (new Date() > new Date(subscriber.expiresAt)) {
-            return res.status(400).json({
+        // Check if code is expired (14 days from subscribedAt)
+        const subscribedDate = new Date(subscriber.subscribedAt);
+        const daysSince = (Date.now() - subscribedDate.getTime()) / (1000 * 60 * 60 * 24);
+        const expired = daysSince > 14;
+
+        if (expired) {
+            // Mark as expired in database
+            await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'newsletter_subscribers',
+                command: '--update',
+                data: {
+                    filter: { discountCode: normalizedCode },
+                    update: {
+                        expired: true,
+                        expiredAt: new Date().toISOString()
+                    }
+                }
+            });
+
+            const expiryDate = new Date(subscribedDate.getTime() + (14 * 24 * 60 * 60 * 1000));
+            
+            return res.json({
                 success: false,
-                error: 'Discount code has expired'
+                valid: false,
+                error: 'This discount code has expired (14 day limit)',
+                expiredAt: expiryDate.toISOString()
             });
         }
+
+        // Code is valid!
+        const expiresAt = new Date(subscribedDate.getTime() + (14 * 24 * 60 * 60 * 1000));
+        const daysRemaining = Math.ceil(14 - daysSince);
 
         res.json({
             success: true,
             valid: true,
             discountValue: 10,
+            discountCode: normalizedCode,
+            email: subscriber.email,
+            expiresAt: expiresAt.toISOString(),
+            daysRemaining: daysRemaining,
             message: 'Discount code is valid'
         });
 
@@ -251,30 +299,37 @@ router.post('/use-discount', async (req, res) => {
             });
         }
 
+        // Normalize discount code
+        const normalizedCode = discountCode.trim().toUpperCase();
+
         // Find and update discount code
         const updateResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'newsletter_subscribers',
             command: '--update',
             data: {
-                filter: { discountCode: discountCode },
+                filter: { discountCode: normalizedCode },
                 update: { 
                     isUsed: true,
-                    usedAt: new Date().toISOString()
+                    usedAt: new Date().toISOString(),
+                    expired: false  // Once used, expiration doesn't matter
                 }
             }
         });
 
         if (!updateResult.success) {
-            return res.status(404).json({
+            return res.json({
                 success: false,
-                error: 'Invalid discount code'
+                error: 'Discount code not found'
             });
         }
 
+        console.log(`✅ Discount code marked as used: ${normalizedCode}`);
+
         res.json({
             success: true,
-            message: 'Discount code used successfully'
+            message: 'Discount code marked as used',
+            discountCode: normalizedCode
         });
 
     } catch (error) {
