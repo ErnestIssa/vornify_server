@@ -502,6 +502,42 @@ class EmailService {
     }
 
     /**
+     * Send support confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} firstName - Customer's first name
+     * @param {string} ticketId - Support ticket ID (optional)
+     * @returns {Promise<object>} Result object
+     */
+    async sendSupportConfirmationEmail(to, firstName, ticketId = null) {
+        try {
+            const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 'd-d237edcbc7284b7da88bdd9240858b59';
+            
+            const dynamicData = {
+                firstName: firstName || 'Valued Customer',
+                currentYear: new Date().getFullYear(),
+                ticketId: ticketId || 'N/A',
+                supportEmail: 'support@peakmode.se',
+                websiteUrl: 'https://peakmode.se'
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'We Received Your Message - Peak Mode Support',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Support confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send support confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
      * Helper method to format address for email templates
      * @param {object} address - Address object
      * @returns {string} Formatted address string

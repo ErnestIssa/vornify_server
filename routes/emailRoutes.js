@@ -604,6 +604,34 @@ router.post('/password-reset-success', async (req, res) => {
 });
 
 /**
+ * POST /api/email/support-confirmation
+ * Send support confirmation email
+ */
+router.post('/support-confirmation', async (req, res) => {
+    try {
+        const { to, firstName, ticketId } = req.body;
+
+        if (!to) {
+            return res.status(400).json({
+                success: false,
+                error: 'Recipient email address is required'
+            });
+        }
+
+        const result = await emailService.sendSupportConfirmationEmail(to, firstName, ticketId);
+        return res.status(result.success ? 200 : 500).json(result);
+
+    } catch (error) {
+        console.error('Support confirmation email error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+/**
  * GET /api/email/verify
  * Verify SendGrid connection
  */
