@@ -36,9 +36,20 @@ router.post('/subscribe', async (req, res) => {
         });
 
         if (existingSubscriber.success && existingSubscriber.data) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email already subscribed'
+            // User already subscribed - return their existing discount code
+            const subscriber = existingSubscriber.data;
+            
+            // Check if code is still valid
+            const codeExpired = new Date() > new Date(subscriber.expiresAt);
+            
+            return res.json({
+                success: true,
+                message: "You're already subscribed! Here's your discount code.",
+                discountCode: subscriber.discountCode,
+                isUsed: subscriber.isUsed,
+                expired: codeExpired,
+                alreadySubscribed: true,
+                expiresAt: subscriber.expiresAt
             });
         }
 
