@@ -12,6 +12,8 @@ const newsletterRoutes = require('./routes/newsletter');
 const authRoutes = require('./routes/auth');
 const emailStatsRoutes = require('./routes/emailStats');
 const supportRoutes = require('./routes/support');
+const cartRoutes = require('./routes/cart');
+const productRoutes = require('./routes/products');
 require('dotenv').config();
 
 const app = express();
@@ -56,6 +58,8 @@ app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
 app.use('/api/support', supportRoutes); // Support/contact messages
+app.use('/api/cart', cartRoutes); // Cart management
+app.use('/api/products', productRoutes); // Product management
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {

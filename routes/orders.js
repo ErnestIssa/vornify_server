@@ -61,6 +61,16 @@ router.post('/create', async (req, res) => {
             orderId,
             status: orderData.status || 'processing',
             paymentStatus: orderData.paymentStatus || 'pending',
+            // Ensure cart items include variant information
+            items: orderData.items ? orderData.items.map(item => ({
+                ...item,
+                // Preserve variant information from cart
+                sizeId: item.sizeId || null,
+                colorId: item.colorId || null,
+                variantId: item.variantId || null,
+                size: item.size || null,
+                color: item.color || null
+            })) : [],
             timeline: [
                 {
                     status: 'Order Placed',
