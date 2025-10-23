@@ -14,6 +14,8 @@ const emailStatsRoutes = require('./routes/emailStats');
 const supportRoutes = require('./routes/support');
 const cartRoutes = require('./routes/cart');
 const productRoutes = require('./routes/products');
+const shippingRoutes = require('./routes/shipping');
+const trackingRoutes = require('./routes/tracking');
 require('dotenv').config();
 
 const app = express();
@@ -60,6 +62,8 @@ app.use('/api/email', emailStatsRoutes); // Email stats and logs
 app.use('/api/support', supportRoutes); // Support/contact messages
 app.use('/api/cart', cartRoutes); // Cart management
 app.use('/api/products', productRoutes); // Product management
+app.use('/api/shipping', shippingRoutes); // Shipping quotes and methods
+app.use('/api/tracking', trackingRoutes); // Package tracking
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
