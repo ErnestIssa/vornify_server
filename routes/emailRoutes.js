@@ -139,6 +139,27 @@ router.post('/order-confirmation', async (req, res) => {
         );
 
         if (result.success) {
+            // Mark email as sent in the order if orderId is provided
+            if (orderDetails.orderId) {
+                try {
+                    const VortexDB = require('../vornifydb/vornifydb');
+                    const db = new VortexDB();
+                    
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId: orderDetails.orderId },
+                            update: { emailSent: true }
+                        }
+                    });
+                } catch (dbError) {
+                    console.error('Failed to update email sent flag:', dbError);
+                    // Don't fail the email if database update fails
+                }
+            }
+            
             return res.status(200).json(result);
         } else {
             return res.status(500).json(result);

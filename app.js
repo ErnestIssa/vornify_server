@@ -16,6 +16,8 @@ const cartRoutes = require('./routes/cart');
 const productRoutes = require('./routes/products');
 const shippingRoutes = require('./routes/shipping');
 const trackingRoutes = require('./routes/tracking');
+const customerRoutes = require('./routes/customers');
+const reviewRoutes = require('./routes/reviews');
 require('dotenv').config();
 
 const app = express();
@@ -64,6 +66,8 @@ app.use('/api/cart', cartRoutes); // Cart management
 app.use('/api/products', productRoutes); // Product management
 app.use('/api/shipping', shippingRoutes); // Shipping quotes and methods
 app.use('/api/tracking', trackingRoutes); // Package tracking
+app.use('/api/customers', customerRoutes); // Customer management and analytics
+app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {

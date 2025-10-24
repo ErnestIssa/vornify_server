@@ -116,24 +116,44 @@ class EmailService {
             // You should create this template in SendGrid dashboard
             const templateId = process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id';
             
+            // Calculate correct total from multiple possible sources
+            const orderTotal = orderDetails.totals?.total || 
+                              orderDetails.total || 
+                              (orderDetails.items ? orderDetails.items.reduce((sum, item) => sum + (item.price * item.quantity), 0) : 0);
+            
+            // Format order items properly
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            
             const dynamicData = {
                 customer_name: name || 'Valued Customer',
                 order_number: orderDetails.orderId || 'N/A',
-                order_date: orderDetails.orderDate || new Date().toISOString(),
-                order_total: orderDetails.totals?.total || '0',
-                order_items: orderDetails.items || [],
-                shipping_address: this.formatAddress(orderDetails.shippingAddress),
+                order_date: orderDetails.orderDate || orderDetails.createdAt || new Date().toISOString(),
+                order_total: `${orderTotal} SEK`,
+                order_items: formattedItems,
+                shipping_address: this.formatAddressForEmail(orderDetails.shippingAddress),
                 order_status_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/track-order?orderId=${orderDetails.orderId}`,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
 
-            return await this.sendCustomEmail(
+            const result = await this.sendCustomEmail(
                 to,
                 `Order Confirmation - ${orderDetails.orderId}`,
                 templateId,
                 dynamicData
             );
+
+            // Log communication if email was sent successfully
+            if (result.success) {
+                await this.logCommunication(orderDetails.customer.email, {
+                    type: 'email',
+                    subject: `Order Confirmation - ${orderDetails.orderId}`,
+                    content: 'Order confirmation email sent',
+                    status: 'sent'
+                });
+            }
+
+            return result;
 
         } catch (error) {
             console.error('❌ Order confirmation email error:', error);
@@ -549,6 +569,113 @@ class EmailService {
 ${address.street || ''}<br>
 ${address.postalCode || ''} ${address.city || ''}<br>
 ${address.country || ''}`.trim();
+    }
+
+    /**
+     * Helper method to format address for email templates (HTML-safe)
+     * @param {object} address - Address object
+     * @returns {string} Formatted address string with proper HTML breaks
+     */
+    formatAddressForEmail(address) {
+        if (!address) return 'No address provided';
+        
+        const name = address.name || '';
+        const street = address.street || '';
+        const postalCode = address.postalCode || '';
+        const city = address.city || '';
+        const country = address.country || '';
+        
+        return `${name}<br>${street}<br>${postalCode} ${city}<br>${country}`;
+    }
+
+    /**
+     * Helper method to format order items for email templates
+     * @param {array} items - Order items array
+     * @returns {string} Formatted items HTML
+     */
+    formatOrderItemsForEmail(items) {
+        if (!items || !Array.isArray(items)) return '<p>No items found</p>';
+        
+        let itemsHtml = '';
+        items.forEach(item => {
+            const variant = '';
+            if (item.size && item.color) {
+                variant = ` (${item.color}, ${item.size})`;
+            } else if (item.size) {
+                variant = ` (${item.size})`;
+            } else if (item.color) {
+                variant = ` (${item.color})`;
+            }
+            
+            const itemTotal = item.price * item.quantity;
+            
+            itemsHtml += `
+                <div class="item" style="margin-bottom: 10px; padding: 10px; border-bottom: 1px solid #eee;">
+                    <div class="item-name" style="font-weight: bold;">${item.name}${variant}</div>
+                    <div class="item-details" style="color: #666;">
+                        Quantity: ${item.quantity} × ${item.price} SEK = ${itemTotal} SEK
+                    </div>
+                </div>
+            `;
+        });
+        
+        return itemsHtml;
+    }
+
+    /**
+     * Log communication to customer record
+     * @param {string} customerEmail - Customer email
+     * @param {object} communicationData - Communication data
+     * @returns {Promise<void>}
+     */
+    async logCommunication(customerEmail, communicationData) {
+        try {
+            const VortexDB = require('../vornifydb/vornifydb');
+            const db = new VortexDB();
+
+            // Get current customer
+            const customerResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'customers',
+                command: '--read',
+                data: { email: customerEmail }
+            });
+
+            if (customerResult.success && customerResult.data) {
+                const customer = customerResult.data;
+                
+                // Create communication log entry
+                const communicationEntry = {
+                    id: `comm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    type: communicationData.type,
+                    subject: communicationData.subject,
+                    content: communicationData.content || '',
+                    date: new Date().toISOString(),
+                    status: communicationData.status || 'sent',
+                    adminNotes: communicationData.adminNotes || ''
+                };
+
+                // Add to communication log
+                const updatedCommunicationLog = [...(customer.communicationLog || []), communicationEntry];
+
+                // Update customer
+                await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'customers',
+                    command: '--update',
+                    data: {
+                        filter: { email: customerEmail },
+                        update: {
+                            communicationLog: updatedCommunicationLog,
+                            updatedAt: new Date().toISOString()
+                        }
+                    }
+                });
+            }
+        } catch (error) {
+            console.error('Error logging communication:', error);
+            // Don't throw error - communication logging shouldn't break email sending
+        }
     }
 
     /**

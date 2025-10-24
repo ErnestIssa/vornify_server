@@ -5,6 +5,175 @@ const emailService = require('../services/emailService');
 
 const db = new VortexDB();
 
+// Helper function to create or update customer record
+async function createOrUpdateCustomer(order) {
+    try {
+        const customerEmail = order.customer.email;
+        if (!customerEmail) return;
+
+        // Check if customer exists
+        const existingCustomer = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'customers',
+            command: '--read',
+            data: { email: customerEmail }
+        });
+
+        const customerData = {
+            id: customerEmail,
+            name: order.customer.name || 
+                  `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
+                  order.customerName ||
+                  'Customer',
+            email: customerEmail,
+            phone: order.customer.phone || order.shippingAddress?.phone || '',
+            address: {
+                street: order.customer.address || order.shippingAddress?.street || '',
+                city: order.customer.city || order.shippingAddress?.city || '',
+                postalCode: order.customer.postalCode || order.shippingAddress?.postalCode || '',
+                country: order.customer.country || order.shippingAddress?.country || ''
+            },
+            status: 'active',
+            updatedAt: new Date().toISOString(),
+            preferences: {
+                newsletter: false,
+                smsNotifications: false,
+                preferredLanguage: 'en'
+            }
+        };
+
+        if (existingCustomer.success && existingCustomer.data) {
+            // Update existing customer
+            await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'customers',
+                command: '--update',
+                data: {
+                    filter: { email: customerEmail },
+                    update: customerData
+                }
+            });
+        } else {
+            // Create new customer
+            customerData.joinDate = new Date().toISOString();
+            customerData.createdAt = new Date().toISOString();
+            customerData.ordersCount = 0;
+            customerData.totalSpent = 0;
+            customerData.averageOrderValue = 0;
+            customerData.customerType = 'new';
+            customerData.tags = ['new_user'];
+            customerData.recentOrders = [];
+            customerData.communicationLog = [];
+
+            await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'customers',
+                command: '--create',
+                data: customerData
+            });
+        }
+
+        // Update customer analytics
+        await updateCustomerAnalytics(customerEmail);
+        
+    } catch (error) {
+        console.error('Error creating/updating customer:', error);
+        throw error;
+    }
+}
+
+// Helper function to update customer analytics
+async function updateCustomerAnalytics(customerEmail) {
+    try {
+        // Get all orders for this customer
+        const ordersResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { 'customer.email': customerEmail }
+        });
+
+        const orders = ordersResult.success ? ordersResult.data : [];
+        const orderArray = Array.isArray(orders) ? orders : (orders ? [orders] : []);
+
+        // Calculate analytics
+        const ordersCount = orderArray.length;
+        const totalSpent = orderArray.reduce((sum, order) => {
+            return sum + (order.total || order.totals?.total || 0);
+        }, 0);
+        
+        const averageOrderValue = ordersCount > 0 ? totalSpent / ordersCount : 0;
+        
+        // Get order dates
+        const orderDates = orderArray
+            .map(order => new Date(order.createdAt || order.orderDate))
+            .filter(date => !isNaN(date.getTime()))
+            .sort((a, b) => a - b);
+        
+        const firstOrderDate = orderDates.length > 0 ? orderDates[0] : null;
+        const lastOrderDate = orderDates.length > 0 ? orderDates[orderDates.length - 1] : null;
+
+        // Determine customer type
+        let customerType = 'new';
+        let tags = [];
+
+        if (ordersCount === 0) {
+            customerType = 'new';
+            tags = ['new_user'];
+        } else if (ordersCount === 1) {
+            customerType = 'new';
+            tags = ['new_user'];
+        } else if (ordersCount >= 2 && ordersCount <= 4) {
+            customerType = 'returning';
+            tags = ['returning'];
+        } else if (ordersCount >= 5) {
+            customerType = 'loyal';
+            tags = ['loyal'];
+        }
+
+        if (totalSpent > 5000) {
+            customerType = 'vip';
+            tags.push('vip', 'high_spender');
+        }
+
+        // Get recent orders (last 5)
+        const recentOrders = orderArray
+            .sort((a, b) => new Date(b.createdAt || b.orderDate) - new Date(a.createdAt || a.orderDate))
+            .slice(0, 5)
+            .map(order => ({
+                id: order.orderId,
+                date: order.createdAt || order.orderDate,
+                total: order.total || order.totals?.total || 0,
+                status: order.status,
+                itemsCount: order.items ? order.items.length : 0
+            }));
+
+        // Update customer with analytics
+        await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'customers',
+            command: '--update',
+            data: {
+                filter: { email: customerEmail },
+                update: {
+                    ordersCount,
+                    totalSpent,
+                    averageOrderValue,
+                    firstOrderDate,
+                    lastOrderDate,
+                    customerType,
+                    tags,
+                    recentOrders,
+                    updatedAt: new Date().toISOString()
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Error updating customer analytics:', error);
+    }
+}
+
 // Helper function to generate unique Order ID
 async function generateUniqueOrderId() {
     let orderId;
@@ -61,6 +230,7 @@ router.post('/create', async (req, res) => {
             orderId,
             status: orderData.status || 'processing',
             paymentStatus: orderData.paymentStatus || 'pending',
+            emailSent: false, // Flag to track if confirmation email has been sent
             
             // Enhanced customer information structure
             customer: orderData.customer ? {
@@ -157,17 +327,44 @@ router.post('/create', async (req, res) => {
         });
         
         if (result.success) {
-            // Send order confirmation email
+            // Create or update customer record
             try {
-                await emailService.sendOrderConfirmationEmail(
-                    order.customer.email,
-                    order.customer.name,
-                    order
-                );
-                console.log(`Order confirmation email sent to ${order.customer.email}`);
-            } catch (emailError) {
-                console.error('Failed to send order confirmation email:', emailError);
-                // Don't fail the order creation if email fails
+                await createOrUpdateCustomer(order);
+            } catch (customerError) {
+                console.error('Failed to create/update customer:', customerError);
+                // Don't fail the order creation if customer update fails
+            }
+
+            // Send order confirmation email only if not already sent
+            if (!order.emailSent) {
+                try {
+                    const customerName = order.customer.name || 
+                                       `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
+                                       order.customerName ||
+                                       'Valued Customer';
+                    
+                    await emailService.sendOrderConfirmationEmail(
+                        order.customer.email,
+                        customerName,
+                        order
+                    );
+                    
+                    // Mark email as sent
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId },
+                            update: { emailSent: true }
+                        }
+                    });
+                    
+                    console.log(`Order confirmation email sent to ${order.customer.email}`);
+                } catch (emailError) {
+                    console.error('Failed to send order confirmation email:', emailError);
+                    // Don't fail the order creation if email fails
+                }
             }
 
             res.json({
