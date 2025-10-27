@@ -134,9 +134,25 @@ class VortexDB {
         if (!databaseName || !collectionName) return null;
 
         try {
+            // Check if client exists and is connected
             if (!this.client) {
                 await this.initializeConnection();
                 if (!this.client) return null;
+            }
+
+            // Check if topology is closed and reconnect if needed
+            try {
+                await this.client.db('admin').command({ ping: 1 });
+            } catch (error) {
+                if (error.message && error.message.includes('Topology is closed')) {
+                    console.warn('Database connection closed, reconnecting...');
+                    this.client = null;
+                    this.collectionCache.clear();
+                    await this.initializeConnection();
+                    if (!this.client) return null;
+                } else {
+                    throw error;
+                }
             }
 
             const cacheKey = `${databaseName}:${collectionName}`;
@@ -199,7 +215,7 @@ class VortexDB {
             }
 
 
-            // Implement retry logic
+            // Implement retry logic with reconnection handling
             const maxRetries = 3;
             let delay = 500;
 
@@ -208,9 +224,48 @@ class VortexDB {
                     const result = await handler(collection, data);
                     return result;
                 } catch (error) {
+                    // Check if error is due to closed topology
+                    if (error.message && error.message.includes('Topology is closed')) {
+                        console.warn(`Database connection closed, reconnecting (attempt ${attempt + 1}/${maxRetries})...`);
+                        
+                        // Close old client and clear cache
+                        if (this.client) {
+                            try {
+                                await this.client.close();
+                            } catch (closeError) {
+                                // Ignore close errors
+                            }
+                        }
+                        this.client = null;
+                        this.collectionCache.clear();
+                        
+                        // Reinitialize connection
+                        await this.initializeConnection();
+                        
+                        // Wait for reconnection
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        
+                        // Get collection again after reconnection
+                        const newCollection = await this.getCollection(database_name, collection_name);
+                        if (!newCollection) {
+                            console.error('Failed to reconnect to database');
+                            return { status: false, message: 'Database connection unavailable', error: 'Connection failed' };
+                        }
+                        
+                        // Retry operation with new collection if not last attempt
+                        if (attempt < maxRetries - 1) {
+                            try {
+                                const result = await handler(newCollection, data);
+                                return result;
+                            } catch (retryError) {
+                                console.error('Operation retry failed:', retryError);
+                            }
+                        }
+                    }
+                    
                     if (attempt === maxRetries - 1) {
                         console.error(`Operation failed after ${maxRetries} attempts:`, error);
-                        return { status: false, message: 'Operation failed' };
+                        return { status: false, message: 'Operation failed', error: error.message };
                     }
                     await new Promise(resolve => setTimeout(resolve, delay));
                     delay *= 2;
