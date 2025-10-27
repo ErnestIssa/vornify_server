@@ -18,6 +18,7 @@ const shippingRoutes = require('./routes/shipping');
 const trackingRoutes = require('./routes/tracking');
 const customerRoutes = require('./routes/customers');
 const reviewRoutes = require('./routes/reviews');
+const errorHandler = require('./middleware/errorHandler');
 require('dotenv').config();
 
 const app = express();
@@ -74,15 +75,8 @@ app.get('/storage/docs', (req, res) => {
     res.sendFile(__dirname + '/vornifydb/storage/doc_storage.html');
 });
 
-// Error handling
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({
-        status: false,
-        error: 'Something went wrong!',
-        details: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-});
+// Error handling middleware
+app.use(errorHandler);
 
 // Handle 404
 app.use((req, res) => {
