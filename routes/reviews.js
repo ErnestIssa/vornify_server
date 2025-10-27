@@ -115,6 +115,7 @@ router.get('/', async (req, res) => {
             page = 1, 
             limit = 50, 
             status, 
+            productId,
             source, 
             rating, 
             verified, 
@@ -130,6 +131,7 @@ router.get('/', async (req, res) => {
         
         // Add filters
         if (status) query.status = status;
+        if (productId) query.productId = productId;
         if (source) query.reviewSource = source;
         if (rating) query.rating = parseInt(rating);
         if (verified !== undefined) query.verifiedPurchase = verified === 'true';
