@@ -127,32 +127,16 @@ router.get('/', async (req, res) => {
             sortOrder = 'desc'
         } = req.query;
         
+        // Build simple query for VortexDB (no complex MongoDB operators)
         let query = {};
         
-        // Add filters
+        // Add simple filters (VortexDB compatible)
         if (status) query.status = status;
         if (productId) query.productId = productId;
         if (source) query.reviewSource = source;
         if (rating) query.rating = parseInt(rating);
         if (verified !== undefined) query.verifiedPurchase = verified === 'true';
         if (flagged !== undefined) query.flagged = flagged === 'true';
-        
-        // Date range filtering
-        if (startDate || endDate) {
-            query.createdAt = {};
-            if (startDate) query.createdAt.$gte = new Date(startDate);
-            if (endDate) query.createdAt.$lte = new Date(endDate);
-        }
-        
-        // Search functionality
-        if (search) {
-            query.$or = [
-                { title: { $regex: search, $options: 'i' } },
-                { comment: { $regex: search, $options: 'i' } },
-                { 'product.name': { $regex: search, $options: 'i' } },
-                { 'customer.name': { $regex: search, $options: 'i' } }
-            ];
-        }
 
         const result = await db.executeOperation({
             database_name: 'peakmode',
@@ -165,6 +149,34 @@ router.get('/', async (req, res) => {
             let reviews = result.data || [];
             if (!Array.isArray(reviews)) {
                 reviews = [reviews];
+            }
+
+            // Apply additional filters in memory (for complex queries)
+            
+            // Date range filtering
+            if (startDate || endDate) {
+                const start = startDate ? new Date(startDate) : null;
+                const end = endDate ? new Date(endDate) : null;
+                reviews = reviews.filter(review => {
+                    const reviewDate = new Date(review.createdAt);
+                    if (start && reviewDate < start) return false;
+                    if (end && reviewDate > end) return false;
+                    return true;
+                });
+            }
+            
+            // Search functionality
+            if (search) {
+                const searchLower = search.toLowerCase();
+                reviews = reviews.filter(review => {
+                    return (
+                        (review.title && review.title.toLowerCase().includes(searchLower)) ||
+                        (review.comment && review.comment.toLowerCase().includes(searchLower)) ||
+                        (review.product?.name && review.product.name.toLowerCase().includes(searchLower)) ||
+                        (review.customer?.name && review.customer.name.toLowerCase().includes(searchLower)) ||
+                        (review.customerName && review.customerName.toLowerCase().includes(searchLower))
+                    );
+                });
             }
 
             // Sort reviews
