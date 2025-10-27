@@ -375,8 +375,24 @@ router.post('/', async (req, res) => {
         };
         
         // Validate required fields (customerId is now optional)
-        const requiredFields = ['productId', 'rating', 'comment', 'reviewSource', 'verifiedPurchase', 'customerName', 'customerEmail', 'createdAt', 'updatedAt'];
-        const missingFields = requiredFields.filter(field => !reviewData[field]);
+        // Note: verifiedPurchase can be false (boolean), so we need to check for undefined/null
+        const requiredFields = {
+            'productId': reviewData.productId,
+            'rating': reviewData.rating,
+            'comment': reviewData.comment,
+            'reviewSource': reviewData.reviewSource,
+            'verifiedPurchase': reviewData.verifiedPurchase, // Can be false!
+            'customerName': reviewData.customerName,
+            'customerEmail': reviewData.customerEmail,
+            'createdAt': reviewData.createdAt,
+            'updatedAt': reviewData.updatedAt
+        };
+        
+        // Find missing fields (undefined or null, but NOT false or empty string)
+        const missingFields = Object.keys(requiredFields).filter(field => {
+            const value = requiredFields[field];
+            return value === undefined || value === null;
+        });
         
         if (missingFields.length > 0) {
             return res.status(400).json({
@@ -432,7 +448,8 @@ router.post('/', async (req, res) => {
         // Verify purchase if needed (only if customerId is provided)
         let orderInfo = null;
         if (reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null') {
-            if (reviewData.reviewSource === 'post_purchase' || reviewData.verifiedPurchase) {
+            // Only verify purchase if reviewSource is post_purchase OR verifiedPurchase is explicitly true
+            if (reviewData.reviewSource === 'post_purchase' || reviewData.verifiedPurchase === true) {
                 orderInfo = await verifyPurchase(reviewData.customerId, reviewData.productId);
             }
         }
@@ -444,7 +461,7 @@ router.post('/', async (req, res) => {
             rating: reviewData.rating,
             comment: reviewData.comment,
             reviewSource: reviewData.reviewSource,
-            verifiedPurchase: reviewData.verifiedPurchase || false,
+            verifiedPurchase: orderInfo ? true : reviewData.verifiedPurchase, // Use orderInfo to determine verification if available
             customerName: reviewData.customerName,
             customerEmail: reviewData.customerEmail,
             status: 'pending', // Always default to pending for moderation
@@ -485,6 +502,28 @@ router.post('/', async (req, res) => {
         });
 
         if (result.success) {
+            // Send confirmation email (don't fail review creation if email fails)
+            try {
+                const emailService = require('../services/emailService');
+                await emailService.sendReviewConfirmationEmail(
+                    review.customerEmail,
+                    review.customerName,
+                    {
+                        customerEmail: review.customerEmail,
+                        productId: review.productId,
+                        productName: null, // Will be fetched in email function
+                        rating: review.rating,
+                        reviewSource: review.reviewSource,
+                        verifiedPurchase: review.verifiedPurchase,
+                        submissionDate: review.createdAt
+                    }
+                );
+                console.log(`✅ Review confirmation email sent to ${review.customerEmail}`);
+            } catch (emailError) {
+                console.error('⚠️ Review confirmation email failed (but review was saved):', emailError);
+                // Don't fail the request if email fails
+            }
+            
             res.json({
                 success: true,
                 message: 'Review received! Our team will verify it before publishing.',

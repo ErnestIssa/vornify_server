@@ -381,6 +381,103 @@ class EmailService {
     }
 
     /**
+     * Send review confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {object} reviewDetails - Review details
+     * @returns {Promise<object>} Result object
+     */
+    async sendReviewConfirmationEmail(to, name, reviewDetails) {
+        try {
+            const templateId = process.env.SENDGRID_REVIEW_CONFIRMATION_TEMPLATE_ID || 'd-237146cecd3d4a49b89220fc58d2faa9';
+            
+            // Get product name if possible
+            let productName = reviewDetails.productName || 'Product';
+            if (reviewDetails.productId && reviewDetails.productId !== 'general') {
+                try {
+                    const VortexDB = require('../vornifydb/vornifydb');
+                    const db = new VortexDB();
+                    const productResult = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'products',
+                        command: '--read',
+                        data: { id: reviewDetails.productId }
+                    });
+                    
+                    if (productResult.success && productResult.data) {
+                        productName = productResult.data.name || productName;
+                    }
+                } catch (error) {
+                    console.error('Error fetching product name:', error);
+                    // Continue with default product name
+                }
+            }
+            
+            const submissionDate = reviewDetails.submissionDate || new Date().toISOString().split('T')[0];
+            const ratingStars = '⭐'.repeat(reviewDetails.rating || 0);
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                product_name: productName,
+                rating: reviewDetails.rating || 0,
+                rating_stars: ratingStars,
+                review_source: this.formatReviewSource(reviewDetails.reviewSource || 'product_page'),
+                verified_purchase: reviewDetails.verifiedPurchase ? 'Yes' : 'No',
+                submission_date: submissionDate,
+                moderation_status: 'Pending',
+                expected_approval_time: '24-48 hours',
+                support_email: 'support@peakmode.se',
+                website_url: process.env.FRONTEND_URL || 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            const result = await this.sendCustomEmail(
+                to,
+                'Thank You for Your Review - Peak Mode',
+                templateId,
+                dynamicData
+            );
+            
+            if (result.success) {
+                // Log communication if customer exists
+                await this.logCommunication(reviewDetails.customerEmail, {
+                    type: 'email',
+                    subject: 'Review Confirmation',
+                    content: `Review confirmation email sent for ${productName}`,
+                    status: 'sent',
+                    adminNotes: `Review for product: ${productName}, Rating: ${reviewDetails.rating} stars`
+                });
+            }
+            
+            return result;
+
+        } catch (error) {
+            console.error('❌ Review confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send review confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Helper to format review source for display
+     * @param {string} source - Review source
+     * @returns {string} Formatted source
+     */
+    formatReviewSource(source) {
+        const sources = {
+            'product_page': 'Product Page',
+            'email_request': 'Email Request',
+            'post_purchase': 'Post-Purchase',
+            'manual': 'Manual Entry',
+            'imported': 'Imported'
+        };
+        return sources[source] || source;
+    }
+
+    /**
      * Send discount reminder email
      * @param {string} to - Recipient email address
      * @param {string} name - Subscriber name
