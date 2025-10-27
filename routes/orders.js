@@ -592,9 +592,56 @@ router.get('/track/:orderId', async (req, res) => {
     }
 });
 
-// Get all orders (for admin)
+// Get all orders (for admin) - Also supports email query parameter
 router.get('/all', async (req, res) => {
     try {
+        const { email } = req.query;
+        
+        // If email query parameter is provided, filter by email
+        if (email) {
+            const result = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'orders',
+                command: '--read',
+                data: { 'customer.email': email }
+            });
+            
+            if (result.success) {
+                // Ensure data is always an array
+                let orders = result.data || [];
+                if (!Array.isArray(orders)) {
+                    orders = orders ? [orders] : [];
+                }
+                
+                // Format response to match frontend expectations
+                const formattedOrders = orders.map(order => ({
+                    orderId: order.orderId || order._id,
+                    email: order.customer?.email || email,
+                    items: order.items || [],
+                    total: order.total || order.totals?.total || 0,
+                    status: order.status || 'unknown',
+                    createdAt: order.createdAt || order.orderDate || order.date,
+                    shippingAddress: order.shippingAddress,
+                    customer: order.customer,
+                    paymentStatus: order.paymentStatus,
+                    trackingNumber: order.trackingNumber,
+                    shippingProvider: order.shippingProvider,
+                    estimatedDelivery: order.estimatedDelivery
+                }));
+                
+                return res.json({
+                    success: true,
+                    data: formattedOrders
+                });
+            } else {
+                return res.json({
+                    success: true,
+                    data: []
+                });
+            }
+        }
+        
+        // Get all orders
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
@@ -604,7 +651,7 @@ router.get('/all', async (req, res) => {
         
         res.json(result);
     } catch (error) {
-        console.error('Get all orders error:', error);
+        console.error('Get orders error:', error);
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve orders'
@@ -612,7 +659,7 @@ router.get('/all', async (req, res) => {
     }
 });
 
-// Get orders by customer email
+// Get orders by customer email (path parameter - for backward compatibility)
 router.get('/customer/:email', async (req, res) => {
     try {
         const { email } = req.params;

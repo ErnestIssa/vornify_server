@@ -369,11 +369,20 @@ router.post('/', async (req, res) => {
     try {
         const reviewData = req.body;
         
-        // Validate required fields
-        if (!reviewData.productId || !reviewData.customerId || !reviewData.rating) {
+        // Helper function to validate email format
+        const isValidEmail = (email) => {
+            return email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+        };
+        
+        // Validate required fields (customerId is now optional)
+        const requiredFields = ['productId', 'rating', 'comment', 'reviewSource', 'verifiedPurchase', 'customerName', 'customerEmail', 'createdAt', 'updatedAt'];
+        const missingFields = requiredFields.filter(field => !reviewData[field]);
+        
+        if (missingFields.length > 0) {
             return res.status(400).json({
                 success: false,
-                error: 'Product ID, Customer ID, and rating are required'
+                message: `Missing required fields: ${missingFields.join(', ')}`,
+                error: 'validation_error'
             });
         }
 
@@ -381,29 +390,74 @@ router.post('/', async (req, res) => {
         if (reviewData.rating < 1 || reviewData.rating > 5) {
             return res.status(400).json({
                 success: false,
-                error: 'Rating must be between 1 and 5'
+                message: 'Rating must be between 1 and 5',
+                error: 'invalid_rating'
             });
         }
 
-        const reviewId = await generateUniqueReviewId();
-        
-        // Get customer and product information
-        const customerInfo = await getCustomerInfo(reviewData.customerId);
-        const productInfo = await getProductInfo(reviewData.productId);
-        
-        // Verify purchase if needed
-        let orderInfo = null;
-        if (reviewData.reviewSource === 'post_purchase' || reviewData.verifiedPurchase) {
-            orderInfo = await verifyPurchase(reviewData.customerId, reviewData.productId);
+        // Validate email format
+        if (!isValidEmail(reviewData.customerEmail)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid email format',
+                error: 'invalid_email'
+            });
         }
 
-        // Prepare review data
+        // Validate reviewSource
+        const validSources = ['product_page', 'email_request', 'post_purchase', 'manual', 'imported'];
+        if (!validSources.includes(reviewData.reviewSource)) {
+            return res.status(400).json({
+                success: false,
+                message: `Invalid reviewSource. Must be one of: ${validSources.join(', ')}`,
+                error: 'invalid_review_source'
+            });
+        }
+
+        // Generate unique review ID
+        const reviewId = await generateUniqueReviewId();
+        
+        // Get customer info (optional - only if customerId is provided and not undefined)
+        let customerInfo = null;
+        if (reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null') {
+            customerInfo = await getCustomerInfo(reviewData.customerId);
+        }
+        
+        // Get product info (handle 'general' productId)
+        let productInfo = null;
+        if (reviewData.productId !== 'general') {
+            productInfo = await getProductInfo(reviewData.productId);
+        }
+        
+        // Verify purchase if needed (only if customerId is provided)
+        let orderInfo = null;
+        if (reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null') {
+            if (reviewData.reviewSource === 'post_purchase' || reviewData.verifiedPurchase) {
+                orderInfo = await verifyPurchase(reviewData.customerId, reviewData.productId);
+            }
+        }
+
+        // Prepare review data with proper handling of optional fields
         const review = {
-            ...reviewData,
             id: reviewId,
-            status: reviewData.status || 'pending',
-            reviewSource: reviewData.reviewSource || 'product_page',
-            verifiedPurchase: orderInfo ? true : (reviewData.verifiedPurchase || false),
+            productId: reviewData.productId,
+            rating: reviewData.rating,
+            comment: reviewData.comment,
+            reviewSource: reviewData.reviewSource,
+            verifiedPurchase: reviewData.verifiedPurchase || false,
+            customerName: reviewData.customerName,
+            customerEmail: reviewData.customerEmail,
+            status: 'pending', // Always default to pending for moderation
+            createdAt: reviewData.createdAt,
+            updatedAt: reviewData.updatedAt,
+            
+            // Optional fields (only include if provided and not undefined/null)
+            ...(reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null' ? { customerId: reviewData.customerId } : {}),
+            ...(reviewData.orderId ? { orderId: reviewData.orderId } : {}),
+            ...(reviewData.title ? { title: reviewData.title } : {}),
+            ...(reviewData.images && Array.isArray(reviewData.images) ? { images: reviewData.images } : {}),
+            
+            // Metadata fields
             customer: customerInfo,
             product: productInfo,
             orderInfo: orderInfo,
@@ -414,13 +468,11 @@ router.post('/', async (req, res) => {
             moderationNotes: '',
             moderatedBy: null,
             moderatedAt: null,
-            ipAddress: req.ip || req.connection.remoteAddress,
-            userAgent: req.get('User-Agent'),
+            ipAddress: req.ip || req.connection.remoteAddress || '',
+            userAgent: req.get('User-Agent') || '',
             language: req.get('Accept-Language') || 'en',
             businessResponse: null,
             media: reviewData.media || [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
             approvedAt: null,
             rejectedAt: null
         };
@@ -435,17 +487,34 @@ router.post('/', async (req, res) => {
         if (result.success) {
             res.json({
                 success: true,
-                message: 'Review created successfully',
-                data: result.data
+                message: 'Review received! Our team will verify it before publishing.',
+                data: {
+                    id: review.id,
+                    status: 'pending',
+                    productId: review.productId,
+                    rating: review.rating,
+                    comment: review.comment,
+                    customerName: review.customerName,
+                    customerEmail: review.customerEmail,
+                    reviewSource: review.reviewSource,
+                    verifiedPurchase: review.verifiedPurchase,
+                    createdAt: review.createdAt,
+                    updatedAt: review.updatedAt
+                }
             });
         } else {
-            res.status(400).json(result);
+            res.status(400).json({
+                success: false,
+                message: 'Failed to create review',
+                error: result.error || 'unknown_error'
+            });
         }
     } catch (error) {
         console.error('Create review error:', error);
         res.status(500).json({
             success: false,
-            error: 'Failed to create review'
+            message: 'Internal server error',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 });
