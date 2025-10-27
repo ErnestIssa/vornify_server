@@ -472,7 +472,8 @@ router.post('/', async (req, res) => {
             ...(reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null' ? { customerId: reviewData.customerId } : {}),
             ...(reviewData.orderId ? { orderId: reviewData.orderId } : {}),
             ...(reviewData.title ? { title: reviewData.title } : {}),
-            ...(reviewData.images && Array.isArray(reviewData.images) ? { images: reviewData.images } : {}),
+            ...(reviewData.location ? { location: reviewData.location } : {}),
+            ...(reviewData.images && Array.isArray(reviewData.images) && reviewData.images.length > 0 ? { images: reviewData.images } : {}),
             
             // Metadata fields
             customer: customerInfo,
@@ -538,7 +539,9 @@ router.post('/', async (req, res) => {
                     reviewSource: review.reviewSource,
                     verifiedPurchase: review.verifiedPurchase,
                     createdAt: review.createdAt,
-                    updatedAt: review.updatedAt
+                    updatedAt: review.updatedAt,
+                    ...(review.location ? { location: review.location } : {}),
+                    ...(review.images ? { images: review.images } : {})
                 }
             });
         } else {
