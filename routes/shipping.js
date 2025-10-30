@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const VortexDB = require('../vornifydb/vornifydb');
+const getDBInstance = require('../vornifydb/dbInstance');
 
-const db = new VortexDB();
+const db = getDBInstance();
 
 // Carrier API configurations
 const CARRIER_CONFIGS = {

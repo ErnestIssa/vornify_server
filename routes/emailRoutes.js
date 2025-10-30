@@ -142,8 +142,8 @@ router.post('/order-confirmation', async (req, res) => {
             // Mark email as sent in the order if orderId is provided
             if (orderDetails.orderId) {
                 try {
-                    const VortexDB = require('../vornifydb/vornifydb');
-                    const db = new VortexDB();
+                    const getDBInstance = require('../vornifydb/dbInstance');
+                    const db = getDBInstance();
                     
                     await db.executeOperation({
                         database_name: 'peakmode',

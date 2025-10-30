@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const VortexDB = require('../vornifydb/vornifydb');
+const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 
-const db = new VortexDB();
+const db = getDBInstance();
 
 // Helper function to create or update customer record
 async function createOrUpdateCustomer(order) {

@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
-const VortexDB = require('../vornifydb/vornifydb');
+const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 
-const db = new VortexDB();
+const db = getDBInstance();
 
 // Helper function to hash passwords (simple hash - you should use bcrypt in production)
 function hashPassword(password) {

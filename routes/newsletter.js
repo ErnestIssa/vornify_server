@@ -1,10 +1,10 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const emailService = require('../services/emailService');
-const VortexDB = require('../vornifydb/vornifydb');
+const getDBInstance = require('../vornifydb/dbInstance');
 
 const router = express.Router();
-const db = new VortexDB();
+const db = getDBInstance();
 
 // Generate unique discount code
 const generateDiscountCode = () => {

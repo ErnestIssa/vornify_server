@@ -30,13 +30,23 @@ class VortexDB {
                 throw new Error("MongoDB URI not configured");
             }
 
+            // Close existing client if it exists
+            if (this.client) {
+                try {
+                    await this.client.close();
+                } catch (closeError) {
+                    // Ignore close errors
+                }
+            }
+
             this.client = new MongoClient(uri, {
-                maxPoolSize: 100,
-                minPoolSize: 20,
+                maxPoolSize: 10,  // Reduced for M0 tier (500 max connections)
+                minPoolSize: 0,    // Don't keep idle connections
                 serverSelectionTimeoutMS: 30000,
                 connectTimeoutMS: 30000,
-                socketTimeoutMS: 360000,
-                maxIdleTimeMS: 360000,
+                socketTimeoutMS: 45000,
+                heartbeatFrequencyMS: 10000,
+                maxIdleTimeMS: 30000,
                 retryWrites: true,
                 retryReads: true,
                 writeConcern: {
@@ -46,12 +56,32 @@ class VortexDB {
                 }
             });
 
+            // Add connection event handlers
+            this.client.on('connectionPoolCreated', () => {
+                console.log('✅ MongoDB connection pool created');
+            });
+
+            this.client.on('connectionCreated', () => {
+                console.log('✅ MongoDB connection created');
+            });
+
+            this.client.on('connectionClosed', () => {
+                console.warn('⚠️ MongoDB connection closed - will reconnect on next operation');
+            });
+
+            this.client.on('connectionPoolClosed', () => {
+                console.warn('⚠️ MongoDB connection pool closed - will reconnect on next operation');
+                this.client = null;
+                this.collectionCache.clear();
+            });
+
             await this.verifyConnection();
             await this.setupIndexes();
 
         } catch (error) {
             console.error('Database initialization error:', error);
             this.client = null;
+            throw error; // Re-throw to allow retry
         }
     }
 
@@ -59,13 +89,24 @@ class VortexDB {
     async verifyConnection(maxRetries = 3, initialDelay = 1000) {
         for (let attempt = 0; attempt < maxRetries; attempt++) {
             try {
-                await this.client.connect();
-                await this.client.db().command({ ping: 1 });
-                console.log('Connected to MongoDB successfully');
-                return true;
+                // Connect if not already connected (idempotent)
+                try {
+                    // Try ping first to see if already connected
+                    await this.client.db('admin').command({ ping: 1 });
+                    console.log('✅ MongoDB already connected');
+                    return true;
+                } catch (pingError) {
+                    // If ping fails, connect
+                    await this.client.connect();
+                    await this.client.db('admin').command({ ping: 1 });
+                    console.log('✅ Connected to MongoDB successfully');
+                    return true;
+                }
             } catch (error) {
+                console.error(`❌ Connection attempt ${attempt + 1}/${maxRetries} failed:`, error.message);
                 if (attempt === maxRetries - 1) {
-                    console.error('Connection verification failed:', error);
+                    console.error('❌ Connection verification failed after all retries');
+                    // Don't throw - allow lazy connection on first operation
                     return false;
                 }
                 await new Promise(resolve => setTimeout(resolve, initialDelay * Math.pow(2, attempt)));
@@ -142,16 +183,50 @@ class VortexDB {
 
             // Check if topology is closed and reconnect if needed
             try {
+                // Test connection with ping (MongoDB driver will auto-connect if needed)
                 await this.client.db('admin').command({ ping: 1 });
             } catch (error) {
-                if (error.message && error.message.includes('Topology is closed')) {
-                    console.warn('Database connection closed, reconnecting...');
+                const errorMessage = (error.message || error.toString() || '').toLowerCase();
+                
+                if (errorMessage.includes('topology is closed') || 
+                    errorMessage.includes('not connected') || 
+                    errorMessage.includes('connection closed') ||
+                    errorMessage.includes('connection timed out') ||
+                    errorMessage.includes('pool is closed')) {
+                    console.warn('⚠️ Database connection closed, reconnecting...');
+                    
+                    // Close and clear old connection
+                    try {
+                        if (this.client) {
+                            await this.client.close().catch(() => {});
+                        }
+                    } catch (closeError) {
+                        // Ignore close errors
+                    }
+                    
                     this.client = null;
                     this.collectionCache.clear();
+                    
+                    // Reinitialize connection
                     await this.initializeConnection();
                     if (!this.client) return null;
+                    
+                    // Verify new connection
+                    try {
+                        await this.client.db('admin').command({ ping: 1 });
+                    } catch (pingError) {
+                        console.error('❌ Failed to reconnect:', pingError.message);
+                        return null;
+                    }
                 } else {
-                    throw error;
+                    console.error('❌ Unexpected connection error:', errorMessage);
+                    // Try to reconnect anyway
+                    try {
+                        this.client = null;
+                        await this.initializeConnection();
+                    } catch (reconnectError) {
+                        console.error('❌ Reconnection failed:', reconnectError.message);
+                    }
                 }
             }
 
@@ -180,7 +255,13 @@ class VortexDB {
 
             const collection = await this.getCollection(database_name, collection_name);
             if (!collection) {
-                return { status: false, message: 'Database connection unavailable' };
+                console.error(`❌ Failed to get collection: ${database_name}.${collection_name}`);
+                return { 
+                    status: false, 
+                    success: false,
+                    message: 'Database connection unavailable',
+                    error: 'Could not establish database connection'
+                };
             }
 
             const commandMap = {
@@ -272,9 +353,29 @@ class VortexDB {
                 }
             }
         } catch (error) {
-            console.error('Execute operation error:', error);
-            console.error('Error details:', error.stack);
-            return { status: false, message: 'Request could not be processed' };
+            console.error('❌ Execute operation error:', error);
+            console.error('❌ Error details:', error.stack);
+            const errorMessage = error.message || error.toString() || 'Unknown error';
+            
+            // If it's a connection error, try to reconnect
+            if (errorMessage.toLowerCase().includes('topology is closed') || 
+                errorMessage.toLowerCase().includes('not connected')) {
+                console.warn('⚠️ Connection error detected in executeOperation, attempting reconnection...');
+                try {
+                    this.client = null;
+                    this.collectionCache.clear();
+                    await this.initializeConnection();
+                } catch (reconnectError) {
+                    console.error('❌ Reconnection failed:', reconnectError.message);
+                }
+            }
+            
+            return { 
+                status: false, 
+                success: false,
+                message: 'Request could not be processed',
+                error: errorMessage
+            };
         }
     }
 
