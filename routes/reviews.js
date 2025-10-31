@@ -468,6 +468,37 @@ router.post('/', async (req, res) => {
             }
         }
 
+        // Process images field - always include it
+        const processedImages = (() => {
+            if (!reviewData.images) {
+                return []; // Default to empty array if not provided
+            }
+            if (!Array.isArray(reviewData.images)) {
+                console.warn('⚠️ Review images is not an array:', typeof reviewData.images, reviewData.images);
+                return []; // Return empty array if not valid
+            }
+            // Process each image - accept URLs and base64
+            const processed = reviewData.images.map(img => {
+                if (!img || typeof img !== 'string') {
+                    console.warn('⚠️ Invalid image format:', typeof img, img);
+                    return null;
+                }
+                // If it's already a URL string, use it
+                if (img.startsWith('http://') || img.startsWith('https://') || img.startsWith('/uploads/')) {
+                    return img;
+                }
+                // If it's base64 (for backward compatibility), keep it
+                if (img.startsWith('data:image/')) {
+                    return img;
+                }
+                // Otherwise, treat as URL string
+                return String(img);
+            }).filter(img => img !== null); // Remove any null values
+            
+            console.log(`📸 Processing ${reviewData.images.length} image(s) for review ${reviewId}, ${processed.length} valid`);
+            return processed;
+        })();
+
         // Prepare review data with proper handling of optional fields
         const review = {
             id: reviewId,
@@ -481,27 +512,13 @@ router.post('/', async (req, res) => {
             status: 'pending', // Always default to pending for moderation
             createdAt: reviewData.createdAt,
             updatedAt: reviewData.updatedAt,
+            images: processedImages, // Always include images field (empty array if none)
             
             // Optional fields (only include if provided and not undefined/null)
             ...(reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null' ? { customerId: reviewData.customerId } : {}),
             ...(reviewData.orderId ? { orderId: reviewData.orderId } : {}),
             ...(reviewData.title ? { title: reviewData.title } : {}),
             ...(reviewData.location ? { location: reviewData.location } : {}),
-            // Handle images - accept both URLs (strings) and base64 (for backward compatibility)
-            ...(reviewData.images && Array.isArray(reviewData.images) && reviewData.images.length > 0 ? { 
-                images: reviewData.images.map(img => {
-                    // If it's already a URL string, use it
-                    if (typeof img === 'string' && (img.startsWith('http://') || img.startsWith('https://') || img.startsWith('/uploads/'))) {
-                        return img;
-                    }
-                    // If it's base64 (for backward compatibility), keep it
-                    if (typeof img === 'string' && img.startsWith('data:image/')) {
-                        return img;
-                    }
-                    // Otherwise, treat as URL string
-                    return String(img);
-                })
-            } : {}),
             
             // Metadata fields
             customer: customerInfo,
@@ -522,6 +539,15 @@ router.post('/', async (req, res) => {
             approvedAt: null,
             rejectedAt: null
         };
+
+        // Log review data before saving (for debugging)
+        console.log(`💾 Saving review ${reviewId} with ${review.images.length} image(s):`, {
+            id: review.id,
+            productId: review.productId,
+            hasImages: !!review.images && review.images.length > 0,
+            imageCount: review.images ? review.images.length : 0,
+            firstImage: review.images && review.images.length > 0 ? review.images[0] : null
+        });
 
         const result = await db.executeOperation({
             database_name: 'peakmode',
@@ -569,7 +595,7 @@ router.post('/', async (req, res) => {
                     createdAt: review.createdAt,
                     updatedAt: review.updatedAt,
                     ...(review.location ? { location: review.location } : {}),
-                    ...(review.images ? { images: review.images } : {})
+                    images: review.images || [] // Always include images field
                 }
             });
         } else {
