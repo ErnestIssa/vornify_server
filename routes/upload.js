@@ -15,7 +15,19 @@ if (!fs.existsSync(uploadsDir)) {
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, uploadsDir);
+        // Support folder parameter from request body or query
+        const folder = req.body.folder || req.query.folder || '';
+        let destinationDir = uploadsDir;
+        
+        if (folder) {
+            // Create folder-specific directory (e.g., reviews, products, etc.)
+            destinationDir = path.join(uploadsDir, folder);
+            if (!fs.existsSync(destinationDir)) {
+                fs.mkdirSync(destinationDir, { recursive: true });
+            }
+        }
+        
+        cb(null, destinationDir);
     },
     filename: (req, file, cb) => {
         // Generate unique filename with timestamp and UUID
@@ -58,16 +70,25 @@ router.post('/', upload.single('file'), (req, res) => {
             });
         }
 
+        // Get folder from request (for URL path)
+        const folder = req.body.folder || req.query.folder || '';
+        
         // Generate the public URL
         const baseUrl = req.protocol + '://' + req.get('host');
-        const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+        const filePath = folder ? `uploads/${folder}/${req.file.filename}` : `uploads/${req.file.filename}`;
+        const fileUrl = `${baseUrl}/${filePath}`;
+        
+        // Generate fileId (use filename as ID or create UUID)
+        const fileId = req.file.filename;
 
         res.json({
             success: true,
             url: fileUrl,
+            fileId: fileId,
             filename: req.file.filename,
             originalName: req.file.originalname,
-            size: req.file.size
+            size: req.file.size,
+            folder: folder || null
         });
 
     } catch (error) {

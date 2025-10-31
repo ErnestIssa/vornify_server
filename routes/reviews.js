@@ -487,7 +487,21 @@ router.post('/', async (req, res) => {
             ...(reviewData.orderId ? { orderId: reviewData.orderId } : {}),
             ...(reviewData.title ? { title: reviewData.title } : {}),
             ...(reviewData.location ? { location: reviewData.location } : {}),
-            ...(reviewData.images && Array.isArray(reviewData.images) && reviewData.images.length > 0 ? { images: reviewData.images } : {}),
+            // Handle images - accept both URLs (strings) and base64 (for backward compatibility)
+            ...(reviewData.images && Array.isArray(reviewData.images) && reviewData.images.length > 0 ? { 
+                images: reviewData.images.map(img => {
+                    // If it's already a URL string, use it
+                    if (typeof img === 'string' && (img.startsWith('http://') || img.startsWith('https://') || img.startsWith('/uploads/'))) {
+                        return img;
+                    }
+                    // If it's base64 (for backward compatibility), keep it
+                    if (typeof img === 'string' && img.startsWith('data:image/')) {
+                        return img;
+                    }
+                    // Otherwise, treat as URL string
+                    return String(img);
+                })
+            } : {}),
             
             // Metadata fields
             customer: customerInfo,
