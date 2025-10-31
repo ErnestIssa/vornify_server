@@ -484,7 +484,23 @@ class VortexDB {
                 data = this.processInventoryData(data);
             }
             
+            // DEBUG: Log images field if it exists (for reviews)
+            if (data.id && data.id.startsWith('RV')) {
+                console.log(`🔍 createRecord - Review ${data.id}:`, {
+                    hasImages: 'images' in data,
+                    imagesType: typeof data.images,
+                    imagesValue: data.images,
+                    imagesIsArray: Array.isArray(data.images),
+                    imagesLength: Array.isArray(data.images) ? data.images.length : 'N/A'
+                });
+            }
+            
             const result = await collection.insertOne(data);
+            
+            // Verify what was inserted
+            if (data.id && data.id.startsWith('RV')) {
+                console.log(`✅ createRecord - Review ${data.id} inserted. Inserted ID: ${result.insertedId}`);
+            }
             
             return {
                 success: true,

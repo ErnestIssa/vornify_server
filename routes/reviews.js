@@ -383,6 +383,17 @@ router.post('/', async (req, res) => {
     try {
         const reviewData = req.body;
         
+        // DEBUG: Log incoming request data (especially images field)
+        console.log('📥 POST /api/reviews - Received request:', {
+            hasImages: 'images' in reviewData,
+            imagesType: typeof reviewData.images,
+            imagesValue: reviewData.images,
+            imagesIsArray: Array.isArray(reviewData.images),
+            imagesLength: Array.isArray(reviewData.images) ? reviewData.images.length : 'N/A',
+            productId: reviewData.productId,
+            customerEmail: reviewData.customerEmail
+        });
+        
         // Helper function to validate email format
         const isValidEmail = (email) => {
             return email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -468,19 +479,32 @@ router.post('/', async (req, res) => {
             }
         }
 
-        // Process images field - always include it
+        // Process images field - always include it, handle null explicitly
         const processedImages = (() => {
-            if (!reviewData.images) {
-                return []; // Default to empty array if not provided
+            // Explicitly handle null, undefined, or missing
+            if (reviewData.images === null || reviewData.images === undefined) {
+                console.log(`📸 No images provided for review ${reviewId} (null/undefined)`);
+                return []; // Default to empty array
             }
+            
             if (!Array.isArray(reviewData.images)) {
-                console.warn('⚠️ Review images is not an array:', typeof reviewData.images, reviewData.images);
+                console.warn(`⚠️ Review images is not an array for review ${reviewId}:`, typeof reviewData.images, reviewData.images);
                 return []; // Return empty array if not valid
             }
+            
+            if (reviewData.images.length === 0) {
+                console.log(`📸 Empty images array for review ${reviewId}`);
+                return []; // Return empty array
+            }
+            
             // Process each image - accept URLs and base64
-            const processed = reviewData.images.map(img => {
-                if (!img || typeof img !== 'string') {
-                    console.warn('⚠️ Invalid image format:', typeof img, img);
+            const processed = reviewData.images.map((img, index) => {
+                if (img === null || img === undefined) {
+                    console.warn(`⚠️ Image at index ${index} is null/undefined`);
+                    return null;
+                }
+                if (typeof img !== 'string') {
+                    console.warn(`⚠️ Invalid image format at index ${index}:`, typeof img, img);
                     return null;
                 }
                 // If it's already a URL string, use it
@@ -493,9 +517,12 @@ router.post('/', async (req, res) => {
                 }
                 // Otherwise, treat as URL string
                 return String(img);
-            }).filter(img => img !== null); // Remove any null values
+            }).filter(img => img !== null && img !== undefined); // Remove any null/undefined values
             
             console.log(`📸 Processing ${reviewData.images.length} image(s) for review ${reviewId}, ${processed.length} valid`);
+            if (processed.length > 0) {
+                console.log(`📸 First image URL: ${processed[0]}`);
+            }
             return processed;
         })();
 
@@ -546,8 +573,17 @@ router.post('/', async (req, res) => {
             productId: review.productId,
             hasImages: !!review.images && review.images.length > 0,
             imageCount: review.images ? review.images.length : 0,
-            firstImage: review.images && review.images.length > 0 ? review.images[0] : null
+            firstImage: review.images && review.images.length > 0 ? review.images[0] : null,
+            imagesField: review.images, // Full images array
+            imagesFieldType: typeof review.images,
+            imagesIsArray: Array.isArray(review.images)
         });
+        
+        // CRITICAL: Ensure images field is explicitly set (never null)
+        if (review.images === null || review.images === undefined) {
+            console.warn('⚠️ WARNING: images field is null/undefined, setting to empty array');
+            review.images = [];
+        }
 
         const result = await db.executeOperation({
             database_name: 'peakmode',
@@ -555,6 +591,13 @@ router.post('/', async (req, res) => {
             command: '--create',
             data: review
         });
+        
+        // Log after save to verify
+        if (result.success) {
+            console.log(`✅ Review ${reviewId} saved successfully. Images count: ${review.images.length}`);
+        } else {
+            console.error(`❌ Failed to save review ${reviewId}:`, result);
+        }
 
         if (result.success) {
             // Send confirmation email (don't fail review creation if email fails)
@@ -595,7 +638,7 @@ router.post('/', async (req, res) => {
                     createdAt: review.createdAt,
                     updatedAt: review.updatedAt,
                     ...(review.location ? { location: review.location } : {}),
-                    images: review.images || [] // Always include images field
+                    images: Array.isArray(review.images) ? review.images : [] // Always include images field, ensure it's an array
                 }
             });
         } else {
