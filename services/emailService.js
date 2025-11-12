@@ -17,6 +17,7 @@ class EmailService {
         }
         
         this.fromEmail = process.env.EMAIL_FROM || 'support@peakmode.se';
+        this.supportInboxEmail = process.env.SUPPORT_INBOX_EMAIL || 'support@peakmode.se';
     }
 
     /**
@@ -652,6 +653,104 @@ class EmailService {
                 details: error.message
             };
         }
+    }
+
+    /**
+     * Send support inbox notification email to Peak Mode support team
+     * @param {object} params - Parameters for the email
+     * @param {string} params.fromEmail - Email address of the user submitting the ticket
+     * @param {string} [params.fromName] - Name of the user
+     * @param {string} [params.subject] - Subject provided by the user
+     * @param {string} params.message - Message body provided by the user
+     * @param {string} [params.ticketId] - Generated ticket identifier
+     * @returns {Promise<object>} Result object
+     */
+    async sendSupportInboxEmail({ fromEmail, fromName, subject, message, ticketId }) {
+        try {
+            if (!fromEmail) {
+                throw new Error('fromEmail is required for support inbox emails');
+            }
+
+            if (!message) {
+                throw new Error('message content is required for support inbox emails');
+            }
+
+            const cleanedFromEmail = fromEmail.trim();
+            const safeSubject = subject && subject.trim() !== '' ? subject.trim() : 'New Support Message';
+            const customerName = fromName && fromName.trim() !== '' ? fromName.trim() : 'Peak Mode Customer';
+            const supportTicketId = ticketId || `SPT-${Date.now()}`;
+
+            const textContent = [
+                `New support request from ${customerName} (${cleanedFromEmail}).`,
+                '',
+                `Subject: ${safeSubject}`,
+                `Ticket ID: ${supportTicketId}`,
+                '',
+                'Message:',
+                message
+            ].join('\n');
+
+            const sanitizedMessage = this.escapeHtml(message);
+            const formattedMessage = sanitizedMessage.replace(/\r?\n/g, '<br>');
+
+            const htmlContent = `
+                <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #222;">
+                    <p><strong>New support request received.</strong></p>
+                    <p>
+                        <strong>From:</strong> ${customerName} &lt;${cleanedFromEmail}&gt;<br>
+                        <strong>Ticket ID:</strong> ${supportTicketId}<br>
+                        <strong>Subject:</strong> ${safeSubject}
+                    </p>
+                    <p>${formattedMessage}</p>
+                </div>
+            `;
+
+            const msg = {
+                to: this.supportInboxEmail,
+                from: cleanedFromEmail,
+                replyTo: cleanedFromEmail,
+                subject: `[Support] ${safeSubject}`,
+                text: textContent,
+                html: htmlContent
+            };
+
+            const response = await sgMail.send(msg);
+
+            console.log(`✅ Support inbox email forwarded to ${this.supportInboxEmail} from ${cleanedFromEmail}`);
+
+            return {
+                success: true,
+                message: 'Support inbox email sent successfully',
+                messageId: response[0].headers['x-message-id'],
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            console.error('❌ Support inbox email error:', error.response?.body || error.message);
+
+            return {
+                success: false,
+                error: 'Failed to send support inbox email',
+                details: error.response?.body?.errors || error.message
+            };
+        }
+    }
+
+    /**
+     * Basic HTML escaping helper
+     * @param {string} value - Raw string to escape
+     * @returns {string} Escaped string safe for HTML rendering
+     */
+    escapeHtml(value) {
+        if (typeof value !== 'string') {
+            return '';
+        }
+
+        return value
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
 
     /**

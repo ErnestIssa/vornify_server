@@ -72,13 +72,21 @@ router.post('/contact', async (req, res) => {
             // Don't fail the request if email fails
         }
 
-        // Optionally: Send notification to admin
+        // Forward the support request to the Peak Mode support inbox
         try {
-            const adminEmail = process.env.ADMIN_EMAIL || 'support@peakmode.se';
-            // You can implement an admin notification email here if needed
-            console.log(`📧 New support message notification should be sent to ${adminEmail}`);
+            const forwardResult = await emailService.sendSupportInboxEmail({
+                fromEmail: normalizedEmail,
+                fromName: name,
+                subject,
+                message,
+                ticketId
+            });
+
+            if (!forwardResult.success) {
+                console.error('⚠️ Failed to forward support message to inbox:', forwardResult.details);
+            }
         } catch (error) {
-            console.error('⚠️ Failed to send admin notification:', error);
+            console.error('⚠️ Error forwarding support message to inbox:', error);
         }
 
         res.json({
