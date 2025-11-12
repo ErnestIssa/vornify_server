@@ -5,6 +5,10 @@ const emailService = require('../services/emailService');
 
 const db = getDBInstance();
 
+const CONTACT_COLLECTION = 'contact_messages';
+const LEGACY_CONTACT_COLLECTION = 'support_messages';
+const CONTACT_COLLECTIONS = [CONTACT_COLLECTION, LEGACY_CONTACT_COLLECTION];
+
 const VALID_CONTACT_STATUSES = new Set(['unread', 'read', 'replied']);
 
 const normalizeStatusForStorage = (status) => {
@@ -21,6 +25,23 @@ const normalizeStatusForResponse = (status) => {
     if (VALID_CONTACT_STATUSES.has(lower)) return lower;
     if (lower === 'new' || lower === 'pending') return 'unread';
     return lower;
+};
+
+const formatContactMessage = (message = {}, collectionTag = CONTACT_COLLECTION) => {
+    const base = { ...(message || {}) };
+    const createdAt = base.createdAt || base.created_at || base.dateCreated || new Date().toISOString();
+    const updatedAt = base.updatedAt || base.updated_at || base.dateUpdated || createdAt;
+    const ticketId = base.ticketId || base.ticket || base.id || base._id || null;
+
+    return {
+        ...base,
+        ticketId,
+        status: normalizeStatusForResponse(base.status),
+        createdAt,
+        updatedAt,
+        source: base.source || (collectionTag === CONTACT_COLLECTION ? 'website_contact_form' : 'legacy_support_form'),
+        _collection: collectionTag
+    };
 };
 
 /**
@@ -66,7 +87,7 @@ router.post('/contact', async (req, res) => {
         // Save to database
         const dbResponse = await db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'contact_messages',
+            collection_name: CONTACT_COLLECTION,
             command: '--create',
             data: contactMessage
         });
@@ -144,49 +165,56 @@ router.get('/messages', async (req, res) => {
     try {
         const { status, limit = 50, offset = 0 } = req.query;
 
-        const filter = {};
-        if (status) {
-            filter.status = normalizeStatusForStorage(status);
+        const normalizedStatusFilter = status ? normalizeStatusForStorage(status) : null;
+        const aggregatedMessages = [];
+
+        for (const collectionName of CONTACT_COLLECTIONS) {
+            try {
+                const result = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: collectionName,
+                    command: '--read',
+                    data: {}
+                });
+
+                if (!result.success) {
+                    if (result.error && /not found/i.test(result.error)) {
+                        continue;
+                    }
+                    console.warn(`⚠️ Failed to read ${collectionName}:`, result.error);
+                    continue;
+                }
+
+                const collectionRecords = Array.isArray(result.data)
+                    ? result.data
+                    : [result.data].filter(Boolean);
+
+                collectionRecords.forEach(record => {
+                    aggregatedMessages.push(formatContactMessage(record, collectionName));
+                });
+            } catch (collectionError) {
+                console.error(`⚠️ Error fetching ${collectionName}:`, collectionError);
+            }
         }
 
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'contact_messages',
-            command: '--read',
-            data: { filter }
-        });
+        const filteredMessages = normalizedStatusFilter
+            ? aggregatedMessages.filter(message => message.status === normalizedStatusFilter)
+            : aggregatedMessages;
 
-        if (!result.success) {
-            return res.status(500).json({
-                success: false,
-                error: 'Failed to fetch support messages'
-            });
-        }
+        filteredMessages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-        let messages = Array.isArray(result.data) ? result.data : [result.data].filter(Boolean);
-
-        messages = messages.map(message => ({
-            ...message,
-            status: normalizeStatusForResponse(message.status),
-            updatedAt: message.updatedAt || message.createdAt,
-            source: message.source || 'website_contact_form'
-        }));
-
-        // Sort by date (newest first)
-        messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-        // Apply pagination
-        const total = messages.length;
-        const paginatedMessages = messages.slice(parseInt(offset), parseInt(offset) + parseInt(limit));
+        const total = filteredMessages.length;
+        const start = parseInt(offset, 10);
+        const end = start + parseInt(limit, 10);
+        const paginatedMessages = filteredMessages.slice(start, end);
 
         res.json({
             success: true,
             messages: paginatedMessages,
             total,
-            limit: parseInt(limit),
-            offset: parseInt(offset)
+            limit: parseInt(limit, 10),
+            offset: parseInt(offset, 10)
         });
-
     } catch (error) {
         console.error('Get support messages error:', error);
         res.status(500).json({
@@ -204,32 +232,37 @@ router.get('/messages/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'contact_messages',
-            command: '--read',
-            data: { filter: { _id: id } }
-        });
+        let fetchedMessage = null;
 
-        if (!result.success || !result.data) {
+        for (const collectionName of CONTACT_COLLECTIONS) {
+            try {
+                const result = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: collectionName,
+                    command: '--read',
+                    data: { filter: { _id: id } }
+                });
+
+                if (result.success && result.data) {
+                    fetchedMessage = formatContactMessage(result.data, collectionName);
+                    break;
+                }
+            } catch (collectionError) {
+                console.error(`⚠️ Error fetching ${collectionName} record ${id}:`, collectionError);
+            }
+        }
+
+        if (!fetchedMessage) {
             return res.status(404).json({
                 success: false,
                 error: 'Support message not found'
             });
         }
 
-        const messageRecord = {
-            ...result.data,
-            status: normalizeStatusForResponse(result.data.status),
-            updatedAt: result.data.updatedAt || result.data.createdAt,
-            source: result.data.source || 'website_contact_form'
-        };
-
         res.json({
             success: true,
-            message: messageRecord
+            message: fetchedMessage
         });
-
     } catch (error) {
         console.error('Get support message error:', error);
         res.status(500).json({
@@ -273,17 +306,30 @@ router.put('/messages/:id/reply', async (req, res) => {
             updatePayload.status = normalizeStatusForStorage(status);
         }
 
-        const updateResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'contact_messages',
-            command: '--update',
-            data: {
-                filter: { _id: id },
-                update: updatePayload
-            }
-        });
+        let updateSuccess = false;
 
-        if (!updateResult.success) {
+        for (const collectionName of CONTACT_COLLECTIONS) {
+            try {
+                const updateResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: collectionName,
+                    command: '--update',
+                    data: {
+                        filter: { _id: id },
+                        update: updatePayload
+                    }
+                });
+
+                if (updateResult.success) {
+                    updateSuccess = true;
+                    break;
+                }
+            } catch (collectionError) {
+                console.error(`⚠️ Error updating ${collectionName} record ${id}:`, collectionError);
+            }
+        }
+
+        if (!updateSuccess) {
             return res.status(404).json({
                 success: false,
                 error: 'Support message not found'
