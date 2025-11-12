@@ -5,6 +5,24 @@ const emailService = require('../services/emailService');
 
 const db = getDBInstance();
 
+const VALID_CONTACT_STATUSES = new Set(['unread', 'read', 'replied']);
+
+const normalizeStatusForStorage = (status) => {
+    if (!status) return 'unread';
+    const lower = status.toLowerCase();
+    if (VALID_CONTACT_STATUSES.has(lower)) return lower;
+    if (lower === 'new' || lower === 'pending') return 'unread';
+    return 'unread';
+};
+
+const normalizeStatusForResponse = (status) => {
+    if (!status) return 'unread';
+    const lower = status.toLowerCase();
+    if (VALID_CONTACT_STATUSES.has(lower)) return lower;
+    if (lower === 'new' || lower === 'pending') return 'unread';
+    return lower;
+};
+
 /**
  * POST /api/support/contact
  * Submit a support/contact message
@@ -21,30 +39,36 @@ router.post('/contact', async (req, res) => {
             });
         }
 
-        // Normalize email
+        const trimmedName = name?.trim();
+        const trimmedSubject = subject?.trim();
         const normalizedEmail = email.trim().toLowerCase();
+        const nowIso = new Date().toISOString();
+        const ticketId = `SPT-${Date.now()}`;
 
         // Extract first name from full name
         const firstName = name ? name.split(' ')[0] : 'there';
 
         // Create support message record
-        const supportMessage = {
-            name: name || 'Anonymous',
+        const contactMessage = {
+            ticketId,
+            source: 'website_contact_form',
+            name: trimmedName || 'Anonymous',
             email: normalizedEmail,
-            subject: subject || 'General Inquiry',
-            message: message,
-            status: 'pending',
-            createdAt: new Date().toISOString(),
-            repliedAt: null,
-            reply: null
+            subject: trimmedSubject || 'General Inquiry',
+            message,
+            status: 'unread',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            reply: null,
+            repliedAt: null
         };
 
         // Save to database
         const result = await db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'support_messages',
+            collection_name: 'contact_messages',
             command: '--create',
-            data: supportMessage
+            data: contactMessage
         });
 
         if (!result.success) {
@@ -55,16 +79,17 @@ router.post('/contact', async (req, res) => {
         }
 
         // Get the created message ID (ticket ID)
-        const ticketId = result.data?._id || result.insertedId || 'SPT-' + Date.now();
+        const adminMessageId = result.data?._id || result.insertedId || null;
+        const resolvedTicketId = ticketId || adminMessageId || `SPT-${Date.now()}`;
 
-        console.log(`✅ Support message received from ${normalizedEmail}, ticket: ${ticketId}`);
+        console.log(`✅ Support message received from ${normalizedEmail}, ticket: ${resolvedTicketId}`);
 
         // Send confirmation email to customer
         try {
             await emailService.sendSupportConfirmationEmail(
                 normalizedEmail,
                 firstName,
-                ticketId
+                resolvedTicketId
             );
             console.log(`✅ Support confirmation email sent to ${normalizedEmail}`);
         } catch (emailError) {
@@ -76,10 +101,10 @@ router.post('/contact', async (req, res) => {
         try {
             const forwardResult = await emailService.sendSupportInboxEmail({
                 fromEmail: normalizedEmail,
-                fromName: name,
-                subject,
+                fromName: trimmedName,
+                subject: trimmedSubject,
                 message,
-                ticketId
+                ticketId: resolvedTicketId
             });
 
             if (!forwardResult.success) {
@@ -92,7 +117,8 @@ router.post('/contact', async (req, res) => {
         res.json({
             success: true,
             message: 'Support message received. We\'ll reply within 24 hours.',
-            ticketId: ticketId,
+            ticketId: resolvedTicketId,
+            adminMessageId,
             emailSent: true
         });
 
@@ -113,11 +139,14 @@ router.get('/messages', async (req, res) => {
     try {
         const { status, limit = 50, offset = 0 } = req.query;
 
-        const filter = status ? { status } : {};
+        const filter = {};
+        if (status) {
+            filter.status = normalizeStatusForStorage(status);
+        }
 
         const result = await db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'support_messages',
+            collection_name: 'contact_messages',
             command: '--read',
             data: { filter }
         });
@@ -130,6 +159,13 @@ router.get('/messages', async (req, res) => {
         }
 
         let messages = Array.isArray(result.data) ? result.data : [result.data].filter(Boolean);
+
+        messages = messages.map(message => ({
+            ...message,
+            status: normalizeStatusForResponse(message.status),
+            updatedAt: message.updatedAt || message.createdAt,
+            source: message.source || 'website_contact_form'
+        }));
 
         // Sort by date (newest first)
         messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -165,7 +201,7 @@ router.get('/messages/:id', async (req, res) => {
 
         const result = await db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'support_messages',
+            collection_name: 'contact_messages',
             command: '--read',
             data: { filter: { _id: id } }
         });
@@ -177,9 +213,16 @@ router.get('/messages/:id', async (req, res) => {
             });
         }
 
+        const messageRecord = {
+            ...result.data,
+            status: normalizeStatusForResponse(result.data.status),
+            updatedAt: result.data.updatedAt || result.data.createdAt,
+            source: result.data.source || 'website_contact_form'
+        };
+
         res.json({
             success: true,
-            message: result.data
+            message: messageRecord
         });
 
     } catch (error) {
@@ -198,26 +241,40 @@ router.get('/messages/:id', async (req, res) => {
 router.put('/messages/:id/reply', async (req, res) => {
     try {
         const { id } = req.params;
-        const { reply } = req.body;
+        const { reply, status } = req.body;
 
-        if (!reply) {
+        if (!reply && !status) {
             return res.status(400).json({
                 success: false,
-                error: 'Reply message is required'
+                error: 'Reply message or status update is required'
             });
+        }
+
+        const nowIso = new Date().toISOString();
+        const updatePayload = {
+            updatedAt: nowIso
+        };
+
+        if (reply) {
+            updatePayload.reply = reply;
+            updatePayload.repliedAt = nowIso;
+            updatePayload.status = 'replied';
+        }
+
+        if (status && !reply) {
+            updatePayload.status = normalizeStatusForStorage(status);
+        } else if (status && reply) {
+            // If both reply and status provided, ensure consistency
+            updatePayload.status = normalizeStatusForStorage(status);
         }
 
         const updateResult = await db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'support_messages',
+            collection_name: 'contact_messages',
             command: '--update',
             data: {
                 filter: { _id: id },
-                update: {
-                    reply: reply,
-                    status: 'replied',
-                    repliedAt: new Date().toISOString()
-                }
+                update: updatePayload
             }
         });
 
@@ -230,7 +287,7 @@ router.put('/messages/:id/reply', async (req, res) => {
 
         res.json({
             success: true,
-            message: 'Reply sent successfully'
+            message: 'Support message updated successfully'
         });
 
     } catch (error) {

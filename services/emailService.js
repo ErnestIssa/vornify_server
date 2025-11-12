@@ -19,6 +19,7 @@ class EmailService {
         this.fromEmail = process.env.EMAIL_FROM || 'support@peakmode.se';
         this.supportInboxEmail = process.env.SUPPORT_INBOX_EMAIL || 'support@peakmode.se';
         this.supportSenderName = process.env.SUPPORT_INBOX_NAME || 'Peak Mode Support';
+        this.adminNotificationEmail = process.env.ADMIN_EMAIL || process.env.ADMIN_SUPPORT_EMAIL || null;
     }
 
     /**
@@ -721,6 +722,10 @@ class EmailService {
                     'X-Support-TicketId': supportTicketId
                 }
             };
+
+            if (this.adminNotificationEmail && this.adminNotificationEmail !== this.supportInboxEmail) {
+                msg.cc = this.adminNotificationEmail;
+            }
 
             const response = await sgMail.send(msg);
 
