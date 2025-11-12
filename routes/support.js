@@ -307,6 +307,7 @@ router.put('/messages/:id/reply', async (req, res) => {
         }
 
         let updateSuccess = false;
+        let updatedCollection = null;
 
         for (const collectionName of CONTACT_COLLECTIONS) {
             try {
@@ -322,6 +323,7 @@ router.put('/messages/:id/reply', async (req, res) => {
 
                 if (updateResult.success) {
                     updateSuccess = true;
+                    updatedCollection = collectionName;
                     break;
                 }
             } catch (collectionError) {
@@ -336,9 +338,46 @@ router.put('/messages/:id/reply', async (req, res) => {
             });
         }
 
+        let updatedMessage = null;
+
+        if (updatedCollection) {
+            try {
+                const fetchResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: updatedCollection,
+                    command: '--read',
+                    data: { filter: { _id: id } }
+                });
+
+                if (fetchResult.success && fetchResult.data) {
+                    updatedMessage = formatContactMessage(fetchResult.data, updatedCollection);
+                }
+            } catch (fetchError) {
+                console.error(`⚠️ Error fetching updated ${updatedCollection} record ${id}:`, fetchError);
+            }
+        }
+
+        if (reply && updatedMessage && updatedMessage.email) {
+            try {
+                const emailResult = await emailService.sendSupportReplyEmail({
+                    to: updatedMessage.email,
+                    name: updatedMessage.name,
+                    replyMessage: reply,
+                    subject: updatedMessage.subject,
+                    ticketId: updatedMessage.ticketId
+                });
+
+                if (!emailResult.success) {
+                    console.error('⚠️ Failed to send support reply email:', emailResult.details || emailResult.error);
+                }
+            } catch (emailError) {
+                console.error('⚠️ Error sending support reply email:', emailError);
+            }
+        }
+
         res.json({
             success: true,
-            message: 'Support message updated successfully'
+            message: updatedMessage || 'Support message updated successfully'
         });
 
     } catch (error) {

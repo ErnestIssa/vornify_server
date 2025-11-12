@@ -658,6 +658,101 @@ class EmailService {
     }
 
     /**
+     * Send a reply email back to the customer
+     * @param {object} params
+     * @param {string} params.to - Customer email address
+     * @param {string} params.name - Customer name
+     * @param {string} params.replyMessage - Reply body
+     * @param {string} [params.subject] - Original subject
+     * @param {string} [params.ticketId] - Ticket identifier
+     * @returns {Promise<object>}
+     */
+    async sendSupportReplyEmail({ to, name, replyMessage, subject, ticketId }) {
+        try {
+            if (!to) {
+                throw new Error('Recipient email address is required for support replies');
+            }
+
+            if (!replyMessage) {
+                throw new Error('Reply message content is required');
+            }
+
+            const templateId = process.env.SENDGRID_SUPPORT_REPLY_TEMPLATE_ID;
+            const customerName = name || 'there';
+            const safeSubject = subject || 'Response from Peak Mode Support';
+            const replyBody = replyMessage;
+            const ticket = ticketId || 'N/A';
+
+            if (templateId) {
+                const dynamicData = {
+                    customerName,
+                    replyMessage: replyBody,
+                    subject: safeSubject,
+                    ticketId: ticket,
+                    supportEmail: this.fromEmail,
+                    currentYear: new Date().getFullYear()
+                };
+
+                return await this.sendCustomEmail(
+                    to,
+                    'Response from Peak Mode Support',
+                    templateId,
+                    dynamicData
+                );
+            }
+
+            const textContent = [
+                `Hi ${customerName},`,
+                '',
+                'Thank you for contacting Peak Mode Support. Here is our response:',
+                '',
+                replyBody,
+                '',
+                `Ticket ID: ${ticket}`,
+                '',
+                'Best regards,',
+                'Peak Mode Support Team'
+            ].join('\n');
+
+            const htmlContent = `
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #222;">
+                    <p>Hi ${customerName},</p>
+                    <p>Thank you for contacting Peak Mode Support. Here is our response:</p>
+                    <p>${this.escapeHtml(replyBody).replace(/\r?\n/g, '<br>')}</p>
+                    <p><strong>Ticket ID:</strong> ${ticket}</p>
+                    <p>Best regards,<br/>Peak Mode Support Team</p>
+                </div>
+            `;
+
+            const msg = {
+                to,
+                from: {
+                    email: this.fromEmail,
+                    name: 'Peak Mode Support'
+                },
+                subject: safeSubject,
+                text: textContent,
+                html: htmlContent
+            };
+
+            await sgMail.send(msg);
+
+            return {
+                success: true,
+                message: 'Support reply email sent successfully',
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            console.error('❌ Support reply email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send support reply email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
      * Send support inbox notification email to Peak Mode support team
      * @param {object} params - Parameters for the email
      * @param {string} params.fromEmail - Email address of the user submitting the ticket
@@ -743,6 +838,97 @@ class EmailService {
             return {
                 success: false,
                 error: 'Failed to send support inbox email',
+                details: error.response?.body?.errors || error.message
+            };
+        }
+    }
+
+    /**
+     * Send support reply email from admin to customer
+     * @param {object} params - Parameters for the email
+     * @param {string} params.to - Customer email address
+     * @param {string} [params.name] - Customer name for greeting
+     * @param {string} params.replyMessage - Admin reply content
+     * @param {string} [params.subject] - Original subject provided by user
+     * @param {string} [params.ticketId] - Support ticket identifier
+     * @returns {Promise<object>} Result object
+     */
+    async sendSupportReplyEmail({ to, name, replyMessage, subject, ticketId }) {
+        try {
+            if (!to) {
+                throw new Error('Recipient email address is required for support reply emails');
+            }
+
+            if (!replyMessage) {
+                throw new Error('replyMessage is required for support reply emails');
+            }
+
+            const cleanedRecipient = to.trim();
+            const customerName = name && name.trim() !== '' ? name.trim() : 'Peak Mode Customer';
+            const baseSubject = subject && subject.trim() !== '' ? subject.trim() : 'Peak Mode Support';
+            const compiledSubject = baseSubject.toLowerCase().startsWith('re:')
+                ? baseSubject
+                : `Re: ${baseSubject}`;
+            const supportTicketId = ticketId || `SPT-${Date.now()}`;
+
+            const textContent = [
+                `Hi ${customerName},`,
+                '',
+                replyMessage,
+                '',
+                '---',
+                'Peak Mode Support',
+                'support@peakmode.se',
+                `Ticket ID: ${supportTicketId}`
+            ].join('\n');
+
+            const sanitizedMessage = this.escapeHtml(replyMessage);
+            const formattedMessage = sanitizedMessage.replace(/\r?\n/g, '<br>');
+
+            const htmlContent = `
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2933;">
+                    <p>Hi ${this.escapeHtml(customerName)},</p>
+                    <p>${formattedMessage}</p>
+                    <hr style="margin: 24px 0; border: 0; border-top: 1px solid #e2e8f0;">
+                    <p style="margin-bottom: 4px;"><strong>Peak Mode Support</strong></p>
+                    <p style="margin: 0;">
+                        <a href="mailto:support@peakmode.se" style="color: #2563eb;">support@peakmode.se</a><br>
+                        Ticket ID: ${this.escapeHtml(supportTicketId)}
+                    </p>
+                </div>
+            `;
+
+            const msg = {
+                to: cleanedRecipient,
+                from: {
+                    email: this.supportInboxEmail,
+                    name: this.supportSenderName || 'Peak Mode Support'
+                },
+                replyTo: this.supportInboxEmail,
+                subject: compiledSubject,
+                text: textContent,
+                html: htmlContent,
+                headers: {
+                    'X-Support-TicketId': supportTicketId
+                }
+            };
+
+            const response = await sgMail.send(msg);
+
+            console.log(`✅ Support reply email sent to ${cleanedRecipient} for ticket ${supportTicketId}`);
+
+            return {
+                success: true,
+                message: 'Support reply email sent successfully',
+                messageId: response[0].headers['x-message-id'],
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            console.error('❌ Support reply email error:', error.response?.body || error.message);
+
+            return {
+                success: false,
+                error: 'Failed to send support reply email',
                 details: error.response?.body?.errors || error.message
             };
         }
