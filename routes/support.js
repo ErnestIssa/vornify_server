@@ -308,6 +308,7 @@ router.put('/messages/:id/reply', async (req, res) => {
 
         let updateSuccess = false;
         let updatedCollection = null;
+        let rawUpdatedRecord = null;
 
         for (const collectionName of CONTACT_COLLECTIONS) {
             try {
@@ -324,6 +325,20 @@ router.put('/messages/:id/reply', async (req, res) => {
                 if (updateResult.success) {
                     updateSuccess = true;
                     updatedCollection = collectionName;
+                    try {
+                        const fetchResult = await db.executeOperation({
+                            database_name: 'peakmode',
+                            collection_name: collectionName,
+                            command: '--read',
+                            data: { filter: { _id: id } }
+                        });
+
+                        if (fetchResult.success && fetchResult.data) {
+                            rawUpdatedRecord = fetchResult.data;
+                        }
+                    } catch (fetchError) {
+                        console.error(`⚠️ Error fetching updated ${collectionName} record ${id}:`, fetchError);
+                    }
                     break;
                 }
             } catch (collectionError) {
@@ -338,24 +353,9 @@ router.put('/messages/:id/reply', async (req, res) => {
             });
         }
 
-        let updatedMessage = null;
-
-        if (updatedCollection) {
-            try {
-                const fetchResult = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: updatedCollection,
-                    command: '--read',
-                    data: { filter: { _id: id } }
-                });
-
-                if (fetchResult.success && fetchResult.data) {
-                    updatedMessage = formatContactMessage(fetchResult.data, updatedCollection);
-                }
-            } catch (fetchError) {
-                console.error(`⚠️ Error fetching updated ${updatedCollection} record ${id}:`, fetchError);
-            }
-        }
+        const updatedMessage = updatedCollection && rawUpdatedRecord
+            ? formatContactMessage(rawUpdatedRecord, updatedCollection)
+            : null;
 
         if (reply && updatedMessage && updatedMessage.email) {
             try {
@@ -377,7 +377,10 @@ router.put('/messages/:id/reply', async (req, res) => {
 
         res.json({
             success: true,
-            message: updatedMessage || 'Support message updated successfully'
+            message: updatedMessage || formatContactMessage({
+                ...(rawUpdatedRecord || updatePayload),
+                _id: id
+            }, updatedCollection || CONTACT_COLLECTION)
         });
 
     } catch (error) {
