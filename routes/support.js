@@ -64,22 +64,27 @@ router.post('/contact', async (req, res) => {
         };
 
         // Save to database
-        const result = await db.executeOperation({
+        const dbResponse = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'contact_messages',
             command: '--create',
             data: contactMessage
         });
 
-        if (!result.success) {
+        if (!dbResponse.success) {
             return res.status(500).json({
                 success: false,
                 error: 'Failed to save support message'
             });
         }
 
-        // Get the created message ID (ticket ID)
-        const adminMessageId = result.data?._id || result.insertedId || null;
+        const insertedId =
+            dbResponse.data?._id ||
+            dbResponse.data?.insertedId ||
+            dbResponse.insertedId ||
+            null;
+
+        const adminMessageId = insertedId ? String(insertedId) : null;
         const resolvedTicketId = ticketId || adminMessageId || `SPT-${Date.now()}`;
 
         console.log(`✅ Support message received from ${normalizedEmail}, ticket: ${resolvedTicketId}`);
