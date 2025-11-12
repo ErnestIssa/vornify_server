@@ -18,6 +18,7 @@ class EmailService {
         
         this.fromEmail = process.env.EMAIL_FROM || 'support@peakmode.se';
         this.supportInboxEmail = process.env.SUPPORT_INBOX_EMAIL || 'support@peakmode.se';
+        this.supportSenderName = process.env.SUPPORT_INBOX_NAME || 'Peak Mode Support';
     }
 
     /**
@@ -707,11 +708,18 @@ class EmailService {
 
             const msg = {
                 to: this.supportInboxEmail,
-                from: cleanedFromEmail,
+                from: {
+                    email: this.supportInboxEmail,
+                    name: this.supportSenderName
+                },
                 replyTo: cleanedFromEmail,
                 subject: `[Support] ${safeSubject}`,
                 text: textContent,
-                html: htmlContent
+                html: htmlContent,
+                headers: {
+                    'X-Original-From': cleanedFromEmail,
+                    'X-Support-TicketId': supportTicketId
+                }
             };
 
             const response = await sgMail.send(msg);
