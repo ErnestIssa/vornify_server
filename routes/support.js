@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
+const { ObjectId } = require('mongodb');
 
 const db = getDBInstance();
 
@@ -42,6 +43,25 @@ const formatContactMessage = (message = {}, collectionTag = CONTACT_COLLECTION) 
         source: base.source || (collectionTag === CONTACT_COLLECTION ? 'website_contact_form' : 'legacy_support_form'),
         _collection: collectionTag
     };
+};
+
+const createFilterVariants = (identifier) => {
+    const filters = [
+        { _id: identifier },
+        { id: identifier },
+        { adminMessageId: identifier },
+        { ticketId: identifier }
+    ];
+
+    if (typeof identifier === 'string' && /^[0-9a-fA-F]{24}$/.test(identifier)) {
+        try {
+            filters.unshift({ _id: new ObjectId(identifier) });
+        } catch (error) {
+            console.warn(`⚠️ Unable to convert identifier ${identifier} to ObjectId:`, error.message);
+        }
+    }
+
+    return filters;
 };
 
 /**
@@ -236,15 +256,23 @@ router.get('/messages/:id', async (req, res) => {
 
         for (const collectionName of CONTACT_COLLECTIONS) {
             try {
-                const result = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: collectionName,
-                    command: '--read',
-                    data: { filter: { _id: id } }
-                });
+                const filters = createFilterVariants(id);
 
-                if (result.success && result.data) {
-                    fetchedMessage = formatContactMessage(result.data, collectionName);
+                for (const filter of filters) {
+                    const result = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: collectionName,
+                        command: '--read',
+                        data: { filter }
+                    });
+
+                    if (result.success && result.data) {
+                        fetchedMessage = formatContactMessage(result.data, collectionName);
+                        break;
+                    }
+                }
+
+                if (fetchedMessage) {
                     break;
                 }
             } catch (collectionError) {
@@ -312,12 +340,9 @@ router.put('/messages/:id/reply', async (req, res) => {
 
         for (const collectionName of CONTACT_COLLECTIONS) {
             try {
-                const possibleFilters = [
-                    { _id: id },
-                    { id: id }
-                ];
+                const filters = createFilterVariants(id);
 
-                for (const filter of possibleFilters) {
+                for (const filter of filters) {
                     const fetchResult = await db.executeOperation({
                         database_name: 'peakmode',
                         collection_name: collectionName,
