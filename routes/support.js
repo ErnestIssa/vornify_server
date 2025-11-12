@@ -306,56 +306,71 @@ router.put('/messages/:id/reply', async (req, res) => {
             updatePayload.status = normalizeStatusForStorage(status);
         }
 
-        let updateSuccess = false;
-        let updatedCollection = null;
-        let rawUpdatedRecord = null;
+        let existingRecord = null;
+        let existingCollection = null;
+        let updateFilter = { _id: id };
 
         for (const collectionName of CONTACT_COLLECTIONS) {
             try {
-                const updateResult = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: collectionName,
-                    command: '--update',
-                    data: {
-                        filter: { _id: id },
-                        update: updatePayload
-                    }
-                });
+                const possibleFilters = [
+                    { _id: id },
+                    { id: id }
+                ];
 
-                if (updateResult.success) {
-                    updateSuccess = true;
-                    updatedCollection = collectionName;
-                    try {
-                        const fetchResult = await db.executeOperation({
-                            database_name: 'peakmode',
-                            collection_name: collectionName,
-                            command: '--read',
-                            data: { filter: { _id: id } }
-                        });
+                for (const filter of possibleFilters) {
+                    const fetchResult = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: collectionName,
+                        command: '--read',
+                        data: { filter }
+                    });
 
-                        if (fetchResult.success && fetchResult.data) {
-                            rawUpdatedRecord = fetchResult.data;
-                        }
-                    } catch (fetchError) {
-                        console.error(`⚠️ Error fetching updated ${collectionName} record ${id}:`, fetchError);
+                    if (fetchResult.success && fetchResult.data) {
+                        existingRecord = fetchResult.data;
+                        existingCollection = collectionName;
+                        updateFilter = filter;
+                        break;
                     }
+                }
+
+                if (existingRecord) {
                     break;
                 }
-            } catch (collectionError) {
-                console.error(`⚠️ Error updating ${collectionName} record ${id}:`, collectionError);
+            } catch (fetchError) {
+                console.error(`⚠️ Error fetching ${collectionName} record ${id}:`, fetchError);
             }
         }
 
-        if (!updateSuccess) {
+        if (!existingRecord || !existingCollection) {
             return res.status(404).json({
                 success: false,
                 error: 'Support message not found'
             });
         }
 
-        const updatedMessage = updatedCollection && rawUpdatedRecord
-            ? formatContactMessage(rawUpdatedRecord, updatedCollection)
-            : null;
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: existingCollection,
+            command: '--update',
+            data: {
+                filter: updateFilter,
+                update: updatePayload
+            }
+        });
+
+        if (!updateResult.success) {
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to update support message'
+            });
+        }
+
+        const rawUpdatedRecord = {
+            ...existingRecord,
+            ...updatePayload
+        };
+
+        const updatedMessage = formatContactMessage(rawUpdatedRecord, existingCollection);
 
         if (reply && updatedMessage && updatedMessage.email) {
             try {
@@ -377,10 +392,7 @@ router.put('/messages/:id/reply', async (req, res) => {
 
         res.json({
             success: true,
-            message: updatedMessage || formatContactMessage({
-                ...(rawUpdatedRecord || updatePayload),
-                _id: id
-            }, updatedCollection || CONTACT_COLLECTION)
+            message: updatedMessage
         });
 
     } catch (error) {
