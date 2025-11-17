@@ -709,7 +709,7 @@ router.post('/contact', async (req, res) => {
             body: message,
             customer: {
                 name: trimmedName,
-                email: normalizedEmail,
+            email: normalizedEmail,
                 phone: phone || '',
                 orderId: orderId || null
             },
@@ -852,6 +852,7 @@ router.get('/messages', async (req, res) => {
  * NOTE: This route must come BEFORE /messages/:id to avoid route conflicts
  */
 const replyHandler = async (req, res) => {
+    console.log(`📨 Reply handler called - Method: ${req.method}, Path: ${req.path}, ID: ${req.params.id}`);
     try {
         const { id } = req.params;
         const { message, attachments = [], cc = [], bcc = [], internalNote } = req.body || {};
@@ -965,6 +966,7 @@ router.put('/messages/:id/reply', replyHandler);
 
 // Register PATCH route (must come before GET /messages/:id to avoid conflicts)
 router.patch('/messages/:id', async (req, res) => {
+    console.log(`🔄 PATCH /messages/:id hit - ID: ${req.params.id}, Updates:`, Object.keys(req.body || {}));
     try {
         const { id } = req.params;
         const updates = req.body || {};
@@ -983,7 +985,7 @@ router.patch('/messages/:id', async (req, res) => {
                 success: false,
                 error: 'Support message not found'
             });
-        }
+                }
 
         if (result.error === 'no_changes') {
             return res.status(400).json({
@@ -1135,6 +1137,19 @@ router.post('/messages/:id/assign', async (req, res) => {
         });
     }
 });
+
+// Test route to verify router is working
+router.get('/test', (req, res) => {
+    res.json({ success: true, message: 'Support routes are working!' });
+});
+
+// Log registered routes for debugging
+console.log('✅ Support routes registered:');
+console.log('  - GET /api/support/test (test route)');
+console.log('  - POST /api/support/messages/:id/reply');
+console.log('  - PUT /api/support/messages/:id/reply');
+console.log('  - PATCH /api/support/messages/:id');
+console.log('  - GET /api/support/messages/:id');
 
 module.exports = router;
 
