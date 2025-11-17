@@ -6,6 +6,14 @@ const { ObjectId } = require('mongodb');
 
 const db = getDBInstance();
 
+// Debug middleware to log all requests to support routes
+router.use((req, res, next) => {
+    console.log(`🔍 [SUPPORT ROUTES] ${req.method} ${req.path} - Original URL: ${req.originalUrl}`);
+    console.log(`   Params:`, req.params);
+    console.log(`   Query:`, req.query);
+    next();
+});
+
 const CONTACT_COLLECTION = 'contact_messages';
 const LEGACY_CONTACT_COLLECTION = 'support_messages';
 const CONTACT_COLLECTIONS = [CONTACT_COLLECTION, LEGACY_CONTACT_COLLECTION];
@@ -961,10 +969,22 @@ const replyHandler = async (req, res) => {
 };
 
 // Register reply routes (must come before /messages/:id to avoid conflicts)
+// Add OPTIONS handler for CORS preflight
+router.options('/messages/:id/reply', (req, res) => {
+    res.header('Access-Control-Allow-Methods', 'POST, PUT, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.status(200).end();
+});
 router.post('/messages/:id/reply', replyHandler);
 router.put('/messages/:id/reply', replyHandler);
 
 // Register PATCH route (must come before GET /messages/:id to avoid conflicts)
+// Add OPTIONS handler for CORS preflight
+router.options('/messages/:id', (req, res) => {
+    res.header('Access-Control-Allow-Methods', 'PATCH, GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.status(200).end();
+});
 router.patch('/messages/:id', async (req, res) => {
     console.log(`🔄 PATCH /messages/:id hit - ID: ${req.params.id}, Updates:`, Object.keys(req.body || {}));
     try {
@@ -1143,13 +1163,28 @@ router.get('/test', (req, res) => {
     res.json({ success: true, message: 'Support routes are working!' });
 });
 
+// Debug: Catch-all to see what routes are being hit
+router.use('/messages*', (req, res, next) => {
+    console.log(`🔍 [DEBUG] Unmatched /messages route: ${req.method} ${req.path} - Original: ${req.originalUrl}`);
+    next();
+});
+
 // Log registered routes for debugging
-console.log('✅ Support routes registered:');
-console.log('  - GET /api/support/test (test route)');
-console.log('  - POST /api/support/messages/:id/reply');
-console.log('  - PUT /api/support/messages/:id/reply');
-console.log('  - PATCH /api/support/messages/:id');
-console.log('  - GET /api/support/messages/:id');
+const registeredRoutes = [
+    'POST /api/support/contact',
+    'GET /api/support/messages',
+    'POST /api/support/messages/:id/reply',
+    'PUT /api/support/messages/:id/reply',
+    'PATCH /api/support/messages/:id',
+    'GET /api/support/messages/:id',
+    'POST /api/support/messages/:id/archive',
+    'POST /api/support/messages/:id/resolve',
+    'POST /api/support/messages/:id/assign',
+    'GET /api/support/test'
+];
+
+console.log('✅ Support routes module loaded. Registered routes:');
+registeredRoutes.forEach(route => console.log(`   ${route}`));
 
 module.exports = router;
 
