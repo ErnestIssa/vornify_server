@@ -847,37 +847,9 @@ router.get('/messages', async (req, res) => {
 });
 
 /**
- * GET /api/support/messages/:id
- * Get a specific support message
- */
-router.get('/messages/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const recordInfo = await findConversationRecordById(id);
-
-        if (!recordInfo) {
-            return res.status(404).json({
-                success: false,
-                error: 'Support message not found'
-            });
-        }
-
-        res.json({
-            success: true,
-            data: stripInternalFields(recordInfo.conversation, { includeThread: true })
-        });
-    } catch (error) {
-        console.error('Get support message error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Internal server error'
-        });
-    }
-});
-
-/**
- * PUT /api/support/messages/:id/reply
+ * POST/PUT /api/support/messages/:id/reply
  * Reply to a support message (admin only)
+ * NOTE: This route must come BEFORE /messages/:id to avoid route conflicts
  */
 const replyHandler = async (req, res) => {
     try {
@@ -987,9 +959,11 @@ const replyHandler = async (req, res) => {
     }
 };
 
+// Register reply routes (must come before /messages/:id to avoid conflicts)
 router.post('/messages/:id/reply', replyHandler);
 router.put('/messages/:id/reply', replyHandler);
 
+// Register PATCH route (must come before GET /messages/:id to avoid conflicts)
 router.patch('/messages/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -1032,6 +1006,35 @@ router.patch('/messages/:id', async (req, res) => {
         });
     } catch (error) {
         console.error('Update support message error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Internal server error'
+        });
+    }
+});
+
+/**
+ * GET /api/support/messages/:id
+ * Get a specific support message with full thread history
+ */
+router.get('/messages/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const recordInfo = await findConversationRecordById(id);
+
+        if (!recordInfo) {
+            return res.status(404).json({
+                success: false,
+                error: 'Support message not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            data: stripInternalFields(recordInfo.conversation, { includeThread: true })
+        });
+    } catch (error) {
+        console.error('Get support message error:', error);
         res.status(500).json({
             success: false,
             error: 'Internal server error'
