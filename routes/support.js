@@ -527,27 +527,38 @@ const fetchAllConversations = async () => {
 };
 
 const findConversationRecordById = async (identifier) => {
+    console.log(`🔍 [findConversationRecordById] Looking for message: ${identifier}`);
+    
     for (const collectionName of CONTACT_COLLECTIONS) {
         try {
             const filters = createFilterVariants(identifier);
+            console.log(`   Checking collection: ${collectionName} with ${filters.length} filter variants`);
 
             for (const filter of filters) {
+                // readRecords expects the query directly, not wrapped in a 'filter' property
                 const result = await db.executeOperation({
                     database_name: 'peakmode',
                     collection_name: collectionName,
                     command: '--read',
-                    data: { filter }
+                    data: filter  // Pass filter directly, not wrapped
                 });
 
                 if (result.success && result.data) {
+                    console.log(`   ✅ Found record in ${collectionName} with filter:`, Object.keys(filter)[0]);
                     const conversation = mapRecordToConversation(result.data, collectionName);
-                    if (!conversation) continue;
+                    if (!conversation) {
+                        console.log(`   ⚠️ Failed to map conversation from record`);
+                        continue;
+                    }
+                    console.log(`   ✅ Successfully mapped conversation - Status: ${conversation.status}, Source: ${conversation.source}`);
                     return {
                         collection: collectionName,
                         filter,
                         record: result.data,
                         conversation
                     };
+                } else {
+                    console.log(`   ❌ No match with filter:`, Object.keys(filter)[0]);
                 }
             }
         } catch (error) {
@@ -555,6 +566,7 @@ const findConversationRecordById = async (identifier) => {
         }
     }
 
+    console.log(`❌ [findConversationRecordById] Message ${identifier} not found in any collection`);
     return null;
 };
 
