@@ -991,9 +991,9 @@ router.post('/messages/:id/reply', replyHandler);
 router.put('/messages/:id/reply', replyHandler);
 
 // Register PATCH route (must come before GET /messages/:id to avoid conflicts)
-// Add OPTIONS handler for CORS preflight
+// Add OPTIONS handler for CORS preflight (covers GET, PATCH, DELETE)
 router.options('/messages/:id', (req, res) => {
-    res.header('Access-Control-Allow-Methods', 'PATCH, GET, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.status(200).end();
 });
@@ -1069,6 +1069,64 @@ router.get('/messages/:id', async (req, res) => {
         });
     } catch (error) {
         console.error('Get support message error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Internal server error'
+        });
+    }
+});
+
+/**
+ * DELETE /api/support/messages/:id
+ * Permanently delete a support message
+ */
+router.delete('/messages/:id', async (req, res) => {
+    console.log(`🗑️ DELETE /messages/:id hit - ID: ${req.params.id}`);
+    try {
+        const { id } = req.params;
+        const recordInfo = await findConversationRecordById(id);
+
+        if (!recordInfo) {
+            return res.status(404).json({
+                success: false,
+                error: 'Support message not found'
+            });
+        }
+
+        console.log(`   Deleting message from collection: ${recordInfo.collection}`);
+
+        // Delete the message from the database
+        const deleteResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: recordInfo.collection,
+            command: '--delete',
+            data: recordInfo.filter
+        });
+
+        if (!deleteResult.success) {
+            console.error('   ❌ Failed to delete message:', deleteResult.error);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to delete support message',
+                details: deleteResult.error || deleteResult.message
+            });
+        }
+
+        const deletedCount = deleteResult.data?.deletedCount || 
+                           (deleteResult.data?.acknowledged ? 1 : 0);
+
+        console.log(`   ✅ Message deleted successfully (count: ${deletedCount})`);
+
+        res.json({
+            success: true,
+            data: {
+                deletedCount,
+                messageId: id,
+                ticketId: recordInfo.conversation.ticketId
+            }
+        });
+    } catch (error) {
+        console.error('Delete support message error:', error);
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1189,6 +1247,7 @@ const registeredRoutes = [
     'PUT /api/support/messages/:id/reply',
     'PATCH /api/support/messages/:id',
     'GET /api/support/messages/:id',
+    'DELETE /api/support/messages/:id',
     'POST /api/support/messages/:id/archive',
     'POST /api/support/messages/:id/resolve',
     'POST /api/support/messages/:id/assign',
