@@ -18,6 +18,7 @@ const shippingRoutes = require('./routes/shipping');
 const trackingRoutes = require('./routes/tracking');
 const customerRoutes = require('./routes/customers');
 const reviewRoutes = require('./routes/reviews');
+const currencyRoutes = require('./routes/currency');
 const errorHandler = require('./middleware/errorHandler');
 require('dotenv').config();
 
@@ -69,6 +70,7 @@ app.use('/api/shipping', shippingRoutes); // Shipping quotes and methods
 app.use('/api/tracking', trackingRoutes); // Package tracking
 app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
+app.use('/api', currencyRoutes); // Currency conversion and settings
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {

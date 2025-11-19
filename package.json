@@ -30,9 +30,9 @@
     "mongodb": "^6.3.0",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
-    "nodemailer": "^6.10.0",
     "stripe": "^14.17.0",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

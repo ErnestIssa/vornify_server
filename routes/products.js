@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
+const currencyService = require('../services/currencyService');
 
 const db = getDBInstance();
 
@@ -19,6 +20,36 @@ router.get('/:id', async (req, res) => {
         if (result.success && result.data) {
             // Process inventory data to ensure proper structure
             const product = result.data;
+            
+            // Get requested currency from query parameter
+            const requestedCurrency = req.query.currency?.toUpperCase() || null;
+            const basePrice = product.price || 0;
+            const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
+            
+            // Add multi-currency prices
+            try {
+                const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency);
+                product.base_price = basePrice;
+                product.currency = baseCurrency;
+                product.prices = multiCurrencyPrices;
+                
+                // If specific currency requested, add converted_price field
+                if (requestedCurrency && requestedCurrency !== baseCurrency) {
+                    const convertedPrice = multiCurrencyPrices[requestedCurrency];
+                    if (convertedPrice !== undefined) {
+                        product.selected_currency = requestedCurrency;
+                        product.converted_price = convertedPrice;
+                        const rate = await currencyService.getExchangeRate(baseCurrency, requestedCurrency);
+                        product.exchange_rate = rate;
+                    }
+                }
+            } catch (currencyError) {
+                console.warn('Failed to get multi-currency prices:', currencyError);
+                // Fallback: use base price for all currencies
+                product.base_price = basePrice;
+                product.currency = baseCurrency;
+                product.prices = { [baseCurrency]: basePrice };
+            }
             
             // Ensure inventory structure is complete
             if (product.inventory) {
@@ -111,8 +142,25 @@ router.get('/', async (req, res) => {
                 products = products.slice(0, parseInt(limit));
             }
             
-            // Process inventory data for each product
-            products = products.map(product => {
+            // Process inventory data for each product and add multi-currency prices
+            products = await Promise.all(products.map(async (product) => {
+                // Add multi-currency prices
+                const basePrice = product.price || 0;
+                const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
+                
+                try {
+                    const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency);
+                    product.base_price = basePrice;
+                    product.currency = baseCurrency;
+                    product.prices = multiCurrencyPrices;
+                } catch (currencyError) {
+                    console.warn(`Failed to get multi-currency prices for product ${product.id}:`, currencyError);
+                    // Fallback: use base price for all currencies
+                    product.base_price = basePrice;
+                    product.currency = baseCurrency;
+                    product.prices = { [baseCurrency]: basePrice };
+                }
+                
                 if (product.inventory) {
                     // Process colors
                     if (product.inventory.colors && Array.isArray(product.inventory.colors)) {
@@ -152,7 +200,7 @@ router.get('/', async (req, res) => {
                     }
                 }
                 return product;
-            });
+            }));
             
             res.json({
                 success: true,

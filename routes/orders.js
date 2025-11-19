@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
+const currencyService = require('../services/currencyService');
 
 const db = getDBInstance();
 
@@ -273,6 +274,13 @@ router.post('/create', async (req, res) => {
             shipping: orderData.totals?.shipping || orderData.shippingCost || 0,
             tax: orderData.totals?.tax || orderData.tax || 0,
             subtotal: orderData.totals?.subtotal || orderData.subtotal || 0,
+            
+            // Multi-currency support
+            currency: orderData.currency || currencyService.BASE_CURRENCY,
+            baseTotal: orderData.baseTotal || orderData.totals?.total || orderData.total || 0,
+            baseCurrency: orderData.baseCurrency || currencyService.BASE_CURRENCY,
+            exchangeRate: orderData.exchangeRate || 1.0,
+            rateTimestamp: orderData.rateTimestamp || new Date().toISOString(),
             
             // Order status and details
             paymentMethod: orderData.paymentMethod || 'card',
