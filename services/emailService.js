@@ -112,36 +112,64 @@ class EmailService {
      * @param {string} to - Recipient email address
      * @param {string} name - Customer name
      * @param {object} orderDetails - Order details object
+     * @param {string} language - Language code (en or sv), defaults to 'en'
      * @returns {Promise<object>} Result object
      */
-    async sendOrderConfirmationEmail(to, name, orderDetails) {
+    async sendOrderConfirmationEmail(to, name, orderDetails, language = 'en') {
         try {
-            // You should create this template in SendGrid dashboard
-            const templateId = process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id';
+            // Get language-specific template ID or fallback to default
+            const languageTemplates = {
+                'en': process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_EN || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id',
+                'sv': process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_SV || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id'
+            };
+            
+            const templateId = languageTemplates[language] || languageTemplates['en'];
             
             // Calculate correct total from multiple possible sources
             const orderTotal = orderDetails.totals?.total || 
                               orderDetails.total || 
                               (orderDetails.items ? orderDetails.items.reduce((sum, item) => sum + (item.price * item.quantity), 0) : 0);
             
+            // Get currency symbol
+            const currency = orderDetails.currency || 'EUR';
+            const currencySymbols = {
+                'EUR': '€',
+                'SEK': 'kr',
+                'DKK': 'kr',
+                'PLN': 'zł',
+                'CZK': 'Kč',
+                'HUF': 'Ft',
+                'BGN': 'лв',
+                'RON': 'lei'
+            };
+            const currencySymbol = currencySymbols[currency] || currency;
+            
             // Format order items properly
             const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            
+            // Language-specific subject
+            const subjects = {
+                'en': `Order Confirmation - ${orderDetails.orderId}`,
+                'sv': `Orderbekräftelse - ${orderDetails.orderId}`
+            };
+            const subject = subjects[language] || subjects['en'];
             
             const dynamicData = {
                 customer_name: name || 'Valued Customer',
                 order_number: orderDetails.orderId || 'N/A',
                 order_date: orderDetails.orderDate || orderDetails.createdAt || new Date().toISOString(),
-                order_total: `${orderTotal} SEK`,
+                order_total: `${orderTotal} ${currencySymbol}`,
                 order_items: formattedItems,
                 shipping_address: this.formatAddressForEmail(orderDetails.shippingAddress),
                 order_status_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/track-order?orderId=${orderDetails.orderId}`,
                 website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
+                year: new Date().getFullYear(),
+                language: language // Include language in template data
             };
 
             const result = await this.sendCustomEmail(
                 to,
-                `Order Confirmation - ${orderDetails.orderId}`,
+                subject,
                 templateId,
                 dynamicData
             );

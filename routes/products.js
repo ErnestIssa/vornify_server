@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const currencyService = require('../services/currencyService');
+const translationService = require('../services/translationService');
 
 const db = getDBInstance();
 
@@ -20,6 +21,9 @@ router.get('/:id', async (req, res) => {
         if (result.success && result.data) {
             // Process inventory data to ensure proper structure
             const product = result.data;
+            
+            // Get requested language from query parameter
+            const language = translationService.getLanguageFromRequest(req);
             
             // Get requested currency from query parameter
             const requestedCurrency = req.query.currency?.toUpperCase() || null;
@@ -91,9 +95,13 @@ router.get('/:id', async (req, res) => {
                 }
             }
             
+            // Translate product content based on language
+            const translatedProduct = translationService.translateProduct(product, language);
+            
             res.json({
                 success: true,
-                data: product
+                data: translatedProduct,
+                language: language // Include language in response for frontend reference
             });
         } else {
             res.status(404).json({
@@ -114,6 +122,9 @@ router.get('/:id', async (req, res) => {
 router.get('/', async (req, res) => {
     try {
         const { category, featured, limit } = req.query;
+        
+        // Get requested language from query parameter
+        const language = translationService.getLanguageFromRequest(req);
         
         let query = {};
         
@@ -199,13 +210,16 @@ router.get('/', async (req, res) => {
                         }));
                     }
                 }
-                return product;
+                
+                // Translate product content based on language
+                return translationService.translateProduct(product, language);
             }));
             
             res.json({
                 success: true,
                 data: products,
-                count: products.length
+                count: products.length,
+                language: language // Include language in response for frontend reference
             });
         } else {
             res.status(500).json({

@@ -282,6 +282,9 @@ router.post('/create', async (req, res) => {
             exchangeRate: orderData.exchangeRate || 1.0,
             rateTimestamp: orderData.rateTimestamp || new Date().toISOString(),
             
+            // Language support (for email localization)
+            language: orderData.language || 'en', // Default to English if not provided
+            
             // Order status and details
             paymentMethod: orderData.paymentMethod || 'card',
             shippingMethod: orderData.shippingMethod?.name || orderData.shippingMethod || '',
@@ -351,10 +354,14 @@ router.post('/create', async (req, res) => {
                                        order.customerName ||
                                        'Valued Customer';
                     
+                    // Get language from order (defaults to 'en')
+                    const orderLanguage = order.language || 'en';
+                    
                     await emailService.sendOrderConfirmationEmail(
                         order.customer.email,
                         customerName,
-                        order
+                        order,
+                        orderLanguage
                     );
                     
                     // Mark email as sent
