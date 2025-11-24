@@ -3,6 +3,7 @@ const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const currencyService = require('../services/currencyService');
 const translationService = require('../services/translationService');
+const productTranslationHelper = require('../services/productTranslationHelper');
 
 const db = getDBInstance();
 
@@ -268,6 +269,14 @@ router.post('/', async (req, res) => {
             productData.inventory = db.processInventoryData(productData);
         }
         
+        // Automatically generate Swedish translations for new product
+        const swedishTranslations = productTranslationHelper.generateSwedishTranslations(productData);
+        if (Object.keys(swedishTranslations).length > 0) {
+            // Merge Swedish translations into product data
+            Object.assign(productData, swedishTranslations);
+            console.log(`🌐 [Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for new product`);
+        }
+        
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
@@ -305,6 +314,27 @@ router.put('/:id', async (req, res) => {
         // Process inventory data if provided
         if (updateData.inventory) {
             updateData.inventory = db.processInventoryData(updateData);
+        }
+        
+        // Get existing product to check for existing translations
+        const existingProductResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: { id }
+        });
+        
+        // Merge existing product data with update data to check for translations
+        const mergedProduct = existingProductResult.success && existingProductResult.data
+            ? { ...existingProductResult.data, ...updateData }
+            : updateData;
+        
+        // Automatically generate Swedish translations for updated fields (if missing)
+        const swedishTranslations = productTranslationHelper.generateSwedishTranslations(mergedProduct);
+        if (Object.keys(swedishTranslations).length > 0) {
+            // Merge Swedish translations into update data
+            Object.assign(updateData, swedishTranslations);
+            console.log(`🌐 [Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for updated product`);
         }
         
         const result = await db.executeOperation({

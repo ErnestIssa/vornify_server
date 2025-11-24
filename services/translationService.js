@@ -171,6 +171,11 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
         return product;
     }
     
+    // Debug: Log translation attempt
+    if (language !== DEFAULT_LANGUAGE) {
+        console.log(`🌐 [Translation] Translating product ${product.id || product._id || 'unknown'} to ${language}`);
+    }
+    
     // If requesting English and no Swedish translations exist, return early (no translation needed)
     if (language === DEFAULT_LANGUAGE) {
         const hasSwedishTranslations = Object.keys(product).some(key => 
@@ -225,23 +230,36 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
     ];
     
     // Translate each field
+    let translationCount = 0;
     translatableFields.forEach(field => {
         // Check both in translated copy and original product for the field
         const fieldValue = translated[field] !== undefined ? translated[field] : product[field];
         
         if (fieldValue !== undefined) {
+            const originalValue = translated[field];
+            
             // Handle arrays (like features, materials, careInstructions, etc.)
             if (Array.isArray(fieldValue)) {
-                translated[field] = translateArray(fieldValue, field, product, language);
+                const translatedArray = translateArray(fieldValue, field, product, language);
+                translated[field] = translatedArray;
+                if (language !== DEFAULT_LANGUAGE && JSON.stringify(translatedArray) !== JSON.stringify(fieldValue)) {
+                    translationCount++;
+                    console.log(`  ✅ Translated array field: ${field}`);
+                }
             }
             // Handle nested objects (like sizeMeasurements)
             else if (typeof fieldValue === 'object' && fieldValue !== null && !Array.isArray(fieldValue)) {
                 // Check if it's a nested translation object first
                 if (fieldValue[language] !== undefined) {
                     translated[field] = fieldValue[language];
+                    translationCount++;
+                    console.log(`  ✅ Translated nested object field: ${field} (found ${language} translation)`);
                 } else if (fieldValue[DEFAULT_LANGUAGE] !== undefined) {
                     // Fallback to English
                     translated[field] = fieldValue[DEFAULT_LANGUAGE];
+                    if (language !== DEFAULT_LANGUAGE) {
+                        console.log(`  ⚠️ Field ${field}: No ${language} translation, using English fallback`);
+                    }
                 } else {
                     // Recursively translate nested object
                     translated[field] = translateNestedObject(fieldValue, language);
@@ -249,10 +267,28 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
             }
             // Handle simple strings
             else if (typeof fieldValue === 'string') {
-                translated[field] = getTranslatedField(product, field, language);
+                const translatedValue = getTranslatedField(product, field, language);
+                translated[field] = translatedValue;
+                if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
+                    translationCount++;
+                    console.log(`  ✅ Translated string field: ${field}`);
+                } else if (language !== DEFAULT_LANGUAGE && translatedValue === fieldValue) {
+                    // Check if Swedish translation exists but wasn't used
+                    const svField = `${field}_sv`;
+                    const nestedSv = product[field]?.sv;
+                    if (product[svField] || nestedSv) {
+                        console.log(`  ⚠️ Field ${field}: Swedish translation exists but wasn't applied`);
+                    } else {
+                        console.log(`  ⚠️ Field ${field}: No Swedish translation found, using English`);
+                    }
+                }
             }
         }
     });
+    
+    if (language !== DEFAULT_LANGUAGE) {
+        console.log(`🌐 [Translation] Completed: ${translationCount} fields translated for language ${language}`);
+    }
     
     // Fields that should NEVER be translated (brand identity)
     // These remain unchanged: name, brand, sku, id, images, price, currency, inventory, etc.
