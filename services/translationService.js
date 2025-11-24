@@ -60,6 +60,105 @@ function getTranslatedField(obj, fieldName, language = DEFAULT_LANGUAGE) {
 }
 
 /**
+ * Translate an array of strings
+ * Handles arrays where each item can be:
+ * - A simple string
+ * - An object with translations: { en: "...", sv: "..." }
+ * - An array of strings with translations stored separately (flat suffix format)
+ * 
+ * @param {array} arrayField - Array field to translate
+ * @param {string} fieldName - Name of the field (for flat suffix lookup)
+ * @param {object} originalProduct - Original product object (for flat suffix lookup)
+ * @param {string} language - Target language
+ * @returns {array} Translated array
+ */
+function translateArray(arrayField, fieldName, originalProduct, language) {
+    if (!Array.isArray(arrayField)) {
+        return arrayField;
+    }
+    
+    // Check if there's a translated version of the entire array (flat suffix format)
+    // e.g., materials_sv: ["95% Polyester", "5% Elastan"]
+    if (language !== DEFAULT_LANGUAGE && originalProduct) {
+        const translatedArrayField = `${fieldName}_${language}`;
+        if (originalProduct[translatedArrayField] !== undefined && Array.isArray(originalProduct[translatedArrayField])) {
+            return originalProduct[translatedArrayField];
+        }
+    }
+    
+    // Check if array is stored as nested object with language keys
+    // e.g., materials: { en: [...], sv: [...] }
+    if (originalProduct && originalProduct[fieldName] && 
+        typeof originalProduct[fieldName] === 'object' && 
+        !Array.isArray(originalProduct[fieldName]) &&
+        originalProduct[fieldName][language]) {
+        if (Array.isArray(originalProduct[fieldName][language])) {
+            return originalProduct[fieldName][language];
+        }
+    }
+    
+    // Translate each item in the array
+    return arrayField.map((item, index) => {
+        // If item is an object with translations
+        if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+            const translatedItem = { ...item };
+            
+            // Translate common text fields in objects
+            ['text', 'name', 'description', 'title', 'label', 'value'].forEach(key => {
+                if (translatedItem[key] !== undefined) {
+                    translatedItem[key] = getTranslatedField(translatedItem, key, language);
+                }
+            });
+            
+            return translatedItem;
+        }
+        
+        // If item is a string, return as-is (no per-item translation for simple string arrays)
+        // Translation should be done at the array level using flat suffix or nested format
+        return item;
+    });
+}
+
+/**
+ * Translate a nested object (like sizeMeasurements)
+ * Recursively translates string values while preserving structure
+ * 
+ * @param {object} obj - Object to translate
+ * @param {string} language - Target language
+ * @returns {object} Translated object
+ */
+function translateNestedObject(obj, language) {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+        return obj;
+    }
+    
+    const translated = {};
+    
+    Object.keys(obj).forEach(key => {
+        const value = obj[key];
+        
+        // If value is a string, try to translate it
+        if (typeof value === 'string') {
+            translated[key] = getTranslatedField(obj, key, language);
+        }
+        // If value is an object, recursively translate it
+        else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+            translated[key] = translateNestedObject(value, language);
+        }
+        // If value is an array, translate it
+        else if (Array.isArray(value)) {
+            translated[key] = translateArray(value, key, obj, language);
+        }
+        // Otherwise, keep as-is (numbers, booleans, etc.)
+        else {
+            translated[key] = value;
+        }
+    });
+    
+    return translated;
+}
+
+/**
  * Translate a product object
  * Translates user-facing fields while preserving brand identity fields
  * 
@@ -72,68 +171,91 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
         return product;
     }
     
-    // Create a copy to avoid mutating original
+    // If requesting English and no Swedish translations exist, return early (no translation needed)
+    if (language === DEFAULT_LANGUAGE) {
+        const hasSwedishTranslations = Object.keys(product).some(key => 
+            key.endsWith('_sv') || (typeof product[key] === 'object' && product[key] !== null && product[key]?.sv !== undefined)
+        );
+        
+        // If no Swedish translations exist and requesting English, return as-is
+        if (!hasSwedishTranslations) {
+            return product;
+        }
+    }
+    
+    // Create a copy to avoid mutating original (shallow copy is sufficient)
     const translated = { ...product };
     
-    // Fields to translate (user-facing content)
+    // Complete list of translatable fields (user-facing content)
     const translatableFields = [
+        // Product descriptions
         'description',
-        'category',
-        'features',
-        'care_instructions',
+        'shortDescription',
+        
+        // Size & Fit
+        'sizeFitDescription',
+        'sizeMeasurements',
+        'fitGuide',
+        'sizeRecommendations',
+        
+        // Materials & Care
+        'materials',
+        'materialComposition',
         'careInstructions',
-        'size_guide',
-        'sizeGuide',
-        'shipping_info',
+        'care_instructions',
+        'sustainabilityInfo',
+        
+        // Shipping & Returns
         'shippingInfo',
-        'return_policy',
+        'shipping_info',
+        'shippingCosts',
+        'deliveryTime',
         'returnPolicy',
+        'return_policy',
+        'warrantyInfo',
         'warranty_info',
-        'warrantyInfo'
+        
+        // Product Features
+        'features',
+        
+        // Legacy/alternative field names
+        'category',
+        'size_guide',
+        'sizeGuide'
     ];
     
     // Translate each field
     translatableFields.forEach(field => {
-        if (translated[field] !== undefined) {
-            // Handle arrays (like features)
-            if (Array.isArray(translated[field])) {
-                translated[field] = translated[field].map((item, index) => {
-                    if (typeof item === 'object' && item !== null) {
-                        // If array item is an object, translate its text fields
-                        const translatedItem = { ...item };
-                        if (translatedItem.text) {
-                            translatedItem.text = getTranslatedField(translatedItem, 'text', language);
-                        }
-                        if (translatedItem.name) {
-                            translatedItem.name = getTranslatedField(translatedItem, 'name', language);
-                        }
-                        return translatedItem;
-                    }
-                    // If array item is a string, check for nested translations
-                    return getTranslatedField({ [field]: item }, field, language) || item;
-                });
-            } else {
-                // Handle objects (like size_guide)
-                if (typeof translated[field] === 'object' && translated[field] !== null && !Array.isArray(translated[field])) {
-                    const translatedObj = {};
-                    Object.keys(translated[field]).forEach(key => {
-                        if (key === 'title' || key === 'instructions' || key === 'description' || key === 'text') {
-                            translatedObj[key] = getTranslatedField(translated[field], key, language);
-                        } else {
-                            translatedObj[key] = translated[field][key];
-                        }
-                    });
-                    translated[field] = translatedObj;
+        // Check both in translated copy and original product for the field
+        const fieldValue = translated[field] !== undefined ? translated[field] : product[field];
+        
+        if (fieldValue !== undefined) {
+            // Handle arrays (like features, materials, careInstructions, etc.)
+            if (Array.isArray(fieldValue)) {
+                translated[field] = translateArray(fieldValue, field, product, language);
+            }
+            // Handle nested objects (like sizeMeasurements)
+            else if (typeof fieldValue === 'object' && fieldValue !== null && !Array.isArray(fieldValue)) {
+                // Check if it's a nested translation object first
+                if (fieldValue[language] !== undefined) {
+                    translated[field] = fieldValue[language];
+                } else if (fieldValue[DEFAULT_LANGUAGE] !== undefined) {
+                    // Fallback to English
+                    translated[field] = fieldValue[DEFAULT_LANGUAGE];
                 } else {
-                    // Handle simple strings
-                    translated[field] = getTranslatedField(translated, field, language);
+                    // Recursively translate nested object
+                    translated[field] = translateNestedObject(fieldValue, language);
                 }
+            }
+            // Handle simple strings
+            else if (typeof fieldValue === 'string') {
+                translated[field] = getTranslatedField(product, field, language);
             }
         }
     });
     
     // Fields that should NEVER be translated (brand identity)
-    // These remain unchanged: name, brand, sku, id, images, price, etc.
+    // These remain unchanged: name, brand, sku, id, images, price, currency, inventory, etc.
     
     return translated;
 }
