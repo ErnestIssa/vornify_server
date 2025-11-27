@@ -44,13 +44,9 @@ function stripSVPrefix(value) {
  * @returns {string} Language code (en or sv)
  */
 function getLanguageFromRequest(req) {
-    // Priority: query param > header > default
     const queryLang = req.query?.language?.toLowerCase();
     const headerLang = req.headers['accept-language']?.split(',')[0]?.split('-')[0]?.toLowerCase();
-    
     const lang = queryLang || headerLang || DEFAULT_LANGUAGE;
-    
-    // Validate and return supported language or default
     return SUPPORTED_LANGUAGES.includes(lang) ? lang : DEFAULT_LANGUAGE;
 }
 
@@ -71,30 +67,19 @@ function getTranslatedField(obj, fieldName, language = DEFAULT_LANGUAGE) {
         return '';
     }
     
-    // Format 1: Nested object (preferred)
-    // e.g., description: { en: "...", sv: "..." }
     if (obj[fieldName] && typeof obj[fieldName] === 'object' && !Array.isArray(obj[fieldName])) {
         const translations = obj[fieldName];
-        // Return requested language, fallback to English, then to any available
         const result = translations[language] || translations[DEFAULT_LANGUAGE] || translations[Object.keys(translations)[0]] || '';
-        if (language !== DEFAULT_LANGUAGE && result) {
-            console.log(`    📝 getTranslatedField: Found ${fieldName} in nested format (${language})`);
-        }
-        // Strip "[SV]" prefixes as safety measure
         return stripSVPrefix(result);
     }
     
-    // Format 2: Flat with suffix (e.g., description_sv)
-    // This is the format we're using - check this FIRST for Swedish
     if (language !== DEFAULT_LANGUAGE) {
         const translatedField = `${fieldName}_${language}`;
         if (obj[translatedField] !== undefined && obj[translatedField] !== null) {
-            // Strip "[SV]" prefixes as safety measure
             return stripSVPrefix(obj[translatedField]);
         }
     }
     
-    // Format 3: Direct field (defaults to English)
     return obj[fieldName] || '';
 }
 
@@ -116,24 +101,18 @@ function translateArray(arrayField, fieldName, originalProduct, language) {
         return arrayField;
     }
     
-    // Check if there's a translated version of the entire array (flat suffix format)
-    // e.g., materials_sv: ["95% Polyester", "5% Elastan"]
     if (language !== DEFAULT_LANGUAGE && originalProduct) {
         const translatedArrayField = `${fieldName}_${language}`;
         if (originalProduct[translatedArrayField] !== undefined) {
-            // Return the translated array if it exists (strip "[SV]" prefixes)
             if (Array.isArray(originalProduct[translatedArrayField])) {
                 return stripSVPrefix(originalProduct[translatedArrayField]);
             }
-            // If it's a string, convert to array and strip prefixes
             if (typeof originalProduct[translatedArrayField] === 'string') {
                 return stripSVPrefix([originalProduct[translatedArrayField]]);
             }
         }
     }
     
-    // Check if array is stored as nested object with language keys
-    // e.g., materials: { en: [...], sv: [...] }
     if (originalProduct && originalProduct[fieldName] && 
         typeof originalProduct[fieldName] === 'object' && 
         !Array.isArray(originalProduct[fieldName]) &&
@@ -143,24 +122,16 @@ function translateArray(arrayField, fieldName, originalProduct, language) {
         }
     }
     
-    // Translate each item in the array
-    return arrayField.map((item, index) => {
-        // If item is an object with translations
+    return arrayField.map((item) => {
         if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
             const translatedItem = { ...item };
-            
-            // Translate common text fields in objects
             ['text', 'name', 'description', 'title', 'label', 'value'].forEach(key => {
                 if (translatedItem[key] !== undefined) {
                     translatedItem[key] = getTranslatedField(translatedItem, key, language);
                 }
             });
-            
             return translatedItem;
         }
-        
-        // If item is a string, return as-is (no per-item translation for simple string arrays)
-        // Translation should be done at the array level using flat suffix or nested format
         return item;
     });
 }
@@ -177,30 +148,19 @@ function translateNestedObject(obj, language) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
         return obj;
     }
-    
     const translated = {};
-    
     Object.keys(obj).forEach(key => {
         const value = obj[key];
-        
-        // If value is a string, try to translate it
         if (typeof value === 'string') {
             translated[key] = getTranslatedField(obj, key, language);
-        }
-        // If value is an object, recursively translate it
-        else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
             translated[key] = translateNestedObject(value, language);
-        }
-        // If value is an array, translate it
-        else if (Array.isArray(value)) {
+        } else if (Array.isArray(value)) {
             translated[key] = translateArray(value, key, obj, language);
-        }
-        // Otherwise, keep as-is (numbers, booleans, etc.)
-        else {
+        } else {
             translated[key] = value;
         }
     });
-    
     return translated;
 }
 
@@ -217,12 +177,7 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
         return product;
     }
     
-    // Debug: Log translation attempt (only in development)
-    if (language !== DEFAULT_LANGUAGE && process.env.NODE_ENV !== 'production') {
-        console.log(`🌐 [Translation] Translating product ${product.id || product._id || 'unknown'} to ${language}`);
-    }
-    
-    // If requesting English and no Swedish translations exist, return early (no translation needed)
+    if (language === DEFAULT_LANGUAGE) {
     if (language === DEFAULT_LANGUAGE) {
         const hasSwedishTranslations = Object.keys(product).some(key => 
             key.endsWith('_sv') || (typeof product[key] === 'object' && product[key] !== null && product[key]?.sv !== undefined)
@@ -294,16 +249,9 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
                                        JSON.stringify(translatedArray) !== JSON.stringify(fieldValue);
                 if (language !== DEFAULT_LANGUAGE && (usedSwedishField || JSON.stringify(translatedArray) !== JSON.stringify(fieldValue))) {
                     translationCount++;
-                    if (process.env.NODE_ENV !== 'production') {
-                        console.log(`  ✅ Translated array field: ${field}`);
-                    }
                 } else if (language !== DEFAULT_LANGUAGE && product[svField]) {
-                    // Swedish field exists but wasn't used - force use it
                     translated[field] = Array.isArray(product[svField]) ? product[svField] : [product[svField]];
                     translationCount++;
-                    if (process.env.NODE_ENV !== 'production') {
-                        console.log(`  ✅ Force-applied Swedish translation for array field: ${field}`);
-                    }
                 }
             }
             // Handle strings that might have been arrays (materials, careInstructions can be either)
@@ -313,7 +261,6 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
                 translated[field] = translatedValue;
                 if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
                     translationCount++;
-                    console.log(`  ✅ Translated string field: ${field}`);
                 }
             }
             // Handle nested objects (like sizeMeasurements)
@@ -322,15 +269,9 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
                 if (fieldValue[language] !== undefined) {
                     translated[field] = fieldValue[language];
                     translationCount++;
-                    console.log(`  ✅ Translated nested object field: ${field} (found ${language} translation)`);
                 } else if (fieldValue[DEFAULT_LANGUAGE] !== undefined) {
-                    // Fallback to English
                     translated[field] = fieldValue[DEFAULT_LANGUAGE];
-                    if (language !== DEFAULT_LANGUAGE) {
-                        console.log(`  ⚠️ Field ${field}: No ${language} translation, using English fallback`);
-                    }
                 } else {
-                    // Recursively translate nested object
                     translated[field] = translateNestedObject(fieldValue, language);
                 }
             }
@@ -341,36 +282,22 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
                 
                 if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
                     translationCount++;
-                    if (process.env.NODE_ENV !== 'production') {
-                        console.log(`  ✅ Translated string field: ${field}`);
-                    }
                 } else if (language !== DEFAULT_LANGUAGE && translatedValue === fieldValue) {
-                    // Check if Swedish translation exists but wasn't used (shouldn't happen, but just in case)
                     const svField = `${field}_sv`;
                     const nestedSv = product[field]?.sv;
                     if (product[svField] || nestedSv) {
-                        // Force use the Swedish translation if it exists
                         if (product[svField]) {
                             translated[field] = product[svField];
                             translationCount++;
-                            console.log(`  ✅ Applied Swedish translation for ${field}`);
                         } else if (nestedSv) {
                             translated[field] = nestedSv;
                             translationCount++;
-                            console.log(`  ✅ Applied nested Swedish translation for ${field}`);
                         }
                     }
                 }
             }
         }
     });
-    
-    if (language !== DEFAULT_LANGUAGE && process.env.NODE_ENV !== 'production') {
-        console.log(`🌐 [Translation] Completed: ${translationCount} fields translated for language ${language}`);
-    }
-    
-    // Fields that should NEVER be translated (brand identity)
-    // These remain unchanged: name, brand, sku, id, images, price, currency, inventory, etc.
     
     return translated;
 }
