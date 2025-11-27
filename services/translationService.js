@@ -8,6 +8,37 @@ const SUPPORTED_LANGUAGES = ['en', 'sv'];
 const DEFAULT_LANGUAGE = 'en';
 
 /**
+ * Strip "[SV]" prefixes from translation strings
+ * This is a safety measure to clean up any broken translations in the database
+ * @param {string|array} value - String or array to clean
+ * @returns {string|array} Cleaned value without "[SV]" prefixes
+ */
+function stripSVPrefix(value) {
+    if (typeof value === 'string') {
+        return value.replace(/^\[SV\]\s*/g, '').trim();
+    }
+    if (Array.isArray(value)) {
+        return value.map(item => {
+            if (typeof item === 'string') {
+                return item.replace(/^\[SV\]\s*/g, '').trim();
+            }
+            if (typeof item === 'object' && item !== null) {
+                const cleaned = { ...item };
+                if (cleaned.text) {
+                    cleaned.text = cleaned.text.replace(/^\[SV\]\s*/g, '').trim();
+                }
+                if (cleaned.name) {
+                    cleaned.name = cleaned.name.replace(/^\[SV\]\s*/g, '').trim();
+                }
+                return cleaned;
+            }
+            return item;
+        });
+    }
+    return value;
+}
+
+/**
  * Get language from request (query param, header, or default)
  * @param {object} req - Express request object
  * @returns {string} Language code (en or sv)
@@ -49,7 +80,8 @@ function getTranslatedField(obj, fieldName, language = DEFAULT_LANGUAGE) {
         if (language !== DEFAULT_LANGUAGE && result) {
             console.log(`    📝 getTranslatedField: Found ${fieldName} in nested format (${language})`);
         }
-        return result;
+        // Strip "[SV]" prefixes as safety measure
+        return stripSVPrefix(result);
     }
     
     // Format 2: Flat with suffix (e.g., description_sv)
@@ -57,7 +89,8 @@ function getTranslatedField(obj, fieldName, language = DEFAULT_LANGUAGE) {
     if (language !== DEFAULT_LANGUAGE) {
         const translatedField = `${fieldName}_${language}`;
         if (obj[translatedField] !== undefined && obj[translatedField] !== null) {
-            return obj[translatedField];
+            // Strip "[SV]" prefixes as safety measure
+            return stripSVPrefix(obj[translatedField]);
         }
     }
     
@@ -88,13 +121,13 @@ function translateArray(arrayField, fieldName, originalProduct, language) {
     if (language !== DEFAULT_LANGUAGE && originalProduct) {
         const translatedArrayField = `${fieldName}_${language}`;
         if (originalProduct[translatedArrayField] !== undefined) {
-            // Return the translated array if it exists (even if it's still in English - that's a translation quality issue)
+            // Return the translated array if it exists (strip "[SV]" prefixes)
             if (Array.isArray(originalProduct[translatedArrayField])) {
-                return originalProduct[translatedArrayField];
+                return stripSVPrefix(originalProduct[translatedArrayField]);
             }
-            // If it's a string, convert to array
+            // If it's a string, convert to array and strip prefixes
             if (typeof originalProduct[translatedArrayField] === 'string') {
-                return [originalProduct[translatedArrayField]];
+                return stripSVPrefix([originalProduct[translatedArrayField]]);
             }
         }
     }
@@ -106,7 +139,7 @@ function translateArray(arrayField, fieldName, originalProduct, language) {
         !Array.isArray(originalProduct[fieldName]) &&
         originalProduct[fieldName][language]) {
         if (Array.isArray(originalProduct[fieldName][language])) {
-            return originalProduct[fieldName][language];
+            return stripSVPrefix(originalProduct[fieldName][language]);
         }
     }
     
