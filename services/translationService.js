@@ -41,16 +41,22 @@ function getTranslatedField(obj, fieldName, language = DEFAULT_LANGUAGE) {
     }
     
     // Format 1: Nested object (preferred)
+    // e.g., description: { en: "...", sv: "..." }
     if (obj[fieldName] && typeof obj[fieldName] === 'object' && !Array.isArray(obj[fieldName])) {
         const translations = obj[fieldName];
         // Return requested language, fallback to English, then to any available
-        return translations[language] || translations[DEFAULT_LANGUAGE] || translations[Object.keys(translations)[0]] || '';
+        const result = translations[language] || translations[DEFAULT_LANGUAGE] || translations[Object.keys(translations)[0]] || '';
+        if (language !== DEFAULT_LANGUAGE && result) {
+            console.log(`    📝 getTranslatedField: Found ${fieldName} in nested format (${language})`);
+        }
+        return result;
     }
     
     // Format 2: Flat with suffix (e.g., description_sv)
+    // This is the format we're using - check this FIRST for Swedish
     if (language !== DEFAULT_LANGUAGE) {
         const translatedField = `${fieldName}_${language}`;
-        if (obj[translatedField] !== undefined) {
+        if (obj[translatedField] !== undefined && obj[translatedField] !== null) {
             return obj[translatedField];
         }
     }
@@ -269,17 +275,25 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
             else if (typeof fieldValue === 'string') {
                 const translatedValue = getTranslatedField(product, field, language);
                 translated[field] = translatedValue;
+                
                 if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
                     translationCount++;
                     console.log(`  ✅ Translated string field: ${field}`);
                 } else if (language !== DEFAULT_LANGUAGE && translatedValue === fieldValue) {
-                    // Check if Swedish translation exists but wasn't used
+                    // Check if Swedish translation exists but wasn't used (shouldn't happen, but just in case)
                     const svField = `${field}_sv`;
                     const nestedSv = product[field]?.sv;
                     if (product[svField] || nestedSv) {
-                        console.log(`  ⚠️ Field ${field}: Swedish translation exists but wasn't applied`);
-                    } else {
-                        console.log(`  ⚠️ Field ${field}: No Swedish translation found, using English`);
+                        // Force use the Swedish translation if it exists
+                        if (product[svField]) {
+                            translated[field] = product[svField];
+                            translationCount++;
+                            console.log(`  ✅ Applied Swedish translation for ${field}`);
+                        } else if (nestedSv) {
+                            translated[field] = nestedSv;
+                            translationCount++;
+                            console.log(`  ✅ Applied nested Swedish translation for ${field}`);
+                        }
                     }
                 }
             }

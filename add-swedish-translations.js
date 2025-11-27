@@ -188,8 +188,22 @@ async function updateAllProducts() {
         // Process each product
         for (const product of products) {
             try {
-                const productId = product.id || product._id?.toString();
-                if (!productId) {
+                // Try to get identifier - prefer id, fallback to _id
+                let productId = product.id;
+                let filter = {};
+                
+                if (productId) {
+                    filter = { id: productId };
+                } else if (product._id) {
+                    productId = product._id.toString();
+                    // Try both _id as ObjectId and as string
+                    const { ObjectId } = require('mongodb');
+                    try {
+                        filter = { _id: new ObjectId(product._id) };
+                    } catch (e) {
+                        filter = { _id: product._id };
+                    }
+                } else {
                     console.log(`⚠️ Skipping product without ID`);
                     skippedCount++;
                     continue;
@@ -197,6 +211,7 @@ async function updateAllProducts() {
                 
                 console.log(`\n📝 Processing product: ${productId}`);
                 console.log(`   Name: ${product.name || 'N/A'}`);
+                console.log(`   Using filter: ${JSON.stringify(filter)}`);
                 
                 // Get Swedish translations to add
                 const updates = addSwedishTranslations(product);
@@ -210,13 +225,14 @@ async function updateAllProducts() {
                 console.log(`   ✏️  Adding ${Object.keys(updates).length} Swedish translation(s)...`);
                 
                 // Update product in database (using flat suffix format)
+                // Note: VortexDB's updateRecord already wraps in $set, so just pass updates directly
                 const updateResult = await db.executeOperation({
                     database_name: 'peakmode',
                     collection_name: 'products',
                     command: '--update',
                     data: {
-                        filter: { id: productId },
-                        update: { $set: updates }
+                        filter: filter,
+                        update: updates  // Don't wrap in $set - updateRecord does that
                     }
                 });
                 
