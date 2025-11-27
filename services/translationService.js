@@ -178,72 +178,31 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
     }
     
     if (language === DEFAULT_LANGUAGE) {
-    if (language === DEFAULT_LANGUAGE) {
         const hasSwedishTranslations = Object.keys(product).some(key => 
             key.endsWith('_sv') || (typeof product[key] === 'object' && product[key] !== null && product[key]?.sv !== undefined)
         );
-        
-        // If no Swedish translations exist and requesting English, return as-is
         if (!hasSwedishTranslations) {
             return product;
         }
     }
     
-    // Create a copy to avoid mutating original (shallow copy is sufficient)
     const translated = { ...product };
-    
-    // Complete list of translatable fields (user-facing content)
     const translatableFields = [
-        // Product descriptions
-        'description',
-        'shortDescription',
-        
-        // Size & Fit
-        'sizeFitDescription',
-        'sizeMeasurements',
-        'fitGuide',
-        'sizeRecommendations',
-        
-        // Materials & Care
-        'materials',  // Can be string or array
-        'materialComposition',
-        'careInstructions',  // Can be string or array
-        'care_instructions',
-        'sustainabilityInfo',
-        
-        // Shipping & Returns
-        'shippingInfo',
-        'shipping_info',
-        'shippingCosts',
-        'deliveryTime',
-        'returnPolicy',
-        'return_policy',
-        'warrantyInfo',
-        'warranty_info',
-        
-        // Product Features
-        'features',
-        
-        // Legacy/alternative field names
-        'category',
-        'size_guide',
-        'sizeGuide'
+        'description', 'shortDescription', 'sizeFitDescription', 'sizeMeasurements',
+        'fitGuide', 'sizeRecommendations', 'materials', 'materialComposition',
+        'careInstructions', 'care_instructions', 'sustainabilityInfo', 'shippingInfo',
+        'shipping_info', 'shippingCosts', 'deliveryTime', 'returnPolicy',
+        'return_policy', 'warrantyInfo', 'warranty_info', 'features',
+        'category', 'size_guide', 'sizeGuide'
     ];
     
-    // Translate each field
     let translationCount = 0;
     translatableFields.forEach(field => {
-        // Check both in translated copy and original product for the field
         const fieldValue = translated[field] !== undefined ? translated[field] : product[field];
-        
         if (fieldValue !== undefined) {
-            const originalValue = translated[field];
-            
-            // Handle arrays (like features, materials, careInstructions, etc.)
             if (Array.isArray(fieldValue)) {
                 const translatedArray = translateArray(fieldValue, field, product, language);
                 translated[field] = translatedArray;
-                // Check if translation was actually applied (array changed or Swedish field was used)
                 const svField = `${field}_${language}`;
                 const usedSwedishField = language !== DEFAULT_LANGUAGE && product[svField] && 
                                        JSON.stringify(translatedArray) !== JSON.stringify(fieldValue);
@@ -253,19 +212,13 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
                     translated[field] = Array.isArray(product[svField]) ? product[svField] : [product[svField]];
                     translationCount++;
                 }
-            }
-            // Handle strings that might have been arrays (materials, careInstructions can be either)
-            else if (typeof fieldValue === 'string' && (field === 'materials' || field === 'careInstructions')) {
-                // These fields can be strings, so translate them as strings
+            } else if (typeof fieldValue === 'string' && (field === 'materials' || field === 'careInstructions')) {
                 const translatedValue = getTranslatedField(product, field, language);
                 translated[field] = translatedValue;
                 if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
                     translationCount++;
                 }
-            }
-            // Handle nested objects (like sizeMeasurements)
-            else if (typeof fieldValue === 'object' && fieldValue !== null && !Array.isArray(fieldValue)) {
-                // Check if it's a nested translation object first
+            } else if (typeof fieldValue === 'object' && fieldValue !== null && !Array.isArray(fieldValue)) {
                 if (fieldValue[language] !== undefined) {
                     translated[field] = fieldValue[language];
                     translationCount++;
@@ -274,12 +227,9 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
                 } else {
                     translated[field] = translateNestedObject(fieldValue, language);
                 }
-            }
-            // Handle simple strings
-            else if (typeof fieldValue === 'string') {
+            } else if (typeof fieldValue === 'string') {
                 const translatedValue = getTranslatedField(product, field, language);
                 translated[field] = translatedValue;
-                
                 if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
                     translationCount++;
                 } else if (language !== DEFAULT_LANGUAGE && translatedValue === fieldValue) {
