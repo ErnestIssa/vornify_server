@@ -87,8 +87,15 @@ function translateArray(arrayField, fieldName, originalProduct, language) {
     // e.g., materials_sv: ["95% Polyester", "5% Elastan"]
     if (language !== DEFAULT_LANGUAGE && originalProduct) {
         const translatedArrayField = `${fieldName}_${language}`;
-        if (originalProduct[translatedArrayField] !== undefined && Array.isArray(originalProduct[translatedArrayField])) {
-            return originalProduct[translatedArrayField];
+        if (originalProduct[translatedArrayField] !== undefined) {
+            // Return the translated array if it exists (even if it's still in English - that's a translation quality issue)
+            if (Array.isArray(originalProduct[translatedArrayField])) {
+                return originalProduct[translatedArrayField];
+            }
+            // If it's a string, convert to array
+            if (typeof originalProduct[translatedArrayField] === 'string') {
+                return [originalProduct[translatedArrayField]];
+            }
         }
     }
     
@@ -177,8 +184,8 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
         return product;
     }
     
-    // Debug: Log translation attempt
-    if (language !== DEFAULT_LANGUAGE) {
+    // Debug: Log translation attempt (only in development)
+    if (language !== DEFAULT_LANGUAGE && process.env.NODE_ENV !== 'production') {
         console.log(`🌐 [Translation] Translating product ${product.id || product._id || 'unknown'} to ${language}`);
     }
     
@@ -210,9 +217,9 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
         'sizeRecommendations',
         
         // Materials & Care
-        'materials',
+        'materials',  // Can be string or array
         'materialComposition',
-        'careInstructions',
+        'careInstructions',  // Can be string or array
         'care_instructions',
         'sustainabilityInfo',
         
@@ -248,9 +255,32 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
             if (Array.isArray(fieldValue)) {
                 const translatedArray = translateArray(fieldValue, field, product, language);
                 translated[field] = translatedArray;
-                if (language !== DEFAULT_LANGUAGE && JSON.stringify(translatedArray) !== JSON.stringify(fieldValue)) {
+                // Check if translation was actually applied (array changed or Swedish field was used)
+                const svField = `${field}_${language}`;
+                const usedSwedishField = language !== DEFAULT_LANGUAGE && product[svField] && 
+                                       JSON.stringify(translatedArray) !== JSON.stringify(fieldValue);
+                if (language !== DEFAULT_LANGUAGE && (usedSwedishField || JSON.stringify(translatedArray) !== JSON.stringify(fieldValue))) {
                     translationCount++;
-                    console.log(`  ✅ Translated array field: ${field}`);
+                    if (process.env.NODE_ENV !== 'production') {
+                        console.log(`  ✅ Translated array field: ${field}`);
+                    }
+                } else if (language !== DEFAULT_LANGUAGE && product[svField]) {
+                    // Swedish field exists but wasn't used - force use it
+                    translated[field] = Array.isArray(product[svField]) ? product[svField] : [product[svField]];
+                    translationCount++;
+                    if (process.env.NODE_ENV !== 'production') {
+                        console.log(`  ✅ Force-applied Swedish translation for array field: ${field}`);
+                    }
+                }
+            }
+            // Handle strings that might have been arrays (materials, careInstructions can be either)
+            else if (typeof fieldValue === 'string' && (field === 'materials' || field === 'careInstructions')) {
+                // These fields can be strings, so translate them as strings
+                const translatedValue = getTranslatedField(product, field, language);
+                translated[field] = translatedValue;
+                if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
+                    translationCount++;
+                    console.log(`  ✅ Translated string field: ${field}`);
                 }
             }
             // Handle nested objects (like sizeMeasurements)
@@ -278,7 +308,9 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
                 
                 if (language !== DEFAULT_LANGUAGE && translatedValue !== fieldValue && translatedValue !== '') {
                     translationCount++;
-                    console.log(`  ✅ Translated string field: ${field}`);
+                    if (process.env.NODE_ENV !== 'production') {
+                        console.log(`  ✅ Translated string field: ${field}`);
+                    }
                 } else if (language !== DEFAULT_LANGUAGE && translatedValue === fieldValue) {
                     // Check if Swedish translation exists but wasn't used (shouldn't happen, but just in case)
                     const svField = `${field}_sv`;
@@ -300,7 +332,7 @@ function translateProduct(product, language = DEFAULT_LANGUAGE) {
         }
     });
     
-    if (language !== DEFAULT_LANGUAGE) {
+    if (language !== DEFAULT_LANGUAGE && process.env.NODE_ENV !== 'production') {
         console.log(`🌐 [Translation] Completed: ${translationCount} fields translated for language ${language}`);
     }
     

@@ -12,12 +12,35 @@ router.get('/:id', async (req, res) => {
     try {
         const { id } = req.params;
         
-        const result = await db.executeOperation({
+        // Try to find product by id first, then by _id if not found
+        let result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
             data: { id }
         });
+        
+        // If not found by id, try _id (MongoDB ObjectId)
+        if (!result.success || !result.data) {
+            const { ObjectId } = require('mongodb');
+            try {
+                // Try as ObjectId
+                result = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: new ObjectId(id) }
+                });
+            } catch (e) {
+                // If ObjectId conversion fails, try as string
+                result = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: id }
+                });
+            }
+        }
         
         if (result.success && result.data) {
             // Process inventory data to ensure proper structure

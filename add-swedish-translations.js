@@ -87,10 +87,16 @@ function addSwedishTranslations(product) {
         }
     }
     
-    // Translate array fields (using flat suffix format)
-    if (product.materials && Array.isArray(product.materials) && product.materials.length > 0) {
-        if (!product.materials_sv && !product.materials?.sv) {
-            updates['materials_sv'] = translateArray(product.materials);
+    // Translate materials field (can be string or array)
+    if (product.materials) {
+        if (Array.isArray(product.materials) && product.materials.length > 0) {
+            if (!product.materials_sv && !product.materials?.sv) {
+                updates['materials_sv'] = translateArray(product.materials);
+            }
+        } else if (typeof product.materials === 'string') {
+            if (!product.materials_sv && !product.materials?.sv) {
+                updates['materials_sv'] = translateToSwedish(product.materials);
+            }
         }
     }
     
@@ -100,9 +106,16 @@ function addSwedishTranslations(product) {
         }
     }
     
-    if (product.careInstructions && Array.isArray(product.careInstructions) && product.careInstructions.length > 0) {
-        if (!product.careInstructions_sv && !product.careInstructions?.sv) {
-            updates['careInstructions_sv'] = translateArray(product.careInstructions);
+    // Translate careInstructions (can be string or array)
+    if (product.careInstructions) {
+        if (Array.isArray(product.careInstructions) && product.careInstructions.length > 0) {
+            if (!product.careInstructions_sv && !product.careInstructions?.sv) {
+                updates['careInstructions_sv'] = translateArray(product.careInstructions);
+            }
+        } else if (typeof product.careInstructions === 'string') {
+            if (!product.careInstructions_sv && !product.careInstructions?.sv) {
+                updates['careInstructions_sv'] = translateToSwedish(product.careInstructions);
+            }
         }
     }
     
