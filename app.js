@@ -49,7 +49,15 @@ app.get('/health', (req, res) => {
 
 // API documentation endpoint
 app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/vornifypay/doc_pay.html');
+    res.json({
+        name: 'Vornify Server API',
+        version: '1.0.0',
+        status: 'running',
+        endpoints: {
+            health: '/health',
+            api: '/api'
+        }
+    });
 });
 
 // Routes
@@ -74,7 +82,14 @@ app.use('/api', currencyRoutes); // Currency conversion and settings
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
-    res.sendFile(__dirname + '/vornifydb/storage/doc_storage.html');
+    res.json({
+        service: 'Storage API',
+        endpoints: {
+            upload: 'POST /api/storage/upload',
+            download: 'GET /api/storage/download/:id',
+            delete: 'DELETE /api/storage/:id'
+        }
+    });
 });
 
 // Error handling middleware
