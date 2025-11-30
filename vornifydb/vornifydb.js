@@ -41,12 +41,12 @@ class VortexDB {
 
             this.client = new MongoClient(uri, {
                 maxPoolSize: 10,  // Reduced for M0 tier (500 max connections)
-                minPoolSize: 0,    // Don't keep idle connections
+                minPoolSize: 1,    // Keep at least one connection alive
                 serverSelectionTimeoutMS: 30000,
                 connectTimeoutMS: 30000,
                 socketTimeoutMS: 45000,
                 heartbeatFrequencyMS: 10000,
-                maxIdleTimeMS: 30000,
+                maxIdleTimeMS: 0,  // Disable idle timeout - keep connections alive
                 retryWrites: true,
                 retryReads: true,
                 writeConcern: {
@@ -62,15 +62,24 @@ class VortexDB {
             });
 
             this.client.on('connectionCreated', () => {
-                console.log('✅ MongoDB connection created');
+                // Only log in development to reduce noise
+                if (process.env.NODE_ENV === 'development') {
+                    console.log('✅ MongoDB connection created');
+                }
             });
 
             this.client.on('connectionClosed', () => {
-                console.warn('⚠️ MongoDB connection closed - will reconnect on next operation');
+                // This is normal behavior for connection pools - don't log as warning
+                // Individual connections in the pool close and reopen as needed
+                // Only log in development mode for debugging
+                if (process.env.NODE_ENV === 'development') {
+                    console.log('ℹ️ MongoDB connection closed (normal pool behavior)');
+                }
             });
 
             this.client.on('connectionPoolClosed', () => {
-                console.warn('⚠️ MongoDB connection pool closed - will reconnect on next operation');
+                // This only happens when the entire pool is closed (e.g., server shutdown)
+                console.warn('⚠️ MongoDB connection pool closed');
                 this.client = null;
                 this.collectionCache.clear();
             });
