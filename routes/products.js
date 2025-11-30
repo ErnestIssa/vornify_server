@@ -7,6 +7,69 @@ const productTranslationHelper = require('../services/productTranslationHelper')
 
 const db = getDBInstance();
 
+// GET /api/products/categories - Get all product categories
+// This route must be defined before /:id to avoid route conflicts
+router.get('/categories', async (req, res) => {
+    try {
+        // Get all products to extract unique categories
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: {}
+        });
+        
+        if (result.success) {
+            const products = result.data || [];
+            
+            // Extract unique categories
+            const categoriesSet = new Set();
+            products.forEach(product => {
+                if (product.category) {
+                    categoriesSet.add(product.category);
+                }
+            });
+            
+            // Convert to array and sort
+            const categories = Array.from(categoriesSet).sort();
+            
+            // Ensure "Peak Prints" is included if any products have it
+            // This handles the case where the category might be stored with different casing
+            const hasPeakPrints = categories.some(cat => 
+                cat.toLowerCase() === 'peak prints'
+            );
+            
+            // If we have "Peak Prints" with different casing, normalize it
+            const normalizedCategories = categories.map(cat => {
+                if (cat.toLowerCase() === 'peak prints') {
+                    return 'Peak Prints';
+                }
+                return cat;
+            });
+            
+            // Remove duplicates after normalization
+            const uniqueCategories = [...new Set(normalizedCategories)].sort();
+            
+            res.json({
+                success: true,
+                data: uniqueCategories,
+                count: uniqueCategories.length
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to retrieve categories'
+            });
+        }
+    } catch (error) {
+        console.error('Get categories error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve categories'
+        });
+    }
+});
+
 // GET /api/products/:id - Get product by ID with complete inventory data
 router.get('/:id', async (req, res) => {
     try {
@@ -145,7 +208,7 @@ router.get('/:id', async (req, res) => {
 // GET /api/products - Get all products
 router.get('/', async (req, res) => {
     try {
-        const { category, featured, limit } = req.query;
+        const { category, featured, limit, search } = req.query;
         
         // Get requested language from query parameter
         const language = translationService.getLanguageFromRequest(req);
@@ -153,6 +216,7 @@ router.get('/', async (req, res) => {
         let query = {};
         
         // Add category filter if provided
+        // Note: We'll do case-insensitive matching in application layer for better compatibility
         if (category) {
             query.category = category;
         }
@@ -171,6 +235,33 @@ router.get('/', async (req, res) => {
         
         if (result.success) {
             let products = result.data || [];
+            
+            // Apply case-insensitive category filter if provided
+            if (category) {
+                const categoryLower = category.toLowerCase();
+                products = products.filter(product => {
+                    const productCategory = (product.category || '').toLowerCase();
+                    return productCategory === categoryLower;
+                });
+            }
+            
+            // Apply search filter if provided (case-insensitive)
+            if (search) {
+                const searchLower = search.toLowerCase();
+                products = products.filter(product => {
+                    const name = (product.name || '').toLowerCase();
+                    const description = (product.description || '').toLowerCase();
+                    const productCategory = (product.category || '').toLowerCase();
+                    const productClasses = Array.isArray(product.productClasses) 
+                        ? product.productClasses.map(c => c.toLowerCase()).join(' ')
+                        : '';
+                    
+                    return name.includes(searchLower) ||
+                           description.includes(searchLower) ||
+                           productCategory.includes(searchLower) ||
+                           productClasses.includes(searchLower);
+                });
+            }
             
             // Apply limit if provided
             if (limit && parseInt(limit) > 0) {

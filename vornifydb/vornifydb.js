@@ -560,29 +560,57 @@ class VortexDB {
                 };
             }
             
-            // For single record queries
-            result = await collection.findOne(query);
+            // Determine if this is a single record query (by id/_id) or a filter query (multiple results)
+            // Single record queries have 'id' or '_id' field
+            const isSingleRecordQuery = query.hasOwnProperty('id') || query.hasOwnProperty('_id');
             
-            if (!result) {
+            if (isSingleRecordQuery) {
+                // For single record queries (by id or _id)
+                result = await collection.findOne(query);
+                
+                if (!result) {
+                    return {
+                        success: false,
+                        error: 'Record not found'
+                    };
+                }
+
+                // Format the single result
+                result._id = result._id.toString();
+                
+                // Handle compressed data if present
+                if (result.is_compressed) {
+                    // Note: Implement decompression logic here
+                    delete result.compressed_data;
+                }
+
                 return {
-                    success: false,
-                    error: 'Record not found'
+                    success: true,
+                    data: result
+                };
+            } else {
+                // For filter queries (category, featured, etc.), return multiple results
+                result = await collection.find(query).toArray();
+                
+                // Format the results
+                const formattedResults = result.map(doc => {
+                    // Convert _id to string
+                    doc._id = doc._id.toString();
+                    
+                    // Handle compressed data if present
+                    if (doc.is_compressed) {
+                        // Note: You'll need to implement decompression logic here
+                        delete doc.compressed_data;
+                    }
+                    
+                    return doc;
+                });
+                
+                return {
+                    success: true,
+                    data: formattedResults
                 };
             }
-
-            // Format the single result
-            result._id = result._id.toString();
-            
-            // Handle compressed data if present
-            if (result.is_compressed) {
-                // Note: Implement decompression logic here
-                delete result.compressed_data;
-            }
-
-            return {
-                success: true,
-                data: result
-            };
             
         } catch (error) {
             console.error('Error in readRecords:', error);
