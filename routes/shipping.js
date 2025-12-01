@@ -1,17 +1,37 @@
 const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
+const { parseString } = require('xml2js');
+const { promisify } = require('util');
 
 const db = getDBInstance();
 
 // Use built-in fetch (available in Node.js 18+)
 // No need to import node-fetch for Node.js 18+
 
+// XML parser for Fraktjakt API
+const parseXML = promisify(parseString);
+
 // PostNord Delivery Options API configuration
 const POSTNORD_DELIVERY_API = {
     apiUrl: 'https://api2.postnord.com/rest/shipment/v1/deliveryoptions/bywarehouse',
     apiKey: process.env.POSTNORD_API_KEY || '820cdd1f29a640f86a83b38d902ab39f',
     customerKey: 'PeakMode'
+};
+
+// Fraktjakt Query API configuration
+const FRAKTJAKT_API = {
+    baseUrl: 'https://api.fraktjakt.se/fraktjakt/query_xml',
+    consignorId: process.env.FRAKTJAKT_CONSIGNOR_ID || '',
+    consignorKey: process.env.FRAKTJAKT_CONSIGNOR_KEY || ''
+};
+
+// Warehouse address for Fraktjakt (hardcoded as per requirements)
+const FRAKTJAKT_WAREHOUSE = {
+    country: 'SE',
+    postalCode: '74639',
+    street: 'Kapellgatan 10',
+    city: 'Bålsta'
 };
 
 // Warehouse address (sender) - MUST be configured via environment variables
@@ -598,6 +618,264 @@ router.post('/options', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to get delivery options',
+            details: error.message
+        });
+    }
+});
+
+// Helper function to build Fraktjakt XML request
+function buildFraktjaktXML(recipient, parcel) {
+    // Build consignor section with ID and key if available
+    let consignorSection = '<consignor>';
+    if (FRAKTJAKT_API.consignorId) {
+        consignorSection += `<id>${FRAKTJAKT_API.consignorId}</id>`;
+    }
+    if (FRAKTJAKT_API.consignorKey) {
+        consignorSection += `<key>${FRAKTJAKT_API.consignorKey}</key>`;
+    }
+    consignorSection += `
+        <address_to>
+            <street_address_1>${escapeXML(FRAKTJAKT_WAREHOUSE.street)}</street_address_1>
+            <postal_code>${FRAKTJAKT_WAREHOUSE.postalCode}</postal_code>
+            <city>${escapeXML(FRAKTJAKT_WAREHOUSE.city)}</city>
+            <country_code>${FRAKTJAKT_WAREHOUSE.country}</country_code>
+        </address_to>
+    </consignor>`;
+    
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<shipment>
+    ${consignorSection}
+    <consignee>
+        <address_to>
+            <street_address_1>${escapeXML(recipient.street)}</street_address_1>
+            <postal_code>${recipient.postalCode}</postal_code>
+            <city>${escapeXML(recipient.city || '')}</city>
+            <country_code>${recipient.country}</country_code>
+        </address_to>
+    </consignee>
+    <parcels>
+        <parcel>
+            <weight>${parcel.weight || 1.0}</weight>
+            <length>${parcel.length || 30}</length>
+            <width>${parcel.width || 20}</width>
+            <height>${parcel.height || 10}</height>
+        </parcel>
+    </parcels>
+</shipment>`;
+    return xml;
+}
+
+// Helper function to escape XML special characters
+function escapeXML(str) {
+    if (!str) return '';
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+// Helper function to parse Fraktjakt XML response
+function parseFraktjaktResponse(xmlData) {
+    return new Promise((resolve, reject) => {
+        parseXML(xmlData, { explicitArray: false, mergeAttrs: true }, (err, result) => {
+            if (err) {
+                reject(err);
+                return;
+            }
+            resolve(result);
+        });
+    });
+}
+
+// Helper function to format Fraktjakt delivery options for frontend
+function formatFraktjaktOptions(parsedXML) {
+    const options = [];
+    
+    try {
+        // Fraktjakt response structure may vary, handle different formats
+        const shipment = parsedXML.shipment || parsedXML.Shipment || parsedXML;
+        const shippingProducts = shipment.shipping_products || shipment.ShippingProducts || shipment.shippingProducts;
+        
+        if (!shippingProducts) {
+            return options;
+        }
+        
+        // Handle both single product and array of products
+        const products = Array.isArray(shippingProducts.product || shippingProducts.Product) 
+            ? (shippingProducts.product || shippingProducts.Product)
+            : [shippingProducts.product || shippingProducts.Product].filter(Boolean);
+        
+        products.forEach((product, index) => {
+            if (!product) return;
+            
+            const carrier = product.carrier_name || product.CarrierName || product.carrierName || 'Unknown Carrier';
+            const serviceName = product.service_name || product.ServiceName || product.serviceName || 'Standard Delivery';
+            const price = parseFloat(product.price || product.Price || product.price || 0);
+            const estimatedDays = product.estimated_delivery_time || product.EstimatedDeliveryTime || product.estimatedDeliveryTime || '2-5 business days';
+            const serviceCode = product.service_code || product.ServiceCode || product.serviceCode || `service_${index}`;
+            
+            options.push({
+                id: `fraktjakt_${serviceCode}_${index}`,
+                carrier: carrier,
+                name: serviceName,
+                description: `${carrier} - ${serviceName}`,
+                cost: price,
+                currency: 'SEK',
+                estimatedDays: estimatedDays,
+                trackingEnabled: true,
+                serviceCode: serviceCode,
+                type: 'fraktjakt',
+                originalData: product
+            });
+        });
+    } catch (error) {
+        console.error('Error formatting Fraktjakt options:', error);
+    }
+    
+    return options;
+}
+
+// POST /api/shipping/fraktjakt-options - Get Fraktjakt delivery options
+router.post('/fraktjakt-options', async (req, res) => {
+    try {
+        const { country, postalCode, street, city, weight, length, width, height } = req.body;
+        
+        // Validate required fields
+        if (!country || !postalCode || !street) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required fields: country, postalCode, and street are required'
+            });
+        }
+        
+        // Prepare recipient address
+        const recipient = {
+            country: country.toUpperCase(),
+            postalCode: postalCode,
+            street: street,
+            city: city || ''
+        };
+        
+        // Prepare parcel information (with defaults)
+        const parcel = {
+            weight: weight || 1.0, // Default 1 kg
+            length: length || 30,  // Default 30 cm
+            width: width || 20,    // Default 20 cm
+            height: height || 10   // Default 10 cm
+        };
+        
+        // Check if Fraktjakt credentials are configured
+        if (!FRAKTJAKT_API.consignorId || !FRAKTJAKT_API.consignorKey) {
+            return res.status(500).json({
+                success: false,
+                error: 'Fraktjakt API credentials not configured. Please set FRAKTJAKT_CONSIGNOR_ID and FRAKTJAKT_CONSIGNOR_KEY environment variables.',
+                message: 'Consignor ID and Key are required for Fraktjakt API'
+            });
+        }
+        
+        // Build XML request
+        const xmlRequest = buildFraktjaktXML(recipient, parcel);
+        
+        // URL encode the XML
+        const encodedXML = encodeURIComponent(xmlRequest);
+        
+        // Build the full URL
+        const apiUrl = `${FRAKTJAKT_API.baseUrl}?xml=${encodedXML}`;
+        
+        // Log request for debugging
+        console.log('Fraktjakt API Request:', {
+            url: FRAKTJAKT_API.baseUrl,
+            recipient: recipient,
+            parcel: parcel
+        });
+        
+        // Make GET request to Fraktjakt API
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/xml'
+            }
+        });
+        
+        // Check if request was successful
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Fraktjakt API error:', {
+                status: response.status,
+                statusText: response.statusText,
+                error: errorText
+            });
+            
+            return res.status(response.status).json({
+                success: false,
+                error: 'Failed to fetch delivery options from Fraktjakt',
+                status: response.status,
+                details: errorText
+            });
+        }
+        
+        // Get XML response
+        const xmlResponse = await response.text();
+        
+        if (!xmlResponse || xmlResponse.trim().length === 0) {
+            return res.status(500).json({
+                success: false,
+                error: 'Empty response from Fraktjakt API'
+            });
+        }
+        
+        // Parse XML response
+        let parsedResponse;
+        try {
+            parsedResponse = await parseFraktjaktResponse(xmlResponse);
+        } catch (parseError) {
+            console.error('XML parsing error:', parseError);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to parse XML response from Fraktjakt',
+                details: parseError.message
+            });
+        }
+        
+        // Format delivery options
+        const deliveryOptions = formatFraktjaktOptions(parsedResponse);
+        
+        if (deliveryOptions.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'No delivery options found for the provided address',
+                parsedResponse: parsedResponse // Include for debugging
+            });
+        }
+        
+        // Return formatted response
+        res.json({
+            success: true,
+            deliveryOptions: deliveryOptions,
+            address: {
+                country: recipient.country,
+                postalCode: recipient.postalCode,
+                street: recipient.street,
+                city: recipient.city || null
+            },
+            warehouse: {
+                country: FRAKTJAKT_WAREHOUSE.country,
+                postalCode: FRAKTJAKT_WAREHOUSE.postalCode,
+                city: FRAKTJAKT_WAREHOUSE.city,
+                street: FRAKTJAKT_WAREHOUSE.street
+            },
+            parcel: parcel,
+            currency: 'SEK',
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Fraktjakt delivery options error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get delivery options from Fraktjakt',
             details: error.message
         });
     }
