@@ -848,12 +848,24 @@ router.post('/fraktjakt-options', async (req, res) => {
         }
         
         // Get XML response
-        const xmlResponse = await response.text();
-        
-        if (!xmlResponse || xmlResponse.trim().length === 0) {
+        let xmlResponse;
+        try {
+            xmlResponse = await response.text();
+        } catch (textError) {
+            console.error('Error reading response text:', textError);
             return res.status(500).json({
                 success: false,
-                error: 'Empty response from Fraktjakt API'
+                error: 'Failed to read response from Fraktjakt API',
+                details: textError.message
+            });
+        }
+        
+        if (!xmlResponse || xmlResponse.trim().length === 0) {
+            console.error('Empty response from Fraktjakt API');
+            return res.status(500).json({
+                success: false,
+                error: 'Empty response from Fraktjakt API',
+                status: response.status
             });
         }
         
@@ -863,21 +875,37 @@ router.post('/fraktjakt-options', async (req, res) => {
             parsedResponse = await parseFraktjaktResponse(xmlResponse);
         } catch (parseError) {
             console.error('XML parsing error:', parseError);
+            console.error('XML Response (first 500 chars):', xmlResponse.substring(0, 500));
             return res.status(500).json({
                 success: false,
                 error: 'Failed to parse XML response from Fraktjakt',
-                details: parseError.message
+                details: parseError.message,
+                status: 500
             });
         }
         
         // Format delivery options
-        const deliveryOptions = formatFraktjaktOptions(parsedResponse);
+        let deliveryOptions;
+        try {
+            deliveryOptions = formatFraktjaktOptions(parsedResponse);
+        } catch (formatError) {
+            console.error('Error formatting delivery options:', formatError);
+            console.error('Parsed response:', JSON.stringify(parsedResponse, null, 2));
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to format delivery options',
+                details: formatError.message,
+                status: 500
+            });
+        }
         
         if (deliveryOptions.length === 0) {
+            console.warn('No delivery options found for address:', recipient);
             return res.status(404).json({
                 success: false,
                 error: 'No delivery options found for the provided address',
-                parsedResponse: parsedResponse // Include for debugging
+                parsedResponse: parsedResponse, // Include for debugging
+                status: 404
             });
         }
         
@@ -904,10 +932,15 @@ router.post('/fraktjakt-options', async (req, res) => {
         
     } catch (error) {
         console.error('Fraktjakt delivery options error:', error);
+        console.error('Error stack:', error.stack);
+        console.error('Request body:', req.body);
+        
+        // Return proper error response
         res.status(500).json({
             success: false,
             error: 'Failed to get delivery options from Fraktjakt',
-            details: error.message
+            details: error.message,
+            status: 500
         });
     }
 });
