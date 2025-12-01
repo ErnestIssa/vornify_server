@@ -4,13 +4,32 @@ const getDBInstance = require('../vornifydb/dbInstance');
 
 const db = getDBInstance();
 
+// Use built-in fetch (available in Node.js 18+)
+// No need to import node-fetch for Node.js 18+
+
+// PostNord Delivery Options API configuration
+const POSTNORD_DELIVERY_API = {
+    apiUrl: 'https://api2.postnord.com/rest/shipment/v1/deliveryoptions/bywarehouse',
+    apiKey: process.env.POSTNORD_API_KEY || '820cdd1f29a640f86a83b38d902ab39f',
+    customerKey: 'PeakMode'
+};
+
+// Warehouse address (sender) - MUST be configured via environment variables
+// Required env vars: WAREHOUSE_COUNTRY, WAREHOUSE_POSTAL_CODE, WAREHOUSE_CITY, WAREHOUSE_STREET
+const WAREHOUSE_ADDRESS = {
+    countryCode: process.env.WAREHOUSE_COUNTRY,
+    postalCode: process.env.WAREHOUSE_POSTAL_CODE,
+    city: process.env.WAREHOUSE_CITY,
+    streetName: process.env.WAREHOUSE_STREET
+};
+
 // Carrier API configurations
 const CARRIER_CONFIGS = {
     postnord: {
         name: 'PostNord',
         apiUrl: process.env.POSTNORD_API_URL || 'https://api.postnord.se',
-        apiKey: process.env.POSTNORD_API_KEY,
-        enabled: !!process.env.POSTNORD_API_KEY
+        apiKey: process.env.POSTNORD_API_KEY || POSTNORD_DELIVERY_API.apiKey,
+        enabled: true
     },
     dhl: {
         name: 'DHL Express',
@@ -51,6 +70,121 @@ function validateAddress(address) {
     }
     
     return true;
+}
+
+// Helper function to validate delivery options address (minimal requirements)
+function validateDeliveryOptionsAddress(address) {
+    const required = ['street', 'postalCode', 'country'];
+    const missing = required.filter(field => !address[field]);
+    
+    if (missing.length > 0) {
+        throw new Error(`Missing required address fields: ${missing.join(', ')}`);
+    }
+    
+    return true;
+}
+
+// Helper function to filter and format home delivery options
+function filterHomeDeliveryOptions(deliveryOptions) {
+    return deliveryOptions
+        .filter(option => 
+            option.deliveryMethod === 'HOME' || 
+            option.deliveryMethod === 'HOME_DELIVERY' ||
+            option.serviceCode?.toLowerCase().includes('home') ||
+            option.serviceName?.toLowerCase().includes('home')
+        )
+        .map(option => ({
+            id: option.serviceCode || `home_${option.deliveryMethod}`,
+            type: 'home',
+            name: option.serviceName || 'Home Delivery',
+            description: option.description || 'Delivery to your home address',
+            cost: option.price?.amount || 0,
+            currency: option.price?.currency || 'SEK',
+            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
+            trackingEnabled: option.trackingAvailable || true,
+            carrier: 'PostNord',
+            deliveryMethod: option.deliveryMethod,
+            originalData: option
+        }));
+}
+
+// Helper function to filter and format service point delivery options
+function filterServicePointOptions(deliveryOptions) {
+    return deliveryOptions
+        .filter(option => 
+            option.deliveryMethod === 'SERVICE_POINT' || 
+            option.deliveryMethod === 'PICKUP_POINT' ||
+            option.serviceCode?.toLowerCase().includes('service') ||
+            option.serviceCode?.toLowerCase().includes('pickup') ||
+            option.serviceName?.toLowerCase().includes('service point') ||
+            option.serviceName?.toLowerCase().includes('pickup')
+        )
+        .map(option => ({
+            id: option.serviceCode || `service_point_${option.deliveryMethod}`,
+            type: 'service_point',
+            name: option.serviceName || 'Service Point Delivery',
+            description: option.description || 'Pick up from a nearby service point',
+            cost: option.price?.amount || 0,
+            currency: option.price?.currency || 'SEK',
+            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
+            trackingEnabled: option.trackingAvailable || true,
+            carrier: 'PostNord',
+            deliveryMethod: option.deliveryMethod,
+            servicePointInfo: option.servicePointInfo || null,
+            originalData: option
+        }));
+}
+
+// Helper function to filter and format parcel locker delivery options
+function filterParcelLockerOptions(deliveryOptions) {
+    return deliveryOptions
+        .filter(option => 
+            option.deliveryMethod === 'PARCEL_LOCKER' || 
+            option.deliveryMethod === 'LOCKER' ||
+            option.serviceCode?.toLowerCase().includes('locker') ||
+            option.serviceName?.toLowerCase().includes('locker') ||
+            option.serviceName?.toLowerCase().includes('paketbox')
+        )
+        .map(option => ({
+            id: option.serviceCode || `parcel_locker_${option.deliveryMethod}`,
+            type: 'parcel_locker',
+            name: option.serviceName || 'Parcel Locker Delivery',
+            description: option.description || 'Delivery to a parcel locker',
+            cost: option.price?.amount || 0,
+            currency: option.price?.currency || 'SEK',
+            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
+            trackingEnabled: option.trackingAvailable || true,
+            carrier: 'PostNord',
+            deliveryMethod: option.deliveryMethod,
+            lockerInfo: option.lockerInfo || null,
+            originalData: option
+        }));
+}
+
+// Helper function to filter and format mailbox delivery options
+function filterMailboxOptions(deliveryOptions) {
+    return deliveryOptions
+        .filter(option => 
+            option.deliveryMethod === 'MAILBOX' || 
+            option.deliveryMethod === 'POSTBOX' ||
+            option.serviceCode?.toLowerCase().includes('mailbox') ||
+            option.serviceCode?.toLowerCase().includes('postbox') ||
+            option.serviceName?.toLowerCase().includes('mailbox') ||
+            option.serviceName?.toLowerCase().includes('postbox')
+        )
+        .map(option => ({
+            id: option.serviceCode || `mailbox_${option.deliveryMethod}`,
+            type: 'mailbox',
+            name: option.serviceName || 'Mailbox Delivery',
+            description: option.description || 'Delivery to your mailbox',
+            cost: option.price?.amount || 0,
+            currency: option.price?.currency || 'SEK',
+            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
+            trackingEnabled: option.trackingAvailable || false,
+            carrier: 'PostNord',
+            deliveryMethod: option.deliveryMethod,
+            originalData: option
+        }));
 }
 
 // Helper function to call PostNord API
@@ -305,6 +439,166 @@ router.post('/calculate-weight', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to calculate weight'
+        });
+    }
+});
+
+// POST /api/shipping/options - Get PostNord delivery options
+router.post('/options', async (req, res) => {
+    try {
+        const { country, postalCode, street, city } = req.body;
+        
+        // Validate required fields
+        if (!country || !postalCode || !street) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required fields: country, postalCode, and street are required'
+            });
+        }
+        
+        // Prepare recipient address
+        const recipientAddress = {
+            country: country.toUpperCase(),
+            postalCode: postalCode,
+            street: street,
+            city: city || '' // City is optional for PostNord API
+        };
+        
+        // Validate recipient address
+        validateDeliveryOptionsAddress(recipientAddress);
+        
+        // Validate warehouse address is configured
+        if (!WAREHOUSE_ADDRESS.countryCode || !WAREHOUSE_ADDRESS.postalCode || 
+            !WAREHOUSE_ADDRESS.city || !WAREHOUSE_ADDRESS.streetName) {
+            return res.status(500).json({
+                success: false,
+                error: 'Warehouse address not configured. Please set WAREHOUSE_COUNTRY, WAREHOUSE_POSTAL_CODE, WAREHOUSE_CITY, and WAREHOUSE_STREET environment variables.'
+            });
+        }
+        
+        // Prepare request body for PostNord API (correct format)
+        const requestBody = {
+            sender: {
+                countryCode: WAREHOUSE_ADDRESS.countryCode,
+                postalCode: WAREHOUSE_ADDRESS.postalCode,
+                city: WAREHOUSE_ADDRESS.city,
+                streetName: WAREHOUSE_ADDRESS.streetName
+            },
+            recipient: {
+                countryCode: recipientAddress.country,
+                postalCode: recipientAddress.postalCode,
+                streetName: recipientAddress.street
+            },
+            customerKey: POSTNORD_DELIVERY_API.customerKey
+        };
+        
+        // Add city to recipient if provided
+        if (recipientAddress.city) {
+            requestBody.recipient.city = recipientAddress.city;
+        }
+        
+        // Log request for debugging (without sensitive data)
+        console.log('PostNord API Request:', {
+            url: POSTNORD_DELIVERY_API.apiUrl,
+            customerKey: POSTNORD_DELIVERY_API.customerKey,
+            sender: requestBody.sender,
+            recipient: requestBody.recipient
+        });
+        
+        // Make request to PostNord API
+        const response = await fetch(POSTNORD_DELIVERY_API.apiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Api-Key': POSTNORD_DELIVERY_API.apiKey
+            },
+            body: JSON.stringify(requestBody)
+        });
+        
+        // Check if request was successful
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('PostNord API error:', {
+                status: response.status,
+                statusText: response.statusText,
+                error: errorText,
+                requestBody: requestBody
+            });
+            
+            // Provide more helpful error messages
+            let errorMessage = 'Failed to fetch delivery options from PostNord';
+            if (response.status === 403) {
+                errorMessage = 'Access forbidden. This may be caused by missing or incorrect customerKey, or invalid sender address. Please verify your PostNord API key, customerKey, and warehouse address configuration.';
+            } else if (response.status === 401) {
+                errorMessage = 'Unauthorized. Please check your PostNord API key is correctly set in the X-Api-Key header.';
+            } else if (response.status === 400) {
+                errorMessage = 'Bad request. Please verify the request format and field names are correct (countryCode, streetName, etc.).';
+            }
+            
+            return res.status(response.status).json({
+                success: false,
+                error: errorMessage,
+                status: response.status,
+                details: errorText
+            });
+        }
+        
+        // Parse response
+        const data = await response.json();
+        
+        // Extract delivery options from response
+        // PostNord API response structure may vary, so we handle different possible formats
+        let deliveryOptions = [];
+        
+        if (data.deliveryOptions && Array.isArray(data.deliveryOptions)) {
+            deliveryOptions = data.deliveryOptions;
+        } else if (Array.isArray(data)) {
+            deliveryOptions = data;
+        } else if (data.data && Array.isArray(data.data)) {
+            deliveryOptions = data.data;
+        } else if (data.servicePointInformation) {
+            // If response contains service point information, extract options from there
+            deliveryOptions = data.servicePointInformation.deliveryOptions || [];
+        }
+        
+        // Process delivery options using helper functions
+        const homeDelivery = filterHomeDeliveryOptions(deliveryOptions);
+        const servicePoint = filterServicePointOptions(deliveryOptions);
+        const parcelLocker = filterParcelLockerOptions(deliveryOptions);
+        const mailbox = filterMailboxOptions(deliveryOptions);
+        
+        // Return formatted response
+        res.json({
+            success: true,
+            deliveryOptions: {
+                home: homeDelivery,
+                servicePoint: servicePoint,
+                parcelLocker: parcelLocker,
+                mailbox: mailbox,
+                all: deliveryOptions // Include all options for reference
+            },
+            address: {
+                country: recipientAddress.country,
+                postalCode: recipientAddress.postalCode,
+                street: recipientAddress.street,
+                city: recipientAddress.city || null
+            },
+            warehouse: {
+                countryCode: WAREHOUSE_ADDRESS.countryCode,
+                postalCode: WAREHOUSE_ADDRESS.postalCode,
+                city: WAREHOUSE_ADDRESS.city,
+                streetName: WAREHOUSE_ADDRESS.streetName
+            },
+            currency: 'SEK',
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Delivery options error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get delivery options',
+            details: error.message
         });
     }
 });
