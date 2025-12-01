@@ -694,8 +694,15 @@ function formatFraktjaktOptions(parsedXML) {
     const options = [];
     
     try {
-        // Fraktjakt response structure may vary, handle different formats
+        // Fraktjakt response structure
         const shipment = parsedXML.shipment || parsedXML.Shipment || parsedXML;
+        
+        // Check if there's an error
+        if (shipment.status === 'error' && shipment.error_message) {
+            console.error('Fraktjakt API error:', shipment.error_message);
+            return options;
+        }
+        
         const shippingProducts = shipment.shipping_products || shipment.ShippingProducts || shipment.shippingProducts;
         
         if (!shippingProducts) {
@@ -703,29 +710,53 @@ function formatFraktjaktOptions(parsedXML) {
         }
         
         // Handle both single product and array of products
-        const products = Array.isArray(shippingProducts.product || shippingProducts.Product) 
-            ? (shippingProducts.product || shippingProducts.Product)
-            : [shippingProducts.product || shippingProducts.Product].filter(Boolean);
+        // Fraktjakt uses 'shipping_product' (singular) as the array name
+        let products = [];
+        if (shippingProducts.shipping_product) {
+            products = Array.isArray(shippingProducts.shipping_product) 
+                ? shippingProducts.shipping_product 
+                : [shippingProducts.shipping_product];
+        } else if (shippingProducts.ShippingProduct) {
+            products = Array.isArray(shippingProducts.ShippingProduct) 
+                ? shippingProducts.ShippingProduct 
+                : [shippingProducts.ShippingProduct];
+        } else if (shippingProducts.product) {
+            products = Array.isArray(shippingProducts.product) 
+                ? shippingProducts.product 
+                : [shippingProducts.product];
+        }
         
         products.forEach((product, index) => {
             if (!product) return;
             
-            const carrier = product.carrier_name || product.CarrierName || product.carrierName || 'Unknown Carrier';
-            const serviceName = product.service_name || product.ServiceName || product.serviceName || 'Standard Delivery';
-            const price = parseFloat(product.price || product.Price || product.price || 0);
-            const estimatedDays = product.estimated_delivery_time || product.EstimatedDeliveryTime || product.estimatedDeliveryTime || '2-5 business days';
-            const serviceCode = product.service_code || product.ServiceCode || product.serviceCode || `service_${index}`;
+            // Extract carrier name from description (format: "Carrier Name - Service Name")
+            const description = product.description || product.Description || '';
+            const carrierMatch = description.match(/^([^-]+)/);
+            const carrier = carrierMatch ? carrierMatch[1].trim() : 'Unknown Carrier';
+            
+            const serviceName = product.name || product.Name || 'Standard Delivery';
+            const price = parseFloat(product.price || product.Price || 0);
+            const arrivalTime = product.arrival_time || product.ArrivalTime || product.arrivalTime || '2-5 business days';
+            const serviceId = product.id || product.Id || product.id || `service_${index}`;
+            const taxClass = parseFloat(product.tax_class || product.TaxClass || product.tax_class || 0);
+            const agentInfo = product.agent_info || product.AgentInfo || product.agent_info || '';
+            const agentLink = product.agent_link || product.AgentLink || product.agent_link || '';
             
             options.push({
-                id: `fraktjakt_${serviceCode}_${index}`,
+                id: `fraktjakt_${serviceId}`,
                 carrier: carrier,
                 name: serviceName,
-                description: `${carrier} - ${serviceName}`,
+                description: description || `${carrier} - ${serviceName}`,
                 cost: price,
-                currency: 'SEK',
-                estimatedDays: estimatedDays,
+                tax: taxClass,
+                totalCost: price + taxClass,
+                currency: shipment.currency || 'SEK',
+                estimatedDays: arrivalTime,
                 trackingEnabled: true,
-                serviceCode: serviceCode,
+                serviceCode: serviceId.toString(),
+                serviceId: serviceId.toString(),
+                agentInfo: agentInfo,
+                agentLink: agentLink,
                 type: 'fraktjakt',
                 originalData: product
             });
