@@ -3,6 +3,7 @@ const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const { parseString } = require('xml2js');
 const { promisify } = require('util');
+const asyncHandler = require('../middleware/asyncHandler');
 
 const db = getDBInstance();
 
@@ -769,7 +770,7 @@ function formatFraktjaktOptions(parsedXML) {
 }
 
 // POST /api/shipping/fraktjakt-options - Get Fraktjakt delivery options
-router.post('/fraktjakt-options', async (req, res) => {
+router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
     try {
         const { country, postalCode, street, city, weight, length, width, height } = req.body;
         
@@ -943,6 +944,6 @@ router.post('/fraktjakt-options', async (req, res) => {
             status: 500
         });
     }
-});
+}));
 
 module.exports = router;
