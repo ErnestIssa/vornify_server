@@ -1,0 +1,26 @@
+﻿{
+    "bookingInstructions":  {
+                                "deliveryOptionId":  "26e58433c29e44d7a7c6d6a954a7cef1",
+                                "serviceCode":  "11",
+                                "additionalServiceCodes":  [
+
+                                                           ]
+                            },
+    "descriptiveTexts":  {
+                             "checkout":  {
+                                              "title":  "To your mailbox or at your door",
+                                              "briefDescription":  "Simple, traceable Nordic Swan Ecolabelled delivery to your mailbox or door.",
+                                              "fullDescription":  "If we are unable to deliver to your mailbox, e.g. due to size, it will be delivered at your door or in a bag on the outside of your mailbox. You will be notified via sms/email and in the PostNord App where you can track you parcel.",
+                                              "friendlyDeliveryInfo":  "4-6 days"
+                                          }
+                         },
+    "deliveryTime":  {
+                         "dayRange":  {
+                                          "days":  "4-6"
+                                      }
+                     },
+    "sustainability":  {
+                           "fossilFree":  false,
+                           "nordicSwanEcoLabel":  true
+                       }
+}

@@ -1,0 +1,27 @@
+﻿{
+    "bookingInstructions":  {
+                                "deliveryOptionId":  "7f8ef15f0bc54e849478f948ca7e6aab",
+                                "serviceCode":  "19",
+                                "additionalServiceCodes":  [
+
+                                                           ]
+                            },
+    "descriptiveTexts":  {
+                             "checkout":  {
+                                              "title":  "Collect at Service point",
+                                              "briefDescription":  "Delivery to a service point near you. You will be notified via SMS/email and in PostNord App.",
+                                              "fullDescription":  "If you donÂ´t make a choice, the parcel will be sent to your nearest Service point. Follow your delivery via Postnord App. You will be notified via SMS/email and in PostNord App. SATURDAY DELIVERY to Service points covering over 2 million households in Sweden. Follow your delivery via PostNord App.",
+                                              "friendlyDeliveryInfo":  "1-3 days"
+                                          }
+                         },
+    "deliveryTime":  {
+                         "dayRange":  {
+                                          "days":  "1-3",
+                                          "latest":  "16:00"
+                                      }
+                     },
+    "sustainability":  {
+                           "fossilFree":  false,
+                           "nordicSwanEcoLabel":  false
+                       }
+}

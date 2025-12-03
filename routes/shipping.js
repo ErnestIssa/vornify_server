@@ -153,8 +153,11 @@ function filterServicePointOptions(deliveryOptions) {
             const deliveryTime = option.deliveryTime || {};
             const location = option.location || {};
             
-            // Add default option
-            if (bookingInstructions.deliveryOptionId) {
+            // Only add default option if it has location data
+            // The defaultOption from PostNord typically doesn't have location,
+            // but additionalOptions do. We'll skip defaultOption without location
+            // and only include the specific service point locations from additionalOptions
+            if (bookingInstructions.deliveryOptionId && location && location.name) {
                 const checkoutTexts = descriptiveTexts.checkout || {};
                 const dayRange = deliveryTime.dayRange || {};
                 
