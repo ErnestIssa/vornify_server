@@ -15,7 +15,7 @@ const parseXML = promisify(parseString);
 
 // PostNord Delivery Options API configuration
 const POSTNORD_DELIVERY_API = {
-    apiUrl: 'https://api2.postnord.com/rest/shipment/v1/deliveryoptions/bywarehouse',
+    baseUrl: 'https://api2.postnord.com/rest/shipment/v1/deliveryoptions/bywarehouse',
     apiKey: process.env.POSTNORD_API_KEY || '820cdd1f29a640f86a83b38d902ab39f',
     customerKey: 'PeakMode'
 };
@@ -109,103 +109,191 @@ function validateDeliveryOptionsAddress(address) {
 function filterHomeDeliveryOptions(deliveryOptions) {
     return deliveryOptions
         .filter(option => 
+            option.type === 'home' ||
             option.deliveryMethod === 'HOME' || 
-            option.deliveryMethod === 'HOME_DELIVERY' ||
-            option.serviceCode?.toLowerCase().includes('home') ||
-            option.serviceName?.toLowerCase().includes('home')
+            option.deliveryMethod === 'HOME_DELIVERY'
         )
-        .map(option => ({
-            id: option.serviceCode || `home_${option.deliveryMethod}`,
-            type: 'home',
-            name: option.serviceName || 'Home Delivery',
-            description: option.description || 'Delivery to your home address',
-            cost: option.price?.amount || 0,
-            currency: option.price?.currency || 'SEK',
-            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
-            trackingEnabled: option.trackingAvailable || true,
-            carrier: 'PostNord',
-            deliveryMethod: option.deliveryMethod,
-            originalData: option
-        }));
+        .map(option => {
+            const bookingInstructions = option.bookingInstructions || {};
+            const descriptiveTexts = option.descriptiveTexts || {};
+            const checkoutTexts = descriptiveTexts.checkout || {};
+            const deliveryTime = option.deliveryTime || {};
+            const dayRange = deliveryTime.dayRange || {};
+            
+            return {
+                id: bookingInstructions.deliveryOptionId || `home_${option.type}`,
+                type: 'home',
+                name: checkoutTexts.title || 'Home Delivery',
+                description: checkoutTexts.briefDescription || checkoutTexts.fullDescription || 'Delivery to your home address',
+                fullDescription: checkoutTexts.fullDescription,
+                cost: 0, // Price not in response, would need separate pricing API
+                currency: 'SEK',
+                estimatedDays: dayRange.days || checkoutTexts.friendlyDeliveryInfo || '2-5 business days',
+                trackingEnabled: true,
+                carrier: 'PostNord',
+                serviceCode: bookingInstructions.serviceCode,
+                deliveryOptionId: bookingInstructions.deliveryOptionId,
+                sustainability: option.sustainability || {},
+                originalData: option
+            };
+        });
 }
 
 // Helper function to filter and format service point delivery options
 function filterServicePointOptions(deliveryOptions) {
-    return deliveryOptions
-        .filter(option => 
+    const servicePointOptions = [];
+    
+    deliveryOptions.forEach(option => {
+        if (option.type === 'service-point' || 
             option.deliveryMethod === 'SERVICE_POINT' || 
-            option.deliveryMethod === 'PICKUP_POINT' ||
-            option.serviceCode?.toLowerCase().includes('service') ||
-            option.serviceCode?.toLowerCase().includes('pickup') ||
-            option.serviceName?.toLowerCase().includes('service point') ||
-            option.serviceName?.toLowerCase().includes('pickup')
-        )
-        .map(option => ({
-            id: option.serviceCode || `service_point_${option.deliveryMethod}`,
-            type: 'service_point',
-            name: option.serviceName || 'Service Point Delivery',
-            description: option.description || 'Pick up from a nearby service point',
-            cost: option.price?.amount || 0,
-            currency: option.price?.currency || 'SEK',
-            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
-            trackingEnabled: option.trackingAvailable || true,
-            carrier: 'PostNord',
-            deliveryMethod: option.deliveryMethod,
-            servicePointInfo: option.servicePointInfo || null,
-            originalData: option
-        }));
+            option.deliveryMethod === 'PICKUP_POINT') {
+            
+            const bookingInstructions = option.bookingInstructions || {};
+            const descriptiveTexts = option.descriptiveTexts || {};
+            const deliveryTime = option.deliveryTime || {};
+            const location = option.location || {};
+            
+            // Add default option
+            if (bookingInstructions.deliveryOptionId) {
+                const checkoutTexts = descriptiveTexts.checkout || {};
+                const dayRange = deliveryTime.dayRange || {};
+                
+                servicePointOptions.push({
+                    id: bookingInstructions.deliveryOptionId,
+                    type: 'service_point',
+                    name: checkoutTexts.title || 'Service Point Delivery',
+                    description: checkoutTexts.briefDescription || checkoutTexts.fullDescription || 'Pick up from a nearby service point',
+                    fullDescription: checkoutTexts.fullDescription,
+                    cost: 0, // Price not in response
+                    currency: 'SEK',
+                    estimatedDays: dayRange.days || checkoutTexts.friendlyDeliveryInfo || '2-5 business days',
+                    trackingEnabled: true,
+                    carrier: 'PostNord',
+                    serviceCode: bookingInstructions.serviceCode,
+                    deliveryOptionId: bookingInstructions.deliveryOptionId,
+                    location: location,
+                    sustainability: option.sustainability || {},
+                    isDefault: true,
+                    originalData: option
+                });
+            }
+            
+            // Add additional service point options (if any)
+            if (option.additionalOptions && Array.isArray(option.additionalOptions)) {
+                option.additionalOptions.forEach((additionalOption, index) => {
+                    if (additionalOption && additionalOption.bookingInstructions) {
+                        const addBooking = additionalOption.bookingInstructions || {};
+                        const addTexts = additionalOption.descriptiveTexts?.checkout || {};
+                        const addTime = additionalOption.deliveryTime?.dayRange || {};
+                        const addLocation = additionalOption.location || {};
+                        
+                        servicePointOptions.push({
+                            id: addBooking.deliveryOptionId || `service_point_${index}`,
+                            type: 'service_point',
+                            name: addTexts.title || 'Service Point Delivery',
+                            description: addTexts.briefDescription || addTexts.fullDescription || 'Pick up from a nearby service point',
+                            fullDescription: addTexts.fullDescription,
+                            cost: 0,
+                            currency: 'SEK',
+                            estimatedDays: addTime.days || addTexts.friendlyDeliveryInfo || '2-5 business days',
+                            trackingEnabled: true,
+                            carrier: 'PostNord',
+                            serviceCode: addBooking.serviceCode,
+                            deliveryOptionId: addBooking.deliveryOptionId,
+                            location: addLocation,
+                            sustainability: additionalOption.sustainability || {},
+                            isDefault: false,
+                            originalData: additionalOption
+                        });
+                    }
+                });
+            }
+        }
+    });
+    
+    return servicePointOptions;
 }
 
 // Helper function to filter and format parcel locker delivery options
 function filterParcelLockerOptions(deliveryOptions) {
-    return deliveryOptions
-        .filter(option => 
+    const lockerOptions = [];
+    
+    deliveryOptions.forEach(option => {
+        if (option.type === 'parcel-locker' || 
             option.deliveryMethod === 'PARCEL_LOCKER' || 
-            option.deliveryMethod === 'LOCKER' ||
-            option.serviceCode?.toLowerCase().includes('locker') ||
-            option.serviceName?.toLowerCase().includes('locker') ||
-            option.serviceName?.toLowerCase().includes('paketbox')
-        )
-        .map(option => ({
-            id: option.serviceCode || `parcel_locker_${option.deliveryMethod}`,
-            type: 'parcel_locker',
-            name: option.serviceName || 'Parcel Locker Delivery',
-            description: option.description || 'Delivery to a parcel locker',
-            cost: option.price?.amount || 0,
-            currency: option.price?.currency || 'SEK',
-            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
-            trackingEnabled: option.trackingAvailable || true,
-            carrier: 'PostNord',
-            deliveryMethod: option.deliveryMethod,
-            lockerInfo: option.lockerInfo || null,
-            originalData: option
-        }));
+            option.deliveryMethod === 'LOCKER') {
+            
+            const bookingInstructions = option.bookingInstructions || {};
+            const descriptiveTexts = option.descriptiveTexts || {};
+            const deliveryTime = option.deliveryTime || {};
+            const location = option.location || {};
+            
+            // Process additional options (parcel lockers usually have multiple locations)
+            if (option.additionalOptions && Array.isArray(option.additionalOptions)) {
+                option.additionalOptions.forEach((locker, index) => {
+                    if (locker && locker.bookingInstructions) {
+                        const lockerTexts = locker.descriptiveTexts?.checkout || {};
+                        const lockerTime = locker.deliveryTime?.dayRange || {};
+                        
+                        lockerOptions.push({
+                            id: locker.bookingInstructions.deliveryOptionId || `parcel_locker_${index}`,
+                            type: 'parcel_locker',
+                            name: lockerTexts.title || 'Parcel Locker Delivery',
+                            description: lockerTexts.briefDescription || lockerTexts.fullDescription || 'Delivery to a parcel locker',
+                            fullDescription: lockerTexts.fullDescription,
+                            cost: 0,
+                            currency: 'SEK',
+                            estimatedDays: lockerTime.days || lockerTexts.friendlyDeliveryInfo || '2-5 business days',
+                            trackingEnabled: true,
+                            carrier: 'PostNord',
+                            serviceCode: locker.bookingInstructions.serviceCode,
+                            deliveryOptionId: locker.bookingInstructions.deliveryOptionId,
+                            location: locker.location || {},
+                            sustainability: locker.sustainability || {},
+                            originalData: locker
+                        });
+                    }
+                });
+            }
+        }
+    });
+    
+    return lockerOptions;
 }
 
 // Helper function to filter and format mailbox delivery options
 function filterMailboxOptions(deliveryOptions) {
     return deliveryOptions
         .filter(option => 
+            option.type === 'mailbox' ||
+            option.type === 'express-mailbox' ||
             option.deliveryMethod === 'MAILBOX' || 
-            option.deliveryMethod === 'POSTBOX' ||
-            option.serviceCode?.toLowerCase().includes('mailbox') ||
-            option.serviceCode?.toLowerCase().includes('postbox') ||
-            option.serviceName?.toLowerCase().includes('mailbox') ||
-            option.serviceName?.toLowerCase().includes('postbox')
+            option.deliveryMethod === 'POSTBOX'
         )
-        .map(option => ({
-            id: option.serviceCode || `mailbox_${option.deliveryMethod}`,
-            type: 'mailbox',
-            name: option.serviceName || 'Mailbox Delivery',
-            description: option.description || 'Delivery to your mailbox',
-            cost: option.price?.amount || 0,
-            currency: option.price?.currency || 'SEK',
-            estimatedDays: option.estimatedDeliveryTime || '2-5 business days',
-            trackingEnabled: option.trackingAvailable || false,
-            carrier: 'PostNord',
-            deliveryMethod: option.deliveryMethod,
-            originalData: option
-        }));
+        .map(option => {
+            const bookingInstructions = option.bookingInstructions || {};
+            const descriptiveTexts = option.descriptiveTexts || {};
+            const checkoutTexts = descriptiveTexts.checkout || {};
+            const deliveryTime = option.deliveryTime || {};
+            const dayRange = deliveryTime.dayRange || {};
+            
+            return {
+                id: bookingInstructions.deliveryOptionId || `mailbox_${option.type}`,
+                type: option.type === 'express-mailbox' ? 'express_mailbox' : 'mailbox',
+                name: checkoutTexts.title || (option.type === 'express-mailbox' ? 'Express Mailbox Delivery' : 'Mailbox Delivery'),
+                description: checkoutTexts.briefDescription || checkoutTexts.fullDescription || 'Delivery to your mailbox',
+                fullDescription: checkoutTexts.fullDescription,
+                cost: 0, // Price not in response
+                currency: 'SEK',
+                estimatedDays: dayRange.days || checkoutTexts.friendlyDeliveryInfo || '2-5 business days',
+                trackingEnabled: false,
+                carrier: 'PostNord',
+                serviceCode: bookingInstructions.serviceCode,
+                deliveryOptionId: bookingInstructions.deliveryOptionId,
+                sustainability: option.sustainability || {},
+                originalData: option
+            };
+        });
 }
 
 // Helper function to call PostNord API
@@ -497,41 +585,57 @@ router.post('/options', async (req, res) => {
             });
         }
         
-        // Prepare request body for PostNord API (correct format)
+        // Prepare request body for PostNord API (correct format according to PostNord support)
         const requestBody = {
-            sender: {
-                countryCode: WAREHOUSE_ADDRESS.countryCode,
-                postalCode: WAREHOUSE_ADDRESS.postalCode,
-                city: WAREHOUSE_ADDRESS.city,
-                streetName: WAREHOUSE_ADDRESS.streetName
+            warehouses: [
+                {
+                    id: "warehouse1",
+                    address: {
+                        postCode: WAREHOUSE_ADDRESS.postalCode,
+                        street: WAREHOUSE_ADDRESS.streetName,
+                        city: WAREHOUSE_ADDRESS.city,
+                        countryCode: WAREHOUSE_ADDRESS.countryCode
+                    },
+                    orderHandling: {
+                        daysUntilOrderIsReady: "0-2"
+                    }
+                }
+            ],
+            customer: {
+                customerKey: POSTNORD_DELIVERY_API.customerKey
             },
             recipient: {
-                countryCode: recipientAddress.country,
-                postalCode: recipientAddress.postalCode,
-                streetName: recipientAddress.street
-            },
-            customerKey: POSTNORD_DELIVERY_API.customerKey
+                address: {
+                    postCode: recipientAddress.postalCode,
+                    countryCode: recipientAddress.country
+                }
+            }
         };
         
-        // Add city to recipient if provided
-        if (recipientAddress.city) {
-            requestBody.recipient.city = recipientAddress.city;
+        // Add street and city to recipient address if provided (optional fields)
+        if (recipientAddress.street) {
+            requestBody.recipient.address.street = recipientAddress.street;
         }
+        if (recipientAddress.city) {
+            requestBody.recipient.address.city = recipientAddress.city;
+        }
+        
+        // Build API URL with API key as query parameter (not header)
+        const apiUrl = `${POSTNORD_DELIVERY_API.baseUrl}?apikey=${POSTNORD_DELIVERY_API.apiKey}`;
         
         // Log request for debugging (without sensitive data)
         console.log('PostNord API Request:', {
-            url: POSTNORD_DELIVERY_API.apiUrl,
+            url: POSTNORD_DELIVERY_API.baseUrl,
             customerKey: POSTNORD_DELIVERY_API.customerKey,
-            sender: requestBody.sender,
-            recipient: requestBody.recipient
+            warehouse: requestBody.warehouses[0].address,
+            recipient: requestBody.recipient.address
         });
         
         // Make request to PostNord API
-        const response = await fetch(POSTNORD_DELIVERY_API.apiUrl, {
+        const response = await fetch(apiUrl, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'X-Api-Key': POSTNORD_DELIVERY_API.apiKey
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify(requestBody)
         });
@@ -567,19 +671,43 @@ router.post('/options', async (req, res) => {
         // Parse response
         const data = await response.json();
         
+        // Log full response for debugging
+        console.log('PostNord API Response:', JSON.stringify(data, null, 2));
+        
         // Extract delivery options from response
-        // PostNord API response structure may vary, so we handle different possible formats
+        // PostNord API response structure: warehouseToDeliveryOptions array
         let deliveryOptions = [];
         
-        if (data.deliveryOptions && Array.isArray(data.deliveryOptions)) {
+        // PostNord returns: { warehouseToDeliveryOptions: [{ warehouse: {...}, deliveryOptions: [...] }] }
+        if (data.warehouseToDeliveryOptions && Array.isArray(data.warehouseToDeliveryOptions)) {
+            // Extract delivery options from all warehouses
+            data.warehouseToDeliveryOptions.forEach(warehouseData => {
+                if (warehouseData.deliveryOptions && Array.isArray(warehouseData.deliveryOptions)) {
+                    // Each delivery option has: type, defaultOption, additionalOptions
+                    warehouseData.deliveryOptions.forEach(option => {
+                        // Add default option with type preserved
+                        if (option.defaultOption) {
+                            deliveryOptions.push({
+                                ...option.defaultOption,
+                                type: option.type,
+                                isDefault: true,
+                                additionalOptions: option.additionalOptions || []
+                            });
+                        } else {
+                            // If no defaultOption, add the option itself with type
+                            deliveryOptions.push({
+                                ...option,
+                                type: option.type,
+                                isDefault: false
+                            });
+                        }
+                    });
+                }
+            });
+        } else if (data.deliveryOptions && Array.isArray(data.deliveryOptions)) {
             deliveryOptions = data.deliveryOptions;
         } else if (Array.isArray(data)) {
             deliveryOptions = data;
-        } else if (data.data && Array.isArray(data.data)) {
-            deliveryOptions = data.data;
-        } else if (data.servicePointInformation) {
-            // If response contains service point information, extract options from there
-            deliveryOptions = data.servicePointInformation.deliveryOptions || [];
         }
         
         // Process delivery options using helper functions
@@ -698,16 +826,20 @@ function formatFraktjaktOptions(parsedXML) {
         // Fraktjakt response structure
         const shipment = parsedXML.shipment || parsedXML.Shipment || parsedXML;
         
+        // Extract shipment metadata (id and access_code) for Service Point Selector API
+        const shipmentId = shipment.id || shipment.Id || shipment.id;
+        const accessCode = shipment.access_code || shipment.AccessCode || shipment.accessCode || shipment.access_code;
+        
         // Check if there's an error
         if (shipment.status === 'error' && shipment.error_message) {
             console.error('Fraktjakt API error:', shipment.error_message);
-            return options;
+            return { options: [], shipmentId: null, accessCode: null };
         }
         
         const shippingProducts = shipment.shipping_products || shipment.ShippingProducts || shipment.shippingProducts;
         
         if (!shippingProducts) {
-            return options;
+            return { options: [], shipmentId: shipmentId || null, accessCode: accessCode || null };
         }
         
         // Handle both single product and array of products
@@ -759,14 +891,18 @@ function formatFraktjaktOptions(parsedXML) {
                 agentInfo: agentInfo,
                 agentLink: agentLink,
                 type: 'fraktjakt',
-                originalData: product
+                originalData: product,
+                // Add shipment metadata for Service Point Selector API
+                shipmentId: shipmentId,
+                accessCode: accessCode
             });
         });
+        
+        return { options, shipmentId: shipmentId || null, accessCode: accessCode || null };
     } catch (error) {
         console.error('Error formatting Fraktjakt options:', error);
+        return { options: [], shipmentId: null, accessCode: null };
     }
-    
-    return options;
 }
 
 // POST /api/shipping/fraktjakt-options - Get Fraktjakt delivery options
@@ -886,9 +1022,48 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
         }
         
         // Format delivery options
-        let deliveryOptions;
+        let formattedResult;
         try {
-            deliveryOptions = formatFraktjaktOptions(parsedResponse);
+            formattedResult = formatFraktjaktOptions(parsedResponse);
+            const deliveryOptions = formattedResult.options || [];
+            const shipmentId = formattedResult.shipmentId;
+            const accessCode = formattedResult.accessCode;
+        
+            if (deliveryOptions.length === 0) {
+            console.warn('No delivery options found for address:', recipient);
+            return res.status(404).json({
+                success: false,
+                error: 'No delivery options found for the provided address',
+                parsedResponse: parsedResponse, // Include for debugging
+                status: 404
+            });
+        }
+        
+            // Return formatted response
+            res.json({
+                success: true,
+                deliveryOptions: deliveryOptions,
+                shipmentId: shipmentId,
+                accessCode: accessCode,
+                servicePointSelectorUrl: shipmentId && accessCode 
+                    ? `https://api.fraktjakt.se/agents/service_point_selector?locale=sv&shipment_id=${shipmentId}&access_code=${accessCode}`
+                    : null,
+                address: {
+                    country: recipient.country,
+                    postalCode: recipient.postalCode,
+                    street: recipient.street,
+                    city: recipient.city || null
+                },
+                warehouse: {
+                    country: FRAKTJAKT_WAREHOUSE.country,
+                    postalCode: FRAKTJAKT_WAREHOUSE.postalCode,
+                    city: FRAKTJAKT_WAREHOUSE.city,
+                    street: FRAKTJAKT_WAREHOUSE.street
+                },
+                parcel: parcel,
+                currency: 'SEK',
+                timestamp: new Date().toISOString()
+            });
         } catch (formatError) {
             console.error('Error formatting delivery options:', formatError);
             console.error('Parsed response:', JSON.stringify(parsedResponse, null, 2));
@@ -900,37 +1075,6 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
             });
         }
         
-        if (deliveryOptions.length === 0) {
-            console.warn('No delivery options found for address:', recipient);
-            return res.status(404).json({
-                success: false,
-                error: 'No delivery options found for the provided address',
-                parsedResponse: parsedResponse, // Include for debugging
-                status: 404
-            });
-        }
-        
-        // Return formatted response
-        res.json({
-            success: true,
-            deliveryOptions: deliveryOptions,
-            address: {
-                country: recipient.country,
-                postalCode: recipient.postalCode,
-                street: recipient.street,
-                city: recipient.city || null
-            },
-            warehouse: {
-                country: FRAKTJAKT_WAREHOUSE.country,
-                postalCode: FRAKTJAKT_WAREHOUSE.postalCode,
-                city: FRAKTJAKT_WAREHOUSE.city,
-                street: FRAKTJAKT_WAREHOUSE.street
-            },
-            parcel: parcel,
-            currency: 'SEK',
-            timestamp: new Date().toISOString()
-        });
-        
     } catch (error) {
         console.error('Fraktjakt delivery options error:', error);
         console.error('Error stack:', error.stack);
@@ -940,6 +1084,103 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to get delivery options from Fraktjakt',
+            details: error.message,
+            status: 500
+        });
+    }
+}));
+
+// GET /api/shipping/fraktjakt-service-points - Get service points using Service Point Selector API
+router.get('/fraktjakt-service-points', asyncHandler(async (req, res) => {
+    try {
+        const { shipment_id, access_code, agent_id, locale = 'sv' } = req.query;
+        
+        // Validate required parameters
+        if (!shipment_id || !access_code) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required parameters: shipment_id and access_code are required'
+            });
+        }
+        
+        // Build Service Point Selector API URL
+        // Note: According to Fraktjakt docs, this API might be designed for client-side use
+        // It returns HTML/JavaScript for service point selection
+        let apiUrl = `https://api.fraktjakt.se/agents/service_point_selector?locale=${locale}&shipment_id=${shipment_id}&access_code=${access_code}`;
+        
+        // Add agent_id if provided (for selecting a specific agent)
+        if (agent_id) {
+            apiUrl += `&agent_id=${agent_id}`;
+        }
+        
+        // Log request for debugging
+        console.log('Fraktjakt Service Point Selector API Request:', {
+            url: apiUrl,
+            shipment_id: shipment_id,
+            access_code: access_code,
+            agent_id: agent_id || 'not provided'
+        });
+        
+        // Make GET request to Fraktjakt Service Point Selector API
+        // This API typically returns HTML/JavaScript for client-side service point selection
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'Accept': 'text/html, application/xhtml+xml, application/xml, application/json',
+                'User-Agent': 'PeakMode-Backend/1.0'
+            }
+        });
+        
+        // Check if request was successful
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Fraktjakt Service Point Selector API error:', {
+                status: response.status,
+                statusText: response.statusText,
+                error: errorText
+            });
+            
+            return res.status(response.status).json({
+                success: false,
+                error: 'Failed to fetch service points from Fraktjakt',
+                status: response.status,
+                details: errorText
+            });
+        }
+        
+        // Get response (could be XML, JSON, or HTML)
+        const contentType = response.headers.get('content-type') || '';
+        let responseData;
+        
+        if (contentType.includes('application/json')) {
+            responseData = await response.json();
+        } else if (contentType.includes('application/xml') || contentType.includes('text/xml')) {
+            const xmlText = await response.text();
+            responseData = await parseFraktjaktResponse(xmlText);
+        } else {
+            // HTML response (likely a service point selector page)
+            const htmlText = await response.text();
+            responseData = { html: htmlText, type: 'html' };
+        }
+        
+        // Return response
+        res.json({
+            success: true,
+            data: responseData,
+            contentType: contentType,
+            shipmentId: shipment_id,
+            accessCode: access_code,
+            agentId: agent_id || null,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Fraktjakt Service Point Selector error:', error);
+        console.error('Error stack:', error.stack);
+        
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get service points from Fraktjakt',
             details: error.message,
             status: 500
         });
