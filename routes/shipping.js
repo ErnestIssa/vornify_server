@@ -1042,15 +1042,65 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
             });
         }
         
+            // Get service points near customer address using Service Point Locator API
+            let servicePoints = [];
+            try {
+                const locatorUrl = `https://api.fraktjakt.se/agents/service_point_locator?locale=sv&consignor_id=${FRAKTJAKT_API.consignorId}&consignor_key=${FRAKTJAKT_API.consignorKey}&country=${recipient.country.toLowerCase()}${recipient.city ? `&city=${encodeURIComponent(recipient.city)}` : ''}${recipient.street ? `&street=${encodeURIComponent(recipient.street)}` : ''}${recipient.postalCode ? `&postal_code=${encodeURIComponent(recipient.postalCode)}` : ''}`;
+                
+                const locatorResponse = await fetch(locatorUrl, {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/json, application/xml, text/xml' }
+                });
+                
+                if (locatorResponse.ok) {
+                    const locatorContentType = locatorResponse.headers.get('content-type') || '';
+                    let locatorData;
+                    
+                    if (locatorContentType.includes('application/json')) {
+                        locatorData = await locatorResponse.json();
+                    } else {
+                        const locatorXml = await locatorResponse.text();
+                        locatorData = await parseFraktjaktResponse(locatorXml);
+                    }
+                    
+                    // Parse agents from response (JSON format)
+                    const agentsList = locatorData.agents || locatorData.Agents || [];
+                    if (Array.isArray(agentsList) && agentsList.length > 0) {
+                        agentsList.forEach((agent) => {
+                            if (!agent) return;
+                            servicePoints.push({
+                                agentId: agent.id || agent.Id || agent.agent_id,
+                                name: agent.name || agent.Name || 'Service Point',
+                                address: {
+                                    street: agent.address?.street || agent.street || agent.Street || '',
+                                    city: agent.address?.city || agent.city || agent.City || '',
+                                    postalCode: agent.address?.postal_code || agent.postal_code || agent.PostalCode || agent.postalCode || '',
+                                    country: agent.address?.country || agent.country || agent.Country || recipient.country
+                                },
+                                distance: agent.distance || agent.Distance || null,
+                                coordinate: agent.latitude && agent.longitude ? {
+                                    latitude: agent.latitude,
+                                    longitude: agent.longitude
+                                } : (agent.coordinate || agent.Coordinate || null),
+                                openingHours: agent.agent_operation_hours || agent.opening_hours || agent.OpeningHours || agent.openingHours || null,
+                                shipper: agent.shipper || agent.Shipper || null,
+                                shipperId: agent.shipper_id || agent.ShipperId || agent.shipperId || null
+                            });
+                        });
+                    }
+                }
+            } catch (locatorError) {
+                console.warn('Failed to fetch service points from locator API:', locatorError);
+                // Continue without service points - not critical
+            }
+        
             // Return formatted response
             res.json({
                 success: true,
                 deliveryOptions: deliveryOptions,
+                servicePoints: servicePoints, // Service points near customer address
                 shipmentId: shipmentId,
                 accessCode: accessCode,
-                servicePointSelectorUrl: shipmentId && accessCode 
-                    ? `https://api.fraktjakt.se/agents/service_point_selector?locale=sv&shipment_id=${shipmentId}&access_code=${accessCode}`
-                    : null,
                 address: {
                     country: recipient.country,
                     postalCode: recipient.postalCode,
@@ -1093,28 +1143,166 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
     }
 }));
 
+// GET /api/shipping/fraktjakt-service-point-locator - Get service points near customer address
+router.get('/fraktjakt-service-point-locator', asyncHandler(async (req, res) => {
+    try {
+        const { country, city, street, postal_code, locale = 'sv' } = req.query;
+        
+        // Validate required parameters
+        if (!country) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required parameter: country is required'
+            });
+        }
+        
+        // Check if Fraktjakt credentials are configured
+        if (!FRAKTJAKT_API.consignorId || !FRAKTJAKT_API.consignorKey) {
+            return res.status(500).json({
+                success: false,
+                error: 'Fraktjakt API credentials not configured. Please set FRAKTJAKT_CONSIGNOR_ID and FRAKTJAKT_CONSIGNOR_KEY environment variables.'
+            });
+        }
+        
+        // Build Service Point Locator API URL
+        // Format: https://api.fraktjakt.se/agents/service_point_locator?locale=sv&consignor_id=ID&consignor_key=KEY&country=se&city=City&street=Street&postal_code=12345
+        let apiUrl = `https://api.fraktjakt.se/agents/service_point_locator?locale=${locale}&consignor_id=${FRAKTJAKT_API.consignorId}&consignor_key=${FRAKTJAKT_API.consignorKey}&country=${country.toLowerCase()}`;
+        
+        if (city) {
+            apiUrl += `&city=${encodeURIComponent(city)}`;
+        }
+        if (street) {
+            apiUrl += `&street=${encodeURIComponent(street)}`;
+        }
+        if (postal_code) {
+            apiUrl += `&postal_code=${encodeURIComponent(postal_code)}`;
+        }
+        
+        // Log request for debugging
+        console.log('Fraktjakt Service Point Locator API Request:', {
+            url: apiUrl.replace(FRAKTJAKT_API.consignorKey, '***'),
+            country: country,
+            city: city,
+            street: street,
+            postal_code: postal_code
+        });
+        
+        // Make GET request to Fraktjakt Service Point Locator API
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/xml, application/json, text/xml'
+            }
+        });
+        
+        // Check if request was successful
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Fraktjakt Service Point Locator API error:', {
+                status: response.status,
+                statusText: response.statusText,
+                error: errorText
+            });
+            
+            return res.status(response.status).json({
+                success: false,
+                error: 'Failed to fetch service points from Fraktjakt',
+                status: response.status,
+                details: errorText
+            });
+        }
+        
+        // Get response (usually JSON, but can be XML)
+        const contentType = response.headers.get('content-type') || '';
+        let responseData;
+        
+        if (contentType.includes('application/json')) {
+            responseData = await response.json();
+        } else {
+            // Parse XML response
+            const xmlText = await response.text();
+            responseData = await parseFraktjaktResponse(xmlText);
+        }
+        
+        // Format agents for frontend
+        const agents = [];
+        try {
+            // Fraktjakt Service Point Locator API returns JSON with structure:
+            // { status: "ok", agents: [{ id, name, address, latitude, longitude, distance, ... }] }
+            const agentsList = responseData.agents || responseData.Agents || [];
+            
+            if (Array.isArray(agentsList) && agentsList.length > 0) {
+                agentsList.forEach((agent) => {
+                    if (!agent) return;
+                    
+                    agents.push({
+                        agentId: agent.id || agent.Id || agent.agent_id,
+                        name: agent.name || agent.Name || 'Service Point',
+                        address: {
+                            street: agent.address?.street || agent.street || agent.Street || '',
+                            city: agent.address?.city || agent.city || agent.City || '',
+                            postalCode: agent.address?.postal_code || agent.postal_code || agent.PostalCode || agent.postalCode || '',
+                            country: agent.address?.country || agent.country || agent.Country || country.toUpperCase()
+                        },
+                        distance: agent.distance || agent.Distance || null,
+                        coordinate: agent.latitude && agent.longitude ? {
+                            latitude: agent.latitude,
+                            longitude: agent.longitude
+                        } : (agent.coordinate || agent.Coordinate || null),
+                        openingHours: agent.agent_operation_hours || agent.opening_hours || agent.OpeningHours || agent.openingHours || null,
+                        shipper: agent.shipper || agent.Shipper || null,
+                        shipperId: agent.shipper_id || agent.ShipperId || agent.shipperId || null,
+                        htmlInfo: agent.html_info || agent.HtmlInfo || agent.htmlInfo || null,
+                        originalData: agent
+                    });
+                });
+            }
+        } catch (parseError) {
+            console.error('Error parsing agents from response:', parseError);
+            console.error('Response data:', JSON.stringify(responseData, null, 2));
+        }
+        
+        // Return response
+        res.json({
+            success: true,
+            agents: agents,
+            count: agents.length,
+            address: {
+                country: country,
+                city: city || null,
+                street: street || null,
+                postal_code: postal_code || null
+            },
+            rawResponse: responseData,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Fraktjakt Service Point Locator error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get service points',
+            details: error.message
+        });
+    }
+}));
+
 // GET /api/shipping/fraktjakt-service-points - Get service points using Service Point Selector API
 router.get('/fraktjakt-service-points', asyncHandler(async (req, res) => {
     try {
         const { shipment_id, access_code, agent_id, locale = 'sv' } = req.query;
         
         // Validate required parameters
-        if (!shipment_id || !access_code) {
+        if (!shipment_id || !access_code || !agent_id) {
             return res.status(400).json({
                 success: false,
-                error: 'Missing required parameters: shipment_id and access_code are required'
+                error: 'Missing required parameters: shipment_id, access_code, and agent_id are all required'
             });
         }
         
         // Build Service Point Selector API URL
-        // Note: According to Fraktjakt docs, this API might be designed for client-side use
-        // It returns HTML/JavaScript for service point selection
-        let apiUrl = `https://api.fraktjakt.se/agents/service_point_selector?locale=${locale}&shipment_id=${shipment_id}&access_code=${access_code}`;
-        
-        // Add agent_id if provided (for selecting a specific agent)
-        if (agent_id) {
-            apiUrl += `&agent_id=${agent_id}`;
-        }
+        // According to Fraktjakt support: agent_id is REQUIRED
+        const apiUrl = `https://api.fraktjakt.se/agents/service_point_selector?locale=${locale}&shipment_id=${shipment_id}&access_code=${access_code}&agent_id=${agent_id}`;
         
         // Log request for debugging
         console.log('Fraktjakt Service Point Selector API Request:', {
