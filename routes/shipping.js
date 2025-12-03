@@ -4,8 +4,16 @@ const getDBInstance = require('../vornifydb/dbInstance');
 const { parseString } = require('xml2js');
 const { promisify } = require('util');
 const asyncHandler = require('../middleware/asyncHandler');
+const { getLanguageFromRequest, DEFAULT_LANGUAGE } = require('../services/translationService');
 
 const db = getDBInstance();
+
+// Helper function to get Fraktjakt locale from request (defaults to English)
+function getFraktjaktLocale(req) {
+    const language = getLanguageFromRequest(req);
+    // Fraktjakt supports 'en' and 'sv', default to 'en' (English)
+    return language === 'sv' ? 'sv' : 'en';
+}
 
 // Use built-in fetch (available in Node.js 18+)
 // No need to import node-fetch for Node.js 18+
@@ -1043,9 +1051,12 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
         }
         
             // Get service points near customer address using Service Point Locator API
+            // Use language from request, default to English
+            const locale = getFraktjaktLocale(req);
+            
             let servicePoints = [];
             try {
-                const locatorUrl = `https://api.fraktjakt.se/agents/service_point_locator?locale=sv&consignor_id=${FRAKTJAKT_API.consignorId}&consignor_key=${FRAKTJAKT_API.consignorKey}&country=${recipient.country.toLowerCase()}${recipient.city ? `&city=${encodeURIComponent(recipient.city)}` : ''}${recipient.street ? `&street=${encodeURIComponent(recipient.street)}` : ''}${recipient.postalCode ? `&postal_code=${encodeURIComponent(recipient.postalCode)}` : ''}`;
+                const locatorUrl = `https://api.fraktjakt.se/agents/service_point_locator?locale=${locale}&consignor_id=${FRAKTJAKT_API.consignorId}&consignor_key=${FRAKTJAKT_API.consignorKey}&country=${recipient.country.toLowerCase()}${recipient.city ? `&city=${encodeURIComponent(recipient.city)}` : ''}${recipient.street ? `&street=${encodeURIComponent(recipient.street)}` : ''}${recipient.postalCode ? `&postal_code=${encodeURIComponent(recipient.postalCode)}` : ''}`;
                 
                 const locatorResponse = await fetch(locatorUrl, {
                     method: 'GET',
@@ -1146,7 +1157,10 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
 // GET /api/shipping/fraktjakt-service-point-locator - Get service points near customer address
 router.get('/fraktjakt-service-point-locator', asyncHandler(async (req, res) => {
     try {
-        const { country, city, street, postal_code, locale = 'sv' } = req.query;
+        // Get language from request, default to English
+        const locale = getFraktjaktLocale(req);
+        
+        const { country, city, street, postal_code } = req.query;
         
         // Validate required parameters
         if (!country) {
@@ -1290,7 +1304,10 @@ router.get('/fraktjakt-service-point-locator', asyncHandler(async (req, res) => 
 // GET /api/shipping/fraktjakt-service-points - Get service points using Service Point Selector API
 router.get('/fraktjakt-service-points', asyncHandler(async (req, res) => {
     try {
-        const { shipment_id, access_code, agent_id, locale = 'sv' } = req.query;
+        // Get language from request, default to English
+        const locale = getFraktjaktLocale(req);
+        
+        const { shipment_id, access_code, agent_id } = req.query;
         
         // Validate required parameters
         if (!shipment_id || !access_code || !agent_id) {
