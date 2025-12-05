@@ -113,6 +113,240 @@ function validateDeliveryOptionsAddress(address) {
     return true;
 }
 
+// Postal code format validation by country
+const POSTAL_CODE_FORMATS = {
+    'SE': { pattern: /^\d{5}$/, format: '5 digits', example: '11363' }, // Sweden
+    'NO': { pattern: /^\d{4}$/, format: '4 digits', example: '0150' }, // Norway
+    'DK': { pattern: /^\d{4}$/, format: '4 digits', example: '2100' }, // Denmark
+    'FI': { pattern: /^\d{5}$/, format: '5 digits', example: '00100' }, // Finland
+    'DE': { pattern: /^\d{5}$/, format: '5 digits', example: '10115' }, // Germany
+    'NL': { pattern: /^\d{4}\s?[A-Z]{2}$/i, format: '4 digits + 2 letters', example: '1012 AB' }, // Netherlands
+    'BE': { pattern: /^\d{4}$/, format: '4 digits', example: '1000' }, // Belgium
+    'AT': { pattern: /^\d{4}$/, format: '4 digits', example: '1010' }, // Austria
+    'CH': { pattern: /^\d{4}$/, format: '4 digits', example: '8001' }, // Switzerland
+    'PL': { pattern: /^\d{2}-\d{3}$/, format: 'XX-XXX', example: '00-001' }, // Poland
+    'FR': { pattern: /^\d{5}$/, format: '5 digits', example: '75001' }, // France
+    'IT': { pattern: /^\d{5}$/, format: '5 digits', example: '00118' }, // Italy
+    'ES': { pattern: /^\d{5}$/, format: '5 digits', example: '28001' }, // Spain
+    'GB': { pattern: /^[A-Z]{1,2}\d{1,2}[A-Z]?\s?\d[A-Z]{2}$/i, format: 'UK format', example: 'SW1A 1AA' }, // United Kingdom
+    'US': { pattern: /^\d{5}(-\d{4})?$/, format: '5 or 9 digits', example: '10001' }, // United States
+    'CA': { pattern: /^[A-Z]\d[A-Z]\s?\d[A-Z]\d$/i, format: 'A1A 1A1', example: 'K1A 0B1' } // Canada
+};
+
+// Postal code ranges for basic validation (first 1-2 digits indicate region)
+const POSTAL_CODE_RANGES = {
+    'SE': {
+        // Sweden: First digit indicates region
+        // 1 = Stockholm, 2 = Skåne, 3 = Gothenburg, 4 = Västra Götaland, etc.
+        validFirstDigits: ['1', '2', '3', '4', '5', '6', '7', '8', '9'],
+        ranges: {
+            'Stockholm': { start: 10000, end: 19999 },
+            'Göteborg': { start: 40000, end: 49999 },
+            'Malmö': { start: 20000, end: 29999 }
+        }
+    },
+    'NO': {
+        validFirstDigits: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
+        ranges: {
+            'Oslo': { start: 0, end: 1299 },
+            'Bergen': { start: 5000, end: 5999 }
+        }
+    },
+    'DK': {
+        validFirstDigits: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
+        ranges: {
+            'Copenhagen': { start: 1000, end: 2999 }
+        }
+    }
+};
+
+// City to postal code mapping (common cities for validation)
+const CITY_POSTAL_CODE_MAP = {
+    'SE': {
+        'Stockholm': { ranges: [{ start: 10000, end: 19999 }], common: ['11122', '11363', '11434', '11620'] },
+        'Göteborg': { ranges: [{ start: 40000, end: 49999 }], common: ['41104', '41301'] },
+        'Malmö': { ranges: [{ start: 20000, end: 29999 }], common: ['21115', '21420'] },
+        'Uppsala': { ranges: [{ start: 75000, end: 75999 }], common: ['75105'] },
+        'Linköping': { ranges: [{ start: 58000, end: 58999 }], common: ['58183'] },
+        'Örebro': { ranges: [{ start: 70000, end: 70999 }], common: ['70211'] },
+        'Västerås': { ranges: [{ start: 72000, end: 72999 }], common: ['72212'] },
+        'Borås': { ranges: [{ start: 50000, end: 50999 }], common: ['50333'] },
+        'Bålsta': { ranges: [{ start: 74600, end: 74699 }], common: ['74639'] }
+    },
+    'NO': {
+        'Oslo': { ranges: [{ start: 0, end: 1299 }], common: ['0150', '0160'] },
+        'Bergen': { ranges: [{ start: 5000, end: 5999 }], common: ['5003', '5014'] }
+    },
+    'DK': {
+        'Copenhagen': { ranges: [{ start: 1000, end: 2999 }], common: ['1050', '2100'] },
+        'Aarhus': { ranges: [{ start: 8000, end: 8299 }], common: ['8000'] }
+    }
+};
+
+/**
+ * Validate postal code format for a country
+ * @param {string} postalCode - Postal code to validate
+ * @param {string} country - Country code (ISO 2-letter)
+ * @returns {object|null} - Validation result or null if valid
+ */
+function validatePostalCodeFormat(postalCode, country) {
+    const countryUpper = country.toUpperCase();
+    const format = POSTAL_CODE_FORMATS[countryUpper];
+    
+    if (!format) {
+        // Unknown country - accept any format
+        return null;
+    }
+    
+    // Remove spaces for validation
+    const cleanedCode = postalCode.replace(/\s+/g, '');
+    
+    if (!format.pattern.test(cleanedCode)) {
+        return {
+            valid: false,
+            issue: 'format_invalid',
+            message: `Postal code format invalid for ${countryUpper}. Expected format: ${format.format} (e.g., ${format.example})`,
+            field: 'postalCode'
+        };
+    }
+    
+    return null; // Valid
+}
+
+/**
+ * Validate postal code matches city (if city is provided)
+ * @param {string} postalCode - Postal code
+ * @param {string} city - City name
+ * @param {string} country - Country code
+ * @returns {object|null} - Validation result or null if valid
+ */
+function validatePostalCodeCityMatch(postalCode, city, country) {
+    if (!city || !postalCode) {
+        return null; // Can't validate without both
+    }
+    
+    const countryUpper = country.toUpperCase();
+    const cityMap = CITY_POSTAL_CODE_MAP[countryUpper];
+    
+    if (!cityMap) {
+        return null; // No validation data for this country
+    }
+    
+    // Normalize city name (case-insensitive, remove accents)
+    const normalizedCity = city.trim().toLowerCase();
+    const normalizedPostalCode = parseInt(postalCode.replace(/\s+/g, ''));
+    
+    // Find matching city
+    let cityData = null;
+    for (const [cityName, data] of Object.entries(cityMap)) {
+        if (cityName.toLowerCase() === normalizedCity) {
+            cityData = data;
+            break;
+        }
+    }
+    
+    if (!cityData) {
+        // City not in our validation map - can't validate
+        return null;
+    }
+    
+    // Check if postal code is in any of the city's ranges
+    const inRange = cityData.ranges.some(range => 
+        normalizedPostalCode >= range.start && normalizedPostalCode <= range.end
+    );
+    
+    // Also check common postal codes
+    const isCommon = cityData.common.includes(postalCode.replace(/\s+/g, ''));
+    
+    if (!inRange && !isCommon) {
+        return {
+            valid: false,
+            issue: 'city_mismatch',
+            message: `Postal code ${postalCode} does not match city "${city}" in ${countryUpper}`,
+            field: 'postalCode'
+        };
+    }
+    
+    return null; // Valid
+}
+
+/**
+ * Comprehensive address validation
+ * @param {object} address - Address object with country, postalCode, street, city
+ * @returns {object} - Validation result { valid: boolean, error: object|null }
+ */
+function validateShippingAddress(address) {
+    const { country, postalCode, street, city } = address;
+    
+    // 1. Validate postal code format
+    const formatError = validatePostalCodeFormat(postalCode, country);
+    if (formatError) {
+        return {
+            valid: false,
+            error: {
+                success: false,
+                validationError: true,
+                error: formatError.message,
+                field: formatError.field,
+                details: {
+                    postalCode: postalCode,
+                    country: country,
+                    issue: formatError.issue
+                }
+            }
+        };
+    }
+    
+    // 2. Validate postal code matches city (if city provided)
+    if (city) {
+        const cityError = validatePostalCodeCityMatch(postalCode, city, country);
+        if (cityError) {
+            return {
+                valid: false,
+                error: {
+                    success: false,
+                    validationError: true,
+                    error: cityError.message,
+                    field: cityError.field,
+                    details: {
+                        postalCode: postalCode,
+                        city: city,
+                        country: country,
+                        issue: cityError.issue
+                    }
+                }
+            };
+        }
+    }
+    
+    // 3. Basic postal code range validation (for known countries)
+    const countryUpper = country.toUpperCase();
+    const ranges = POSTAL_CODE_RANGES[countryUpper];
+    if (ranges) {
+        const cleanedCode = postalCode.replace(/\s+/g, '');
+        const firstDigit = cleanedCode[0];
+        
+        if (!ranges.validFirstDigits.includes(firstDigit)) {
+            return {
+                valid: false,
+                error: {
+                    success: false,
+                    validationError: true,
+                    error: `Postal code ${postalCode} appears invalid for ${countryUpper}`,
+                    field: 'postalCode',
+                    details: {
+                        postalCode: postalCode,
+                        country: country,
+                        issue: 'postal_code_invalid'
+                    }
+                }
+            };
+        }
+    }
+    
+    return { valid: true, error: null };
+}
+
 // Helper function to filter and format home delivery options
 function filterHomeDeliveryOptions(deliveryOptions) {
     return deliveryOptions
@@ -584,8 +818,14 @@ router.post('/options', async (req, res) => {
             city: city || '' // City is optional for PostNord API
         };
         
-        // Validate recipient address
+        // Validate required fields
         validateDeliveryOptionsAddress(recipientAddress);
+        
+        // Comprehensive address validation
+        const addressValidation = validateShippingAddress(recipientAddress);
+        if (!addressValidation.valid) {
+            return res.status(400).json(addressValidation.error);
+        }
         
         // Validate warehouse address is configured
         if (!WAREHOUSE_ADDRESS.countryCode || !WAREHOUSE_ADDRESS.postalCode || 
@@ -936,6 +1176,12 @@ router.post('/fraktjakt-options', asyncHandler(async (req, res) => {
             street: street,
             city: city || ''
         };
+        
+        // Comprehensive address validation
+        const addressValidation = validateShippingAddress(recipient);
+        if (!addressValidation.valid) {
+            return res.status(400).json(addressValidation.error);
+        }
         
         // Prepare parcel information (with defaults)
         const parcel = {
