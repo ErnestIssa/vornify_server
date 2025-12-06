@@ -1807,27 +1807,84 @@ function formatShipmondoOptions(products, pickupPoints = []) {
     }
     
     return products.map(product => {
-        const carrier = product.carrier || product.carrier_name || 'Unknown';
-        const service = product.name || product.service_name || product.product_name || 'Standard Delivery';
-        const productCode = product.product_code || product.code || '';
-        const price = parseFloat(product.price || product.rate || product.cost || 0);
+        // Extract carrier name (handle both object and string)
+        let carrier = 'Unknown';
+        if (product.carrier) {
+            if (typeof product.carrier === 'object' && product.carrier !== null) {
+                carrier = product.carrier.name || product.carrier.code || product.carrier.toString() || 'Unknown';
+            } else {
+                carrier = String(product.carrier);
+            }
+        } else if (product.carrier_name) {
+            carrier = String(product.carrier_name);
+        }
+        
+        // Extract service name (handle both object and string)
+        let service = 'Standard Delivery';
+        if (product.name) {
+            service = typeof product.name === 'object' ? (product.name.name || product.name.toString() || 'Standard Delivery') : String(product.name);
+        } else if (product.service_name) {
+            service = typeof product.service_name === 'object' ? (product.service_name.name || product.service_name.toString() || 'Standard Delivery') : String(product.service_name);
+        } else if (product.product_name) {
+            service = typeof product.product_name === 'object' ? (product.product_name.name || product.product_name.toString() || 'Standard Delivery') : String(product.product_name);
+        }
+        
+        // Extract product code
+        const productCode = product.product_code || product.code || product.id || '';
+        
+        // Extract price (ensure it's a number)
+        let price = 0;
+        if (product.price !== undefined && product.price !== null) {
+            price = typeof product.price === 'object' ? parseFloat(product.price.amount || product.price.value || product.price || 0) : parseFloat(product.price || 0);
+        } else if (product.rate !== undefined && product.rate !== null) {
+            price = typeof product.rate === 'object' ? parseFloat(product.rate.amount || product.rate.value || product.rate || 0) : parseFloat(product.rate || 0);
+        } else if (product.cost !== undefined && product.cost !== null) {
+            price = typeof product.cost === 'object' ? parseFloat(product.cost.amount || product.cost.value || product.cost || 0) : parseFloat(product.cost || 0);
+        }
+        
+        // Extract delivery type
         const deliveryType = product.delivery_type || (product.pickup_point_required ? 'pickup' : 'home');
         
-        // Get pickup points for this carrier if available
-        const carrierCode = product.carrier_code || product.carrier;
-        const pickupPointsForCarrier = pickupPointsByCarrier[carrierCode] || [];
+        // Get carrier code for pickup points lookup
+        let carrierCode = null;
+        if (product.carrier_code) {
+            carrierCode = String(product.carrier_code);
+        } else if (product.carrier && typeof product.carrier === 'object') {
+            carrierCode = product.carrier.code || product.carrier.id || null;
+        } else if (product.carrier) {
+            carrierCode = String(product.carrier);
+        }
+        
+        const pickupPointsForCarrier = carrierCode ? (pickupPointsByCarrier[carrierCode] || []) : [];
+        
+        // Extract description
+        let description = '';
+        if (product.description) {
+            description = typeof product.description === 'object' ? (product.description.text || product.description.toString() || '') : String(product.description);
+        }
+        if (!description) {
+            description = `${carrier} ${service}`;
+        }
+        
+        // Extract estimated days
+        let estimatedDays = null;
+        if (product.estimated_delivery_days !== undefined && product.estimated_delivery_days !== null) {
+            estimatedDays = typeof product.estimated_delivery_days === 'object' ? (product.estimated_delivery_days.days || product.estimated_delivery_days.value || null) : (typeof product.estimated_delivery_days === 'number' ? product.estimated_delivery_days : parseInt(product.estimated_delivery_days) || null);
+        } else if (product.delivery_time !== undefined && product.delivery_time !== null) {
+            estimatedDays = typeof product.delivery_time === 'object' ? (product.delivery_time.days || product.delivery_time.value || null) : (typeof product.delivery_time === 'number' ? product.delivery_time : parseInt(product.delivery_time) || null);
+        }
         
         return {
             id: `shipmondo_${productCode || product.id || Math.random().toString(36).substr(2, 9)}`,
-            carrier: carrier,
-            service: service,
-            name: `${carrier} - ${service}`,
-            description: product.description || `${carrier} ${service}`,
-            productCode: productCode,
-            price: price,
-            currency: product.currency || 'SEK',
-            deliveryType: deliveryType,
-            estimatedDays: product.estimated_delivery_days || product.delivery_time || null,
+            carrier: String(carrier), // Ensure it's always a string
+            service: String(service), // Ensure it's always a string
+            name: `${carrier} - ${service}`, // Ensure it's always a string
+            description: String(description), // Ensure it's always a string
+            productCode: String(productCode), // Ensure it's always a string
+            price: Number(price), // Ensure it's always a number
+            currency: String(product.currency || 'SEK'), // Ensure it's always a string
+            deliveryType: String(deliveryType), // Ensure it's always a string
+            estimatedDays: estimatedDays !== null ? Number(estimatedDays) : null, // Ensure it's a number or null
             trackingEnabled: product.tracking_available !== false,
             pickupPoints: deliveryType === 'pickup' ? pickupPointsForCarrier : [],
             type: 'shipmondo',
