@@ -35,6 +35,13 @@ const FRAKTJAKT_API = {
     consignorKey: process.env.FRAKTJAKT_CONSIGNOR_KEY || ''
 };
 
+// Shipmondo API configuration
+const SHIPMONDO_API = {
+    baseUrl: 'https://app.shipmondo.com/api/public/v3',
+    apiUser: process.env.SHIPMONDO_API_USER || '',
+    apiKey: process.env.SHIPMONDO_API_KEY || ''
+};
+
 // Warehouse address for Fraktjakt (hardcoded as per requirements)
 const FRAKTJAKT_WAREHOUSE = {
     country: 'SE',
@@ -1635,6 +1642,372 @@ router.get('/fraktjakt-service-points', asyncHandler(async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to get service points from Fraktjakt',
+            details: error.message,
+            status: 500
+        });
+    }
+}));
+
+// ============================================
+// Shipmondo API Integration
+// ============================================
+
+/**
+ * Helper function to create Basic Auth header for Shipmondo API
+ * @returns {string} Base64 encoded credentials
+ */
+function getShipmondoAuthHeader() {
+    const credentials = `${SHIPMONDO_API.apiUser}:${SHIPMONDO_API.apiKey}`;
+    return `Basic ${Buffer.from(credentials).toString('base64')}`;
+}
+
+/**
+ * Helper function to get shipping products from Shipmondo
+ * @param {string} countryCode - Country code (e.g., 'SE', 'DK', 'NO')
+ * @param {string} carrierCode - Optional carrier code filter
+ * @returns {Promise<Array>} Array of shipping products
+ */
+async function getShipmondoProducts(countryCode, carrierCode = null) {
+    try {
+        let url = `${SHIPMONDO_API.baseUrl}/products?country_code=${countryCode}&page=1&per_page=100`;
+        
+        if (carrierCode) {
+            url += `&carrier_code=${carrierCode}`;
+        }
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Authorization': getShipmondoAuthHeader(),
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Shipmondo API error: ${response.status} - ${errorText}`);
+        }
+        
+        const data = await response.json();
+        return Array.isArray(data) ? data : (data.data || []);
+    } catch (error) {
+        console.error('Error fetching Shipmondo products:', error);
+        throw error;
+    }
+}
+
+/**
+ * Helper function to get pickup points from Shipmondo
+ * @param {string} countryCode - Country code
+ * @param {string} zipcode - Postal code
+ * @param {string} carrierCode - Optional carrier code filter
+ * @returns {Promise<Array>} Array of pickup points
+ */
+async function getShipmondoPickupPoints(countryCode, zipcode, carrierCode = null) {
+    try {
+        let url = `${SHIPMONDO_API.baseUrl}/pickup_points?country_code=${countryCode}&zipcode=${zipcode}`;
+        
+        if (carrierCode) {
+            url += `&carrier_code=${carrierCode}`;
+        }
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Authorization': getShipmondoAuthHeader(),
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            // Pickup points might not be available for all carriers/locations
+            // Return empty array instead of throwing error
+            console.warn(`Shipmondo pickup points not available: ${response.status}`);
+            return [];
+        }
+        
+        const data = await response.json();
+        return Array.isArray(data) ? data : (data.data || []);
+    } catch (error) {
+        console.warn('Error fetching Shipmondo pickup points:', error);
+        return []; // Return empty array on error
+    }
+}
+
+/**
+ * Helper function to get shipping rates from Shipmondo
+ * @param {object} params - Rate calculation parameters
+ * @returns {Promise<Array>} Array of shipping rates
+ */
+async function getShipmondoRates(params) {
+    try {
+        const url = `${SHIPMONDO_API.baseUrl}/rates`;
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': getShipmondoAuthHeader(),
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify(params)
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Shipmondo Rates API error: ${response.status} - ${errorText}`);
+        }
+        
+        const data = await response.json();
+        return Array.isArray(data) ? data : (data.data || []);
+    } catch (error) {
+        console.error('Error fetching Shipmondo rates:', error);
+        throw error;
+    }
+}
+
+/**
+ * Helper function to format Shipmondo products/rates for frontend
+ * @param {Array} products - Array of Shipmondo products
+ * @param {Array} pickupPoints - Array of pickup points (optional)
+ * @returns {Array} Formatted delivery options
+ */
+function formatShipmondoOptions(products, pickupPoints = []) {
+    if (!Array.isArray(products) || products.length === 0) {
+        return [];
+    }
+    
+    // Create pickup points map by carrier
+    const pickupPointsByCarrier = {};
+    if (Array.isArray(pickupPoints)) {
+        pickupPoints.forEach(point => {
+            const carrier = point.carrier_code || point.carrier;
+            if (!pickupPointsByCarrier[carrier]) {
+                pickupPointsByCarrier[carrier] = [];
+            }
+            pickupPointsByCarrier[carrier].push({
+                id: point.id || point.pickup_point_id,
+                name: point.name || point.address || 'Pickup Point',
+                address: {
+                    street: point.street || point.address || '',
+                    city: point.city || '',
+                    postalCode: point.zipcode || point.postal_code || '',
+                    country: point.country_code || point.country || ''
+                },
+                distance: point.distance || null,
+                coordinate: point.latitude && point.longitude ? {
+                    latitude: point.latitude,
+                    longitude: point.longitude
+                } : null,
+                openingHours: point.opening_hours || point.hours || null
+            });
+        });
+    }
+    
+    return products.map(product => {
+        const carrier = product.carrier || product.carrier_name || 'Unknown';
+        const service = product.name || product.service_name || product.product_name || 'Standard Delivery';
+        const productCode = product.product_code || product.code || '';
+        const price = parseFloat(product.price || product.rate || product.cost || 0);
+        const deliveryType = product.delivery_type || (product.pickup_point_required ? 'pickup' : 'home');
+        
+        // Get pickup points for this carrier if available
+        const carrierCode = product.carrier_code || product.carrier;
+        const pickupPointsForCarrier = pickupPointsByCarrier[carrierCode] || [];
+        
+        return {
+            id: `shipmondo_${productCode || product.id || Math.random().toString(36).substr(2, 9)}`,
+            carrier: carrier,
+            service: service,
+            name: `${carrier} - ${service}`,
+            description: product.description || `${carrier} ${service}`,
+            productCode: productCode,
+            price: price,
+            currency: product.currency || 'SEK',
+            deliveryType: deliveryType,
+            estimatedDays: product.estimated_delivery_days || product.delivery_time || null,
+            trackingEnabled: product.tracking_available !== false,
+            pickupPoints: deliveryType === 'pickup' ? pickupPointsForCarrier : [],
+            type: 'shipmondo',
+            originalData: product
+        };
+    });
+}
+
+// POST /api/shipping/shipmondo-options - Get Shipmondo delivery options
+router.post('/shipmondo-options', asyncHandler(async (req, res) => {
+    try {
+        const { country, postalCode, street, city, weight, length, width, height } = req.body;
+        
+        // Validate required fields
+        if (!country || !postalCode || !street) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required fields: country, postalCode, and street are required'
+            });
+        }
+        
+        // Check if Shipmondo credentials are configured
+        if (!SHIPMONDO_API.apiUser || !SHIPMONDO_API.apiKey) {
+            return res.status(500).json({
+                success: false,
+                error: 'Shipmondo API credentials not configured. Please set SHIPMONDO_API_USER and SHIPMONDO_API_KEY environment variables.'
+            });
+        }
+        
+        // Prepare recipient address
+        const recipient = {
+            country: country.toUpperCase(),
+            postalCode: postalCode,
+            street: street,
+            city: city || ''
+        };
+        
+        // Comprehensive address validation
+        const addressValidation = validateShippingAddress(recipient);
+        if (!addressValidation.valid) {
+            return res.status(400).json(addressValidation.error);
+        }
+        
+        // Prepare parcel information (with defaults)
+        const parcel = {
+            weight: weight || 1.0, // Default 1 kg
+            length: length || 30,  // Default 30 cm
+            width: width || 20,    // Default 20 cm
+            height: height || 10   // Default 10 cm
+        };
+        
+        // Prepare warehouse address (sender)
+        const sender = {
+            name: 'PeakMode',
+            address1: WAREHOUSE_ADDRESS.streetName || FRAKTJAKT_WAREHOUSE.street,
+            city: WAREHOUSE_ADDRESS.city || FRAKTJAKT_WAREHOUSE.city,
+            zipcode: WAREHOUSE_ADDRESS.postalCode || FRAKTJAKT_WAREHOUSE.postalCode,
+            country_code: WAREHOUSE_ADDRESS.countryCode || FRAKTJAKT_WAREHOUSE.country
+        };
+        
+        // Prepare receiver address
+        const receiver = {
+            name: 'Customer',
+            address1: recipient.street,
+            city: recipient.city || '',
+            zipcode: recipient.postalCode,
+            country_code: recipient.country
+        };
+        
+        // Try to get rates first (if available)
+        let deliveryOptions = [];
+        let pickupPoints = [];
+        
+        try {
+            // Get shipping rates from Shipmondo
+            const ratesParams = {
+                sender: sender,
+                receiver: receiver,
+                parcels: [{
+                    weight: parcel.weight,
+                    length: parcel.length,
+                    width: parcel.width,
+                    height: parcel.height
+                }]
+            };
+            
+            const rates = await getShipmondoRates(ratesParams);
+            
+            if (Array.isArray(rates) && rates.length > 0) {
+                // Use rates if available
+                deliveryOptions = formatShipmondoOptions(rates, []);
+            } else {
+                // Fallback to products if rates not available
+                const products = await getShipmondoProducts(recipient.country);
+                deliveryOptions = formatShipmondoOptions(products, []);
+            }
+            
+            // Get pickup points for carriers that support them
+            if (deliveryOptions.length > 0) {
+                const carriersWithPickup = deliveryOptions
+                    .filter(opt => opt.deliveryType === 'pickup')
+                    .map(opt => opt.originalData?.carrier_code || opt.originalData?.carrier)
+                    .filter(Boolean);
+                
+                // Get pickup points for each carrier
+                const pickupPromises = carriersWithPickup.map(carrierCode =>
+                    getShipmondoPickupPoints(recipient.country, recipient.postalCode, carrierCode)
+                );
+                
+                const pickupResults = await Promise.all(pickupPromises);
+                pickupPoints = pickupResults.flat();
+                
+                // Update delivery options with pickup points
+                deliveryOptions = formatShipmondoOptions(
+                    deliveryOptions.map(opt => opt.originalData),
+                    pickupPoints
+                );
+            }
+            
+        } catch (ratesError) {
+            console.warn('Shipmondo rates API failed, trying products API:', ratesError);
+            
+            // Fallback to products API
+            try {
+                const products = await getShipmondoProducts(recipient.country);
+                deliveryOptions = formatShipmondoOptions(products, []);
+                
+                // Try to get pickup points
+                if (deliveryOptions.length > 0) {
+                    pickupPoints = await getShipmondoPickupPoints(recipient.country, recipient.postalCode);
+                    deliveryOptions = formatShipmondoOptions(
+                        deliveryOptions.map(opt => opt.originalData),
+                        pickupPoints
+                    );
+                }
+            } catch (productsError) {
+                console.error('Shipmondo products API error:', productsError);
+                throw productsError;
+            }
+        }
+        
+        if (deliveryOptions.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'No delivery options found for the provided address',
+                address: recipient
+            });
+        }
+        
+        // Return formatted response
+        res.json({
+            success: true,
+            deliveryOptions: deliveryOptions,
+            pickupPoints: pickupPoints,
+            address: {
+                country: recipient.country,
+                postalCode: recipient.postalCode,
+                street: recipient.street,
+                city: recipient.city || null
+            },
+            warehouse: {
+                country: sender.country_code,
+                postalCode: sender.zipcode,
+                city: sender.city,
+                street: sender.address1
+            },
+            parcel: parcel,
+            currency: 'SEK',
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Shipmondo delivery options error:', error);
+        console.error('Error stack:', error.stack);
+        console.error('Request body:', req.body);
+        
+        // Return proper error response
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get delivery options from Shipmondo',
             details: error.message,
             status: 500
         });
