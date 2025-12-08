@@ -569,6 +569,42 @@ router.post('/confirm', async (req, res) => {
         // Retrieve payment intent from Stripe
         const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
+        // Check payment intent status - prevent duplicate confirmations
+        if (paymentIntent.status === 'succeeded') {
+            console.log(`⚠️ [PAYMENT] Payment intent ${paymentIntentId} already succeeded`);
+            return res.json({
+                success: true,
+                paymentStatus: 'succeeded',
+                orderId: orderId || paymentIntent.metadata.orderId,
+                amount: paymentIntent.amount / 100,
+                currency: paymentIntent.currency,
+                alreadyConfirmed: true,
+                message: 'Payment was already confirmed'
+            });
+        }
+
+        if (paymentIntent.status === 'processing') {
+            console.log(`⚠️ [PAYMENT] Payment intent ${paymentIntentId} is already processing`);
+            return res.json({
+                success: true,
+                paymentStatus: 'processing',
+                orderId: orderId || paymentIntent.metadata.orderId,
+                amount: paymentIntent.amount / 100,
+                currency: paymentIntent.currency,
+                alreadyProcessing: true,
+                message: 'Payment is already being processed'
+            });
+        }
+
+        if (paymentIntent.status === 'canceled') {
+            return res.status(400).json({
+                success: false,
+                error: 'Payment intent has been canceled',
+                paymentStatus: 'canceled',
+                code: 'payment_canceled'
+            });
+        }
+
         // Determine order ID (from request or metadata)
         const targetOrderId = orderId || paymentIntent.metadata.orderId;
 
@@ -582,6 +618,7 @@ router.post('/confirm', async (req, res) => {
         // Update order based on payment status
         const paymentStatus = paymentIntent.status === 'succeeded' ? 'succeeded' : 
                              paymentIntent.status === 'requires_payment_method' ? 'failed' : 
+                             paymentIntent.status === 'processing' ? 'processing' :
                              'pending';
 
         const updateData = {
@@ -660,6 +697,17 @@ router.get('/status/:paymentIntentId', async (req, res) => {
 
         const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
+        // Determine if payment can be confirmed
+        const canConfirm = [
+            'requires_payment_method',
+            'requires_confirmation',
+            'requires_action',
+            'requires_capture'
+        ].includes(paymentIntent.status);
+
+        const isProcessing = paymentIntent.status === 'processing';
+        const isCompleted = ['succeeded', 'canceled'].includes(paymentIntent.status);
+
         res.json({
             success: true,
             paymentIntentId: paymentIntent.id,
@@ -667,7 +715,17 @@ router.get('/status/:paymentIntentId', async (req, res) => {
             amount: paymentIntent.amount / 100,
             currency: paymentIntent.currency,
             orderId: paymentIntent.metadata.orderId,
-            created: new Date(paymentIntent.created * 1000).toISOString()
+            created: new Date(paymentIntent.created * 1000).toISOString(),
+            canConfirm,
+            isProcessing,
+            isCompleted,
+            message: isProcessing 
+                ? 'Payment is currently being processed' 
+                : isCompleted 
+                    ? `Payment is ${paymentIntent.status}` 
+                    : canConfirm 
+                        ? 'Payment can be confirmed' 
+                        : 'Payment status unknown'
         });
     } catch (error) {
         console.error('Get payment status error:', error);
@@ -675,6 +733,66 @@ router.get('/status/:paymentIntentId', async (req, res) => {
             success: false,
             error: error.message || 'Failed to retrieve payment status',
             code: error.code || 'payment_status_retrieval_failed'
+        });
+    }
+});
+
+/**
+ * POST /api/payments/check-before-confirm
+ * Check if payment intent is safe to confirm (prevents duplicate confirmations)
+ * Call this before calling confirmCardPayment on the frontend
+ * 
+ * Body:
+ * {
+ *   "paymentIntentId": "pi_xxx"
+ * }
+ */
+router.post('/check-before-confirm', async (req, res) => {
+    try {
+        const { paymentIntentId } = req.body;
+
+        if (!paymentIntentId) {
+            return res.status(400).json({
+                success: false,
+                error: 'paymentIntentId is required'
+            });
+        }
+
+        const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+        const status = paymentIntent.status;
+        const canConfirm = [
+            'requires_payment_method',
+            'requires_confirmation',
+            'requires_action',
+            'requires_capture'
+        ].includes(status);
+
+        const isProcessing = status === 'processing';
+        const isCompleted = ['succeeded', 'canceled'].includes(status);
+
+        res.json({
+            success: true,
+            paymentIntentId: paymentIntent.id,
+            status,
+            canConfirm,
+            isProcessing,
+            isCompleted,
+            safeToConfirm: canConfirm && !isProcessing && !isCompleted,
+            message: isProcessing 
+                ? 'Payment is already being processed - do not call confirmCardPayment again'
+                : isCompleted 
+                    ? `Payment is already ${status} - no confirmation needed`
+                    : canConfirm 
+                        ? 'Payment can be confirmed safely'
+                        : `Payment status is ${status} - check Stripe documentation`
+        });
+    } catch (error) {
+        console.error('Check before confirm error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to check payment intent',
+            code: error.code || 'payment_check_failed'
         });
     }
 });
