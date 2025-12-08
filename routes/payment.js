@@ -592,7 +592,9 @@ router.post('/confirm', async (req, res) => {
                 amount: paymentIntent.amount / 100,
                 currency: paymentIntent.currency,
                 alreadyProcessing: true,
-                message: 'Payment is already being processed'
+                message: 'Payment is already being processed - do not call confirmCardPayment again',
+                action: 'wait_for_webhook', // Frontend should wait for webhook or poll status
+                shouldNotConfirm: true // Explicit flag for frontend
             });
         }
 
