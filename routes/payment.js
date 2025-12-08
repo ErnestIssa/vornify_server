@@ -151,7 +151,12 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         });
 
         if (!findResult.success || !findResult.data) {
-            console.error(`Order ${orderId} not found for payment intent ${paymentIntent.id}`);
+            console.error(`⚠️ [PAYMENT WEBHOOK] Payment intent ${paymentIntent.id} succeeded but order ${orderId} not found in database`);
+            console.error(`⚠️ [PAYMENT WEBHOOK] This could indicate a duplicate payment or order creation failure`);
+            console.error(`⚠️ [PAYMENT WEBHOOK] Payment amount: ${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}`);
+            console.error(`⚠️ [PAYMENT WEBHOOK] Customer: ${paymentIntent.customer || 'N/A'}`);
+            // DO NOT create order here - this could be a duplicate payment from a failed frontend attempt
+            // Log for investigation but don't process
             return;
         }
 
@@ -196,7 +201,19 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         // Send order confirmation email if not already sent
         if (!order.emailSent && order.customer?.email) {
             try {
-                await emailService.sendOrderConfirmation(order.customer.email, order);
+                const customerName = order.customer.name || 
+                                   `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
+                                   order.customerName ||
+                                   'Valued Customer';
+                
+                const orderLanguage = order.language || 'en';
+                
+                await emailService.sendOrderConfirmationEmail(
+                    order.customer.email,
+                    customerName,
+                    order,
+                    orderLanguage
+                );
                 
                 // Mark email as sent
                 await db.executeOperation({
@@ -208,12 +225,14 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
                         update: { emailSent: true }
                     }
                 });
+                
+                console.log(`📧 [PAYMENT WEBHOOK] Order confirmation email sent to ${order.customer.email}`);
             } catch (emailError) {
-                console.error('Failed to send order confirmation email:', emailError);
+                console.error('❌ [PAYMENT WEBHOOK] Failed to send order confirmation email:', emailError);
             }
         }
 
-        console.log(`✅ Order ${orderId} payment confirmed via webhook`);
+        console.log(`✅ [PAYMENT WEBHOOK] Order ${orderId} payment confirmed via webhook`);
     } catch (error) {
         console.error('Error handling payment_intent.succeeded:', error);
         throw error;
@@ -390,7 +409,15 @@ router.post('/create-intent', async (req, res) => {
             metadata: paymentMetadata,
             automatic_payment_methods: {
                 enabled: true
-            }
+            },
+            // Enable 3D Secure authentication
+            payment_method_options: {
+                card: {
+                    request_three_d_secure: 'automatic' // Automatically request 3DS when required by card issuer
+                }
+            },
+            // Use automatic confirmation method
+            confirmation_method: 'automatic'
         };
 
         // Add customer if email provided
@@ -420,8 +447,10 @@ router.post('/create-intent', async (req, res) => {
             }
         }
 
-        // Create payment intent
+        // Create payment intent with logging
+        console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${amount} ${currency}`);
         const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
+        console.log(`✅ [PAYMENT] Payment intent created: ${paymentIntent.id}, status: ${paymentIntent.status}`);
 
         // Update order with payment intent ID (only if order exists, not for temporary IDs)
         if (!isTemporaryOrderId) {

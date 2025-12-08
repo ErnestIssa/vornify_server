@@ -1021,7 +1021,7 @@ ${address.country || ''}`.trim();
         
         let itemsHtml = '';
         items.forEach(item => {
-            const variant = '';
+            let variant = '';
             if (item.size && item.color) {
                 variant = ` (${item.color}, ${item.size})`;
             } else if (item.size) {
