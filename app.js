@@ -38,6 +38,22 @@ app.use(cors({
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
+// Request timeout middleware for order creation
+app.use('/api/orders/create', (req, res, next) => {
+    // Set a 25 second timeout for order creation
+    req.setTimeout(25000, () => {
+        if (!res.headersSent) {
+            console.error('⏱️ [TIMEOUT] Order creation request timed out after 25 seconds');
+            res.status(504).json({
+                success: false,
+                error: 'Request timeout - order creation took too long',
+                timeout: true
+            });
+        }
+    });
+    next();
+});
+
 // Middleware
 app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve uploaded images
