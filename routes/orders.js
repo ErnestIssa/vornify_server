@@ -428,6 +428,34 @@ router.post('/create', async (req, res) => {
             // Run background operations after response is sent (non-blocking)
             setImmediate(async () => {
                 try {
+                    // Update payment intent with actual order ID if it was created with temporary ID
+                    if (order.paymentIntentId) {
+                        console.log('📦 [ORDER CREATE] Background: Updating payment intent with actual order ID...');
+                        try {
+                            const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+                            const existingIntent = await stripe.paymentIntents.retrieve(order.paymentIntentId);
+                            
+                            // Check if payment intent has temporary order ID
+                            if (existingIntent.metadata?.isTemporary === 'true' || 
+                                existingIntent.metadata?.orderId?.startsWith('TEMP-')) {
+                                
+                                await stripe.paymentIntents.update(order.paymentIntentId, {
+                                    metadata: {
+                                        ...existingIntent.metadata,
+                                        orderId: orderId,
+                                        isTemporary: 'false',
+                                        updatedAt: new Date().toISOString()
+                                    }
+                                });
+                                
+                                console.log(`📦 [ORDER CREATE] Background: Payment intent ${order.paymentIntentId} updated with order ID ${orderId}`);
+                            }
+                        } catch (paymentIntentError) {
+                            console.error('📦 [ORDER CREATE] Background: Failed to update payment intent:', paymentIntentError.message);
+                            // Don't fail - this is background processing
+                        }
+                    }
+
                     // Create or update customer record (background)
                     console.log('📦 [ORDER CREATE] Background: Creating/updating customer...');
                     try {

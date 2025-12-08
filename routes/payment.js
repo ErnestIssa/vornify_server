@@ -368,19 +368,18 @@ router.post('/create-intent', async (req, res) => {
             });
         }
 
-        if (!orderId) {
-            return res.status(400).json({
-                success: false,
-                error: 'orderId is required'
-            });
-        }
+        // orderId is now optional - can be temporary or added later
+        // If not provided, generate a temporary ID
+        const tempOrderId = orderId || `TEMP-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        const isTemporaryOrderId = !orderId || orderId.startsWith('TEMP-');
 
         // Convert amount to cents
         const amountInCents = Math.round(parseFloat(amount) * 100);
 
         // Prepare payment intent metadata
         const paymentMetadata = {
-            orderId,
+            orderId: tempOrderId,
+            isTemporary: isTemporaryOrderId.toString(),
             ...metadata
         };
 
@@ -409,7 +408,7 @@ router.post('/create-intent', async (req, res) => {
                 } else {
                     const customer = await stripe.customers.create({
                         email: customerEmail,
-                        metadata: { orderId }
+                        metadata: { orderId: tempOrderId }
                     });
                     customerId = customer.id;
                 }
@@ -423,6 +422,91 @@ router.post('/create-intent', async (req, res) => {
 
         // Create payment intent
         const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
+
+        // Update order with payment intent ID (only if order exists, not for temporary IDs)
+        if (!isTemporaryOrderId) {
+            try {
+                await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'orders',
+                    command: '--update',
+                    data: {
+                        filter: { orderId: tempOrderId },
+                        update: {
+                            paymentIntentId: paymentIntent.id,
+                            paymentStatus: 'pending',
+                            updatedAt: new Date().toISOString()
+                        }
+                    }
+                });
+            } catch (dbError) {
+                console.error('Error updating order with payment intent:', dbError);
+                // Continue even if order update fails - order might not exist yet
+            }
+        }
+
+        res.json({
+            success: true,
+            paymentIntentId: paymentIntent.id,
+            clientSecret: paymentIntent.client_secret,
+            amount: amount,
+            currency: currency.toLowerCase(),
+            orderId: tempOrderId,
+            isTemporary: isTemporaryOrderId
+        });
+    } catch (error) {
+        console.error('Create payment intent error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to create payment intent',
+            code: error.code || 'payment_intent_creation_failed'
+        });
+    }
+});
+
+/**
+ * POST /api/payments/update-intent
+ * Update payment intent metadata with actual order ID
+ * This is called after order creation to replace temporary order ID
+ * 
+ * Body:
+ * {
+ *   "paymentIntentId": "pi_xxx",
+ *   "orderId": "PM123456"
+ * }
+ */
+router.post('/update-intent', async (req, res) => {
+    try {
+        const { paymentIntentId, orderId } = req.body;
+
+        if (!paymentIntentId) {
+            return res.status(400).json({
+                success: false,
+                error: 'paymentIntentId is required'
+            });
+        }
+
+        if (!orderId) {
+            return res.status(400).json({
+                success: false,
+                error: 'orderId is required'
+            });
+        }
+
+        console.log(`🔄 [PAYMENT] Updating payment intent ${paymentIntentId} with order ID ${orderId}`);
+
+        // Retrieve existing payment intent to preserve metadata
+        const existingIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+        
+        // Update payment intent metadata with actual order ID
+        const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, {
+            metadata: {
+                ...existingIntent.metadata,
+                orderId: orderId,
+                isTemporary: 'false',
+                updatedAt: new Date().toISOString()
+            }
+        });
 
         // Update order with payment intent ID
         try {
@@ -439,6 +523,7 @@ router.post('/create-intent', async (req, res) => {
                     }
                 }
             });
+            console.log(`✅ [PAYMENT] Order ${orderId} updated with payment intent ${paymentIntentId}`);
         } catch (dbError) {
             console.error('Error updating order with payment intent:', dbError);
             // Continue even if order update fails
@@ -447,17 +532,15 @@ router.post('/create-intent', async (req, res) => {
         res.json({
             success: true,
             paymentIntentId: paymentIntent.id,
-            clientSecret: paymentIntent.client_secret,
-            amount: amount,
-            currency: currency.toLowerCase(),
-            orderId
+            orderId: orderId,
+            metadata: paymentIntent.metadata
         });
     } catch (error) {
-        console.error('Create payment intent error:', error);
+        console.error('Update payment intent error:', error);
         res.status(500).json({
             success: false,
-            error: error.message || 'Failed to create payment intent',
-            code: error.code || 'payment_intent_creation_failed'
+            error: error.message || 'Failed to update payment intent',
+            code: error.code || 'payment_intent_update_failed'
         });
     }
 });
