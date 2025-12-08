@@ -44,7 +44,11 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve u
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'healthy', environment: process.env.NODE_ENV });
+    res.status(200).json({ 
+        status: 'healthy', 
+        environment: process.env.NODE_ENV,
+        timestamp: new Date().toISOString()
+    });
 });
 
 // API documentation endpoint
@@ -62,7 +66,8 @@ app.get('/', (req, res) => {
 
 // Routes
 app.use('/api/vornifydb', dbRoutes);
-app.use('/api/vornifypay', paymentRoutes);
+app.use('/api/vornifypay', paymentRoutes); // Legacy payment endpoint
+app.use('/api/payments', paymentRoutes); // New Stripe payment endpoints
 app.use('/api/storage', storageRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/upload', uploadRoutes);

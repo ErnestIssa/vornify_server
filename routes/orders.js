@@ -287,6 +287,8 @@ router.post('/create', async (req, res) => {
             
             // Order status and details
             paymentMethod: orderData.paymentMethod || 'card',
+            paymentIntentId: orderData.paymentIntentId || null, // Stripe payment intent ID
+            stripeCustomerId: orderData.stripeCustomerId || null, // Stripe customer ID
             shippingMethod: orderData.shippingMethod?.name || orderData.shippingMethod || '',
             
             // Enhanced tracking information
