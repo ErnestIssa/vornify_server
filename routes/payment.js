@@ -415,9 +415,7 @@ router.post('/create-intent', async (req, res) => {
                 card: {
                     request_three_d_secure: 'automatic' // Automatically request 3DS when required by card issuer
                 }
-            },
-            // Use automatic confirmation method
-            confirmation_method: 'automatic'
+            }
         };
 
         // Add customer if email provided
