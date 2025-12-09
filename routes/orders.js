@@ -15,10 +15,10 @@ async function createOrUpdateCustomer(order) {
         // Check if customer exists with timeout
         const existingCustomer = await Promise.race([
             db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'customers',
-                command: '--read',
-                data: { email: customerEmail }
+            database_name: 'peakmode',
+            collection_name: 'customers',
+            command: '--read',
+            data: { email: customerEmail }
             }),
             new Promise((_, reject) => 
                 setTimeout(() => reject(new Error('Customer lookup timeout')), 10000)
@@ -52,13 +52,13 @@ async function createOrUpdateCustomer(order) {
             // Update existing customer with timeout
             await Promise.race([
                 db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'customers',
-                    command: '--update',
-                    data: {
-                        filter: { email: customerEmail },
-                        update: customerData
-                    }
+                database_name: 'peakmode',
+                collection_name: 'customers',
+                command: '--update',
+                data: {
+                    filter: { email: customerEmail },
+                    update: customerData
+                }
                 }),
                 new Promise((_, reject) => 
                     setTimeout(() => reject(new Error('Customer update timeout')), 10000)
@@ -78,10 +78,10 @@ async function createOrUpdateCustomer(order) {
 
             await Promise.race([
                 db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'customers',
-                    command: '--create',
-                    data: customerData
+                database_name: 'peakmode',
+                collection_name: 'customers',
+                command: '--create',
+                data: customerData
                 }),
                 new Promise((_, reject) => 
                     setTimeout(() => reject(new Error('Customer creation timeout')), 10000)
@@ -102,92 +102,92 @@ async function createOrUpdateCustomer(order) {
 async function updateCustomerAnalytics(customerEmail) {
     // Run in background without blocking
     setImmediate(async () => {
-        try {
+    try {
             // Add timeout to prevent hanging
             const analyticsPromise = (async () => {
-                // Get all orders for this customer
-                const ordersResult = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'orders',
-                    command: '--read',
-                    data: { 'customer.email': customerEmail }
-                });
+        // Get all orders for this customer
+        const ordersResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { 'customer.email': customerEmail }
+        });
 
-                const orders = ordersResult.success ? ordersResult.data : [];
-                const orderArray = Array.isArray(orders) ? orders : (orders ? [orders] : []);
+        const orders = ordersResult.success ? ordersResult.data : [];
+        const orderArray = Array.isArray(orders) ? orders : (orders ? [orders] : []);
 
-                // Calculate analytics
-                const ordersCount = orderArray.length;
-                const totalSpent = orderArray.reduce((sum, order) => {
-                    return sum + (order.total || order.totals?.total || 0);
-                }, 0);
-                
-                const averageOrderValue = ordersCount > 0 ? totalSpent / ordersCount : 0;
-                
-                // Get order dates
-                const orderDates = orderArray
-                    .map(order => new Date(order.createdAt || order.orderDate))
-                    .filter(date => !isNaN(date.getTime()))
-                    .sort((a, b) => a - b);
-                
-                const firstOrderDate = orderDates.length > 0 ? orderDates[0] : null;
-                const lastOrderDate = orderDates.length > 0 ? orderDates[orderDates.length - 1] : null;
+        // Calculate analytics
+        const ordersCount = orderArray.length;
+        const totalSpent = orderArray.reduce((sum, order) => {
+            return sum + (order.total || order.totals?.total || 0);
+        }, 0);
+        
+        const averageOrderValue = ordersCount > 0 ? totalSpent / ordersCount : 0;
+        
+        // Get order dates
+        const orderDates = orderArray
+            .map(order => new Date(order.createdAt || order.orderDate))
+            .filter(date => !isNaN(date.getTime()))
+            .sort((a, b) => a - b);
+        
+        const firstOrderDate = orderDates.length > 0 ? orderDates[0] : null;
+        const lastOrderDate = orderDates.length > 0 ? orderDates[orderDates.length - 1] : null;
 
-                // Determine customer type
-                let customerType = 'new';
-                let tags = [];
+        // Determine customer type
+        let customerType = 'new';
+        let tags = [];
 
-                if (ordersCount === 0) {
-                    customerType = 'new';
-                    tags = ['new_user'];
-                } else if (ordersCount === 1) {
-                    customerType = 'new';
-                    tags = ['new_user'];
-                } else if (ordersCount >= 2 && ordersCount <= 4) {
-                    customerType = 'returning';
-                    tags = ['returning'];
-                } else if (ordersCount >= 5) {
-                    customerType = 'loyal';
-                    tags = ['loyal'];
+        if (ordersCount === 0) {
+            customerType = 'new';
+            tags = ['new_user'];
+        } else if (ordersCount === 1) {
+            customerType = 'new';
+            tags = ['new_user'];
+        } else if (ordersCount >= 2 && ordersCount <= 4) {
+            customerType = 'returning';
+            tags = ['returning'];
+        } else if (ordersCount >= 5) {
+            customerType = 'loyal';
+            tags = ['loyal'];
+        }
+
+        if (totalSpent > 5000) {
+            customerType = 'vip';
+            tags.push('vip', 'high_spender');
+        }
+
+        // Get recent orders (last 5)
+        const recentOrders = orderArray
+            .sort((a, b) => new Date(b.createdAt || b.orderDate) - new Date(a.createdAt || a.orderDate))
+            .slice(0, 5)
+            .map(order => ({
+                id: order.orderId,
+                date: order.createdAt || order.orderDate,
+                total: order.total || order.totals?.total || 0,
+                status: order.status,
+                itemsCount: order.items ? order.items.length : 0
+            }));
+
+        // Update customer with analytics
+        await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'customers',
+            command: '--update',
+            data: {
+                filter: { email: customerEmail },
+                update: {
+                    ordersCount,
+                    totalSpent,
+                    averageOrderValue,
+                    firstOrderDate,
+                    lastOrderDate,
+                    customerType,
+                    tags,
+                    recentOrders,
+                    updatedAt: new Date().toISOString()
                 }
-
-                if (totalSpent > 5000) {
-                    customerType = 'vip';
-                    tags.push('vip', 'high_spender');
-                }
-
-                // Get recent orders (last 5)
-                const recentOrders = orderArray
-                    .sort((a, b) => new Date(b.createdAt || b.orderDate) - new Date(a.createdAt || a.orderDate))
-                    .slice(0, 5)
-                    .map(order => ({
-                        id: order.orderId,
-                        date: order.createdAt || order.orderDate,
-                        total: order.total || order.totals?.total || 0,
-                        status: order.status,
-                        itemsCount: order.items ? order.items.length : 0
-                    }));
-
-                // Update customer with analytics
-                await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'customers',
-                    command: '--update',
-                    data: {
-                        filter: { email: customerEmail },
-                        update: {
-                            ordersCount,
-                            totalSpent,
-                            averageOrderValue,
-                            firstOrderDate,
-                            lastOrderDate,
-                            customerType,
-                            tags,
-                            recentOrders,
-                            updatedAt: new Date().toISOString()
-                        }
-                    }
-                });
+            }
+        });
             })();
 
             // Add timeout protection
@@ -197,10 +197,10 @@ async function updateCustomerAnalytics(customerEmail) {
                     setTimeout(() => reject(new Error('Analytics update timeout')), 30000)
                 )
             ]);
-        } catch (error) {
+    } catch (error) {
             console.error('Error updating customer analytics (background):', error.message);
             // Don't throw - this is background processing
-        }
+    }
     });
 }
 
@@ -220,18 +220,18 @@ async function generateUniqueOrderId() {
             // Check if this ID already exists with timeout
             const result = await Promise.race([
                 db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'orders',
-                    command: '--read',
-                    data: { orderId }
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
                 }),
                 new Promise((_, reject) => 
                     setTimeout(() => reject(new Error('Order ID check timeout')), 5000)
                 )
             ]);
-            
-            // VornifyDB returns single object when query is provided, or error if not found
-            exists = result.success && result.data;
+        
+        // VornifyDB returns single object when query is provided, or error if not found
+        exists = result.success && result.data;
         } catch (error) {
             console.error(`Error checking order ID ${orderId} (attempt ${attempts}):`, error.message);
             // If timeout or error, assume ID doesn't exist and use it
@@ -399,10 +399,10 @@ router.post('/create', async (req, res) => {
         console.log('📦 [ORDER CREATE] Saving order to database...');
         const result = await Promise.race([
             db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'orders',
-                command: '--create',
-                data: order
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--create',
+            data: order
             }),
             new Promise((_, reject) => 
                 setTimeout(() => reject(new Error('Database operation timeout')), 15000)
@@ -466,48 +466,48 @@ router.post('/create', async (req, res) => {
                             )
                         ]);
                         console.log('📦 [ORDER CREATE] Background: Customer updated successfully');
-                    } catch (customerError) {
+            } catch (customerError) {
                         console.error('📦 [ORDER CREATE] Background: Failed to create/update customer:', customerError.message);
                         // Don't fail - this is background processing
-                    }
+            }
 
                     // Send order confirmation email (background)
                     if (!order.emailSent && order.customer?.email) {
                         console.log('📦 [ORDER CREATE] Background: Sending confirmation email...');
-                        try {
-                            const customerName = order.customer.name || 
-                                               `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
-                                               order.customerName ||
-                                               'Valued Customer';
-                            
-                            // Get language from order (defaults to 'en')
-                            const orderLanguage = order.language || 'en';
-                            
+                try {
+                    const customerName = order.customer.name || 
+                                       `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
+                                       order.customerName ||
+                                       'Valued Customer';
+                    
+                    // Get language from order (defaults to 'en')
+                    const orderLanguage = order.language || 'en';
+                    
                             await Promise.race([
                                 emailService.sendOrderConfirmationEmail(
-                                    order.customer.email,
-                                    customerName,
-                                    order,
-                                    orderLanguage
+                        order.customer.email,
+                        customerName,
+                        order,
+                        orderLanguage
                                 ),
                                 new Promise((_, reject) => 
                                     setTimeout(() => reject(new Error('Email send timeout')), 20000)
                                 )
                             ]);
-                            
-                            // Mark email as sent
-                            await db.executeOperation({
-                                database_name: 'peakmode',
-                                collection_name: 'orders',
-                                command: '--update',
-                                data: {
-                                    filter: { orderId },
-                                    update: { emailSent: true }
-                                }
-                            });
-                            
+                    
+                    // Mark email as sent
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId },
+                            update: { emailSent: true }
+                        }
+                    });
+                    
                             console.log(`📦 [ORDER CREATE] Background: Order confirmation email sent to ${order.customer.email}`);
-                        } catch (emailError) {
+                } catch (emailError) {
                             console.error('📦 [ORDER CREATE] Background: Failed to send order confirmation email:', emailError.message);
                             // Don't fail - this is background processing
                         }
@@ -534,11 +534,11 @@ router.post('/create', async (req, res) => {
         
         // Ensure response is sent even on error
         if (!res.headersSent) {
-            res.status(500).json({
-                success: false,
+        res.status(500).json({
+            success: false,
                 error: error.message || 'Failed to create order',
                 details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-            });
+        });
         }
     }
 });
