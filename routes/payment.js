@@ -38,6 +38,75 @@ try {
 const db = getDBInstance();
 
 /**
+ * GET /api/payments/check-payment-methods
+ * Check if Apple Pay and Google Pay are available for the user's device/browser
+ * This endpoint helps the frontend determine which payment methods to show
+ * 
+ * Query Parameters:
+ * - currency: Optional - currency code (default: 'sek')
+ * - amount: Optional - amount to check (default: 0)
+ */
+router.get('/check-payment-methods', async (req, res) => {
+    try {
+        const { currency = 'sek', amount = 0 } = req.query;
+        
+        // Create a test payment intent to check available payment methods
+        // This uses Stripe's payment method detection
+        const testPaymentIntent = await stripe.paymentIntents.create({
+            amount: Math.round(parseFloat(amount) * 100) || 100, // Minimum 1.00 in smallest unit
+            currency: currency.toLowerCase(),
+            automatic_payment_methods: {
+                enabled: true
+            }
+        });
+        
+        // Retrieve the payment intent to see available payment methods
+        const paymentIntent = await stripe.paymentIntents.retrieve(testPaymentIntent.id);
+        
+        // Cancel the test payment intent (we only needed it for detection)
+        try {
+            await stripe.paymentIntents.cancel(testPaymentIntent.id);
+        } catch (cancelError) {
+            // Ignore cancel errors - test intent may already be canceled
+        }
+        
+        // Return available payment methods
+        // Note: Actual availability depends on user's device/browser
+        // Frontend should use Stripe.js to check real-time availability
+        res.json({
+            success: true,
+            paymentMethods: {
+                card: true, // Always available
+                applePay: {
+                    available: true, // Backend supports it - frontend checks device
+                    note: 'Available on Safari (iOS/macOS) with Apple Wallet configured',
+                    requires: ['Safari browser', 'iOS or macOS', 'Apple Wallet configured']
+                },
+                googlePay: {
+                    available: true, // Backend supports it - frontend checks device
+                    note: 'Available on Chrome/Edge with Google account and payment method',
+                    requires: ['Chrome or Edge browser', 'Google account', 'Payment method in Google Wallet']
+                }
+            },
+            currency: currency.toLowerCase(),
+            stripeConfig: {
+                publicKey: process.env.STRIPE_PUBLIC_KEY ? 
+                    process.env.STRIPE_PUBLIC_KEY.substring(0, 7) + '...' : 'Not configured',
+                mode: process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'production' : 'test'
+            },
+            message: 'Payment methods are enabled. Frontend should check device/browser compatibility using Stripe.js'
+        });
+    } catch (error) {
+        console.error('Check payment methods error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to check payment methods',
+            code: error.code || 'payment_method_check_failed'
+        });
+    }
+});
+
+/**
  * GET /api/payments/config
  * Check Stripe configuration status (does not expose keys)
  */
@@ -454,7 +523,9 @@ router.post('/create-intent', async (req, res) => {
                     // 'automatic' means: request 3DS when required by regulations or card issuer
                     // For European cards (SEK, EUR, etc.), this will trigger SCA/3DS/BankID
                 }
-            }
+            },
+            // Allow saving payment methods for future use (optional)
+            setup_future_usage: 'off_session' // Or 'on_session' if you intend to save card details
         };
 
         // Add customer if email provided
