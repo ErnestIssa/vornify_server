@@ -504,19 +504,10 @@ router.post('/create-intent', async (req, res) => {
         };
 
         // Prepare payment intent parameters for SCA compliance and Payment Request API
-        // Explicitly specify payment method types to control what is offered
-        // 'card' covers traditional cards, Apple Pay, and Google Pay (via wallets in PaymentElement)
-        // 'link' for Stripe Link
-        // 'klarna' for Klarna (if enabled and supported by currency)
-        // Note: Apple Pay and Google Pay are wallet methods that work through the 'card' type
-        // The frontend PaymentElement will show these wallets when configured with wallets: { applePay: 'always', googlePay: 'always' }
+        // PaymentElement REQUIRES automatic_payment_methods to be enabled (not payment_method_types)
+        // This allows Stripe to dynamically determine which payment methods to show based on:
+        // - Customer location, device capabilities, browser support, payment method availability
         const currencyLower = currency.toLowerCase();
-        const payment_method_types = ['card', 'link'];
-        // Add Klarna for supported currencies (Stripe will validate)
-        // Note: Klarna has minimum amount requirements and may not be available for all transactions
-        if (['sek', 'eur', 'usd', 'gbp'].includes(currencyLower)) {
-            payment_method_types.push('klarna');
-        }
         
         // Ensure minimum amount for payment intent (Stripe requires at least 1 unit in smallest currency unit)
         if (amountInCents < 1) {
@@ -530,9 +521,18 @@ router.post('/create-intent', async (req, res) => {
             amount: amountInCents,
             currency: currencyLower,
             metadata: paymentMetadata,
-            // Explicitly specify payment method types to control what is offered
-            // This excludes Amazon Pay while still allowing Apple Pay/Google Pay via the 'card' type
-            payment_method_types: payment_method_types,
+            // PaymentElement requires automatic_payment_methods (not payment_method_types)
+            // This enables Stripe to automatically show available payment methods:
+            // - Card (credit/debit cards)
+            // - Link (if customer has it saved)
+            // - Klarna (if available for amount/currency)
+            // - Apple Pay (if device supports it)
+            // - Google Pay (if device supports it)
+            // - Other wallet payment methods enabled in Stripe Dashboard
+            automatic_payment_methods: {
+                enabled: true,
+                allow_redirects: 'always' // Allows redirect-based payment methods like Klarna
+            },
             // Enable 3D Secure authentication for card payments (SCA compliance)
             payment_method_options: {
                 card: {
@@ -574,16 +574,17 @@ router.post('/create-intent', async (req, res) => {
         console.log(`💳 [PAYMENT] Payment intent params:`, JSON.stringify({
             amount: amountInCents,
             currency: currencyLower,
-            payment_method_types: payment_method_types,
+            automatic_payment_methods: { enabled: true, allow_redirects: 'always' },
             has_customer: !!paymentIntentParams.customer
         }, null, 2));
         
         const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
         
         console.log(`✅ [PAYMENT] Payment intent created: ${paymentIntent.id}`);
-        console.log(`✅ [PAYMENT] Status: ${paymentIntent.status}`);
+        console.log(`✅ [PAYMENT] Status: ${paymentIntent.status} (must be 'requires_payment_method' for PaymentElement)`);
         console.log(`✅ [PAYMENT] Client secret: ${paymentIntent.client_secret ? 'Present' : 'Missing'}`);
-        console.log(`✅ [PAYMENT] Payment method types: ${paymentIntent.payment_method_types?.join(', ') || 'None'}`);
+        console.log(`✅ [PAYMENT] Automatic payment methods: ${paymentIntent.automatic_payment_methods?.enabled ? 'Enabled' : 'Disabled'}`);
+        console.log(`✅ [PAYMENT] Payment method types (auto-determined): ${paymentIntent.payment_method_types?.join(', ') || 'Auto-determined by Stripe'}`);
         console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
 
         // Update order with payment intent ID (only if order exists, not for temporary IDs)
@@ -609,7 +610,8 @@ router.post('/create-intent', async (req, res) => {
         }
 
         // Get actual payment method types from the created payment intent
-        const actualPaymentMethodTypes = paymentIntent.payment_method_types || payment_method_types;
+        // With automatic_payment_methods, Stripe determines available methods dynamically
+        const actualPaymentMethodTypes = paymentIntent.payment_method_types || [];
         
         res.json({
             success: true,
@@ -620,15 +622,17 @@ router.post('/create-intent', async (req, res) => {
             orderId: tempOrderId,
             isTemporary: isTemporaryOrderId,
             status: paymentIntent.status,
-            // Actual payment method types available in this payment intent
+            // Payment intent uses automatic_payment_methods (PaymentElement requirement)
+            automaticPaymentMethods: true,
+            // Actual payment method types available (determined by Stripe based on availability)
             paymentMethodTypes: actualPaymentMethodTypes,
-            // Payment methods supported by this payment intent
+            // Payment methods that will be available in PaymentElement (when supported)
             paymentMethods: {
-                card: actualPaymentMethodTypes.includes('card'),
-                link: actualPaymentMethodTypes.includes('link'),
-                klarna: actualPaymentMethodTypes.includes('klarna'),
-                applePay: actualPaymentMethodTypes.includes('card'),  // Available via card type on Safari (iOS/macOS)
-                googlePay: actualPaymentMethodTypes.includes('card')  // Available via card type on Chrome/Edge
+                card: true,        // Always available with automatic_payment_methods
+                link: true,        // Available if customer has Link saved
+                klarna: true,      // Available if amount/currency supports it
+                applePay: true,    // Available on Safari (iOS/macOS) when device supports it
+                googlePay: true   // Available on Chrome/Edge when device supports it
             }
         });
     } catch (error) {
