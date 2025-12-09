@@ -41,23 +41,55 @@ const db = getDBInstance();
  * GET /api/payments/config
  * Check Stripe configuration status (does not expose keys)
  */
-router.get('/config', (req, res) => {
-    const config = {
-        success: true,
-        stripe: {
-            secretKeyConfigured: !!process.env.STRIPE_SECRET_KEY,
-            publicKeyConfigured: !!process.env.STRIPE_PUBLIC_KEY,
-            webhookSecretConfigured: !!process.env.STRIPE_WEBHOOK_SECRET,
-            secretKeyPrefix: process.env.STRIPE_SECRET_KEY ? 
-                process.env.STRIPE_SECRET_KEY.substring(0, 7) + '...' : 'Not configured',
-            publicKeyPrefix: process.env.STRIPE_PUBLIC_KEY ? 
-                process.env.STRIPE_PUBLIC_KEY.substring(0, 7) + '...' : 'Not configured',
-            mode: process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'production' : 
-                  process.env.STRIPE_SECRET_KEY?.startsWith('sk_test_') ? 'test' : 'unknown'
-        }
-    };
+router.get('/config', async (req, res) => {
+    try {
+        const config = {
+            success: true,
+            stripe: {
+                secretKeyConfigured: !!process.env.STRIPE_SECRET_KEY,
+                publicKeyConfigured: !!process.env.STRIPE_PUBLIC_KEY,
+                webhookSecretConfigured: !!process.env.STRIPE_WEBHOOK_SECRET,
+                secretKeyPrefix: process.env.STRIPE_SECRET_KEY ? 
+                    process.env.STRIPE_SECRET_KEY.substring(0, 7) + '...' : 'Not configured',
+                publicKeyPrefix: process.env.STRIPE_PUBLIC_KEY ? 
+                    process.env.STRIPE_PUBLIC_KEY.substring(0, 7) + '...' : 'Not configured',
+                mode: process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'production' : 
+                      process.env.STRIPE_SECRET_KEY?.startsWith('sk_test_') ? 'test' : 'unknown'
+            },
+            paymentMethods: {
+                card: true,
+                applePay: true,  // Enabled via automatic_payment_methods
+                googlePay: true  // Enabled via automatic_payment_methods
+            }
+        };
 
-    res.json(config);
+        // Try to retrieve Apple Pay domain configuration from Stripe
+        try {
+            const applePayDomains = await stripe.applePayDomains.list({ limit: 10 });
+            config.applePay = {
+                enabled: true,
+                domains: applePayDomains.data.map(domain => ({
+                    domain: domain.domain_name,
+                    id: domain.id,
+                    created: new Date(domain.created * 1000).toISOString()
+                }))
+            };
+        } catch (applePayError) {
+            console.warn('Could not retrieve Apple Pay domains:', applePayError.message);
+            config.applePay = {
+                enabled: true,
+                note: 'Apple Pay is enabled. Domain verification status should be checked in Stripe Dashboard.'
+            };
+        }
+
+        res.json(config);
+    } catch (error) {
+        console.error('Config endpoint error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve configuration'
+        });
+    }
 });
 
 // Middleware to verify Stripe webhook signature
@@ -403,22 +435,24 @@ router.post('/create-intent', async (req, res) => {
         };
 
         // Prepare payment intent parameters for SCA compliance
-        // For full SCA/3DS compliance, we explicitly use card payment method
+        // Support multiple payment methods: card, Apple Pay, Google Pay
         const paymentIntentParams = {
             amount: amountInCents,
             currency: currency.toLowerCase(),
             metadata: paymentMetadata,
-            // Explicitly specify card payment method for SCA compliance
-            // This ensures 3DS is properly handled
-            payment_method_types: ['card'],
-            // Enable 3D Secure authentication for SCA compliance
-            // 'automatic' will request 3DS when required by regulations or card issuer
-            // For European cards (SEK, EUR, etc.), this will trigger SCA/3DS/BankID
+            // Use automatic_payment_methods to enable Apple Pay, Google Pay, and cards
+            // This automatically includes all available payment methods based on device/browser
+            automatic_payment_methods: {
+                enabled: true,
+                allow_redirects: 'always' // Allow redirects for 3DS and payment method authentication
+            },
+            // Enable 3D Secure authentication for card payments (SCA compliance)
+            // Apple Pay and Google Pay handle authentication through their own systems
             payment_method_options: {
                 card: {
                     request_three_d_secure: 'automatic' // Automatically request 3DS when required (SCA compliance)
                     // 'automatic' means: request 3DS when required by regulations or card issuer
-                    // For European cards, this will trigger BankID/3DS authentication
+                    // For European cards (SEK, EUR, etc.), this will trigger SCA/3DS/BankID
                 }
             }
         };
@@ -484,7 +518,13 @@ router.post('/create-intent', async (req, res) => {
             amount: amount,
             currency: currency.toLowerCase(),
             orderId: tempOrderId,
-            isTemporary: isTemporaryOrderId
+            isTemporary: isTemporaryOrderId,
+            // Payment methods supported by this payment intent
+            paymentMethods: {
+                card: true,
+                applePay: true,  // Available on Safari (iOS/macOS) when configured
+                googlePay: true  // Available on Chrome/Edge when configured
+            }
         });
     } catch (error) {
         console.error('Create payment intent error:', error);

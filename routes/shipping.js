@@ -266,11 +266,32 @@ function validatePostalCodeCityMatch(postalCode, city, country) {
     const isCommon = cityData.common.includes(postalCode.replace(/\s+/g, ''));
     
     if (!inRange && !isCommon) {
+        // Find which city this postal code actually belongs to (if known)
+        let suggestedCity = null;
+        for (const [cityName, data] of Object.entries(cityMap)) {
+            const inCityRange = data.ranges.some(range => 
+                normalizedPostalCode >= range.start && normalizedPostalCode <= range.end
+            );
+            const isCityCommon = data.common.includes(postalCode.replace(/\s+/g, ''));
+            if (inCityRange || isCityCommon) {
+                suggestedCity = cityName;
+                break;
+            }
+        }
+        
+        let userMessage;
+        if (suggestedCity) {
+            userMessage = `The postal code ${postalCode} doesn't match the city "${city}". This postal code belongs to ${suggestedCity}. Please check your address and try again.`;
+        } else {
+            userMessage = `The postal code ${postalCode} doesn't match the city "${city}". Please verify your address details and try again.`;
+        }
+        
         return {
             valid: false,
             issue: 'city_mismatch',
-            message: `Postal code ${postalCode} does not match city "${city}" in ${countryUpper}`,
-            field: 'postalCode'
+            message: userMessage,
+            field: 'postalCode',
+            suggestedCity: suggestedCity
         };
     }
     
@@ -313,8 +334,9 @@ function validateShippingAddress(address) {
                 error: {
                     success: false,
                     validationError: true,
-                    error: cityError.message,
+                    error: cityError.message, // User-friendly message
                     field: cityError.field,
+                    suggestedCity: cityError.suggestedCity, // Include suggested city if available
                     details: {
                         postalCode: postalCode,
                         city: city,
