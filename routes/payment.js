@@ -513,8 +513,17 @@ router.post('/create-intent', async (req, res) => {
         const currencyLower = currency.toLowerCase();
         const payment_method_types = ['card', 'link'];
         // Add Klarna for supported currencies (Stripe will validate)
+        // Note: Klarna has minimum amount requirements and may not be available for all transactions
         if (['sek', 'eur', 'usd', 'gbp'].includes(currencyLower)) {
             payment_method_types.push('klarna');
+        }
+        
+        // Ensure minimum amount for payment intent (Stripe requires at least 1 unit in smallest currency unit)
+        if (amountInCents < 1) {
+            return res.status(400).json({
+                success: false,
+                error: 'Amount must be at least 0.01 in the specified currency'
+            });
         }
 
         const paymentIntentParams = {
@@ -529,9 +538,8 @@ router.post('/create-intent', async (req, res) => {
                 card: {
                     request_three_d_secure: 'automatic' // Automatically request 3DS when required (SCA compliance)
                 }
-            },
-            // Allow saving payment methods for future use (optional)
-            setup_future_usage: 'off_session' // Or 'on_session' if you intend to save card details
+            }
+            // Note: Removed setup_future_usage to ensure PaymentElement compatibility
         };
 
         // Add customer if email provided
@@ -563,8 +571,20 @@ router.post('/create-intent', async (req, res) => {
 
         // Create payment intent with logging
         console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${amount} ${currency}`);
+        console.log(`💳 [PAYMENT] Payment intent params:`, JSON.stringify({
+            amount: amountInCents,
+            currency: currencyLower,
+            payment_method_types: payment_method_types,
+            has_customer: !!paymentIntentParams.customer
+        }, null, 2));
+        
         const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
-        console.log(`✅ [PAYMENT] Payment intent created: ${paymentIntent.id}, status: ${paymentIntent.status}`);
+        
+        console.log(`✅ [PAYMENT] Payment intent created: ${paymentIntent.id}`);
+        console.log(`✅ [PAYMENT] Status: ${paymentIntent.status}`);
+        console.log(`✅ [PAYMENT] Client secret: ${paymentIntent.client_secret ? 'Present' : 'Missing'}`);
+        console.log(`✅ [PAYMENT] Payment method types: ${paymentIntent.payment_method_types?.join(', ') || 'None'}`);
+        console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
 
         // Update order with payment intent ID (only if order exists, not for temporary IDs)
         if (!isTemporaryOrderId) {
@@ -588,6 +608,9 @@ router.post('/create-intent', async (req, res) => {
             }
         }
 
+        // Get actual payment method types from the created payment intent
+        const actualPaymentMethodTypes = paymentIntent.payment_method_types || payment_method_types;
+        
         res.json({
             success: true,
             paymentIntentId: paymentIntent.id,
@@ -596,11 +619,16 @@ router.post('/create-intent', async (req, res) => {
             currency: currency.toLowerCase(),
             orderId: tempOrderId,
             isTemporary: isTemporaryOrderId,
+            status: paymentIntent.status,
+            // Actual payment method types available in this payment intent
+            paymentMethodTypes: actualPaymentMethodTypes,
             // Payment methods supported by this payment intent
             paymentMethods: {
-                card: true,
-                applePay: true,  // Available on Safari (iOS/macOS) when configured
-                googlePay: true  // Available on Chrome/Edge when configured
+                card: actualPaymentMethodTypes.includes('card'),
+                link: actualPaymentMethodTypes.includes('link'),
+                klarna: actualPaymentMethodTypes.includes('klarna'),
+                applePay: actualPaymentMethodTypes.includes('card'),  // Available via card type on Safari (iOS/macOS)
+                googlePay: actualPaymentMethodTypes.includes('card')  // Available via card type on Chrome/Edge
             }
         });
     } catch (error) {
