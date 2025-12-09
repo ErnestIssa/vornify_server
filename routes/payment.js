@@ -23,8 +23,11 @@ if (!process.env.STRIPE_WEBHOOK_SECRET) {
     console.log('✅ STRIPE_WEBHOOK_SECRET loaded');
 }
 
-// Initialize Stripe
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+// Initialize Stripe with latest API version for PaymentElement compatibility
+// Using API version 2024-06-20.acacia (or latest) for PaymentElement support
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: '2024-06-20.acacia' // Latest API version with PaymentElement support
+});
 
 // Initialize services
 let paymentService;
