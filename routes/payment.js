@@ -504,24 +504,24 @@ router.post('/create-intent', async (req, res) => {
         };
 
         // Prepare payment intent parameters for SCA compliance
-        // Support multiple payment methods: card, Apple Pay, Google Pay
+        // Explicitly list supported methods to prevent Amazon Pay from appearing.
+        // Apple Pay / Google Pay are offered via the card method when available on the device/browser.
+        const currencyLower = currency.toLowerCase();
+        const payment_method_types = ['card', 'link'];
+        // Add Klarna for supported currencies (Stripe will validate)
+        if (['sek', 'eur', 'usd', 'gbp'].includes(currencyLower)) {
+            payment_method_types.push('klarna');
+        }
+
         const paymentIntentParams = {
             amount: amountInCents,
-            currency: currency.toLowerCase(),
+            currency: currencyLower,
             metadata: paymentMetadata,
-            // Use automatic_payment_methods to enable Apple Pay, Google Pay, and cards
-            // This automatically includes all available payment methods based on device/browser
-            automatic_payment_methods: {
-                enabled: true,
-                allow_redirects: 'always' // Allow redirects for 3DS and payment method authentication
-            },
+            payment_method_types,
             // Enable 3D Secure authentication for card payments (SCA compliance)
-            // Apple Pay and Google Pay handle authentication through their own systems
             payment_method_options: {
                 card: {
                     request_three_d_secure: 'automatic' // Automatically request 3DS when required (SCA compliance)
-                    // 'automatic' means: request 3DS when required by regulations or card issuer
-                    // For European cards (SEK, EUR, etc.), this will trigger SCA/3DS/BankID
                 }
             },
             // Allow saving payment methods for future use (optional)

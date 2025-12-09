@@ -104,7 +104,13 @@ class VornifyPay {
             const paymentIntent = await this.stripe.paymentIntents.create({
                 amount: amountInCents,
                 currency: currency.toLowerCase(),
-                automatic_payment_methods: { enabled: true },
+                // Explicitly list payment methods to avoid Amazon Pay
+                payment_method_types: ['card'],
+                payment_method_options: {
+                    card: {
+                        request_three_d_secure: 'automatic'
+                    }
+                },
                 metadata,
                 description: product_data.description || `Payment for ${product_data.name}`
             });
