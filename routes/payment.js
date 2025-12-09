@@ -402,18 +402,23 @@ router.post('/create-intent', async (req, res) => {
             ...metadata
         };
 
-        // Prepare payment intent parameters
+        // Prepare payment intent parameters for SCA compliance
+        // For full SCA/3DS compliance, we explicitly use card payment method
         const paymentIntentParams = {
             amount: amountInCents,
             currency: currency.toLowerCase(),
             metadata: paymentMetadata,
-            automatic_payment_methods: {
-                enabled: true
-            },
-            // Enable 3D Secure authentication
+            // Explicitly specify card payment method for SCA compliance
+            // This ensures 3DS is properly handled
+            payment_method_types: ['card'],
+            // Enable 3D Secure authentication for SCA compliance
+            // 'automatic' will request 3DS when required by regulations or card issuer
+            // For European cards (SEK, EUR, etc.), this will trigger SCA/3DS/BankID
             payment_method_options: {
                 card: {
-                    request_three_d_secure: 'automatic' // Automatically request 3DS when required by card issuer
+                    request_three_d_secure: 'automatic' // Automatically request 3DS when required (SCA compliance)
+                    // 'automatic' means: request 3DS when required by regulations or card issuer
+                    // For European cards, this will trigger BankID/3DS authentication
                 }
             }
         };
