@@ -503,9 +503,9 @@ router.post('/create-intent', async (req, res) => {
             ...metadata
         };
 
-        // Prepare payment intent parameters for SCA compliance
+        // Prepare payment intent parameters for SCA compliance and Payment Request API
         // Explicitly list supported methods to prevent Amazon Pay from appearing.
-        // Apple Pay / Google Pay are offered via the card method when available on the device/browser.
+        // Apple Pay / Google Pay are wallet methods that work through the 'card' type.
         const currencyLower = currency.toLowerCase();
         const payment_method_types = ['card', 'link'];
         // Add Klarna for supported currencies (Stripe will validate)
@@ -517,7 +517,17 @@ router.post('/create-intent', async (req, res) => {
             amount: amountInCents,
             currency: currencyLower,
             metadata: paymentMetadata,
-            payment_method_types,
+            // Explicitly specify payment method types to control what is offered
+            // 'card' covers traditional cards, Apple Pay, and Google Pay (via wallets)
+            // 'link' for Stripe Link
+            // 'klarna' for Klarna (if enabled and supported by currency)
+            payment_method_types: payment_method_types,
+            // Enable automatic payment methods to enable wallet methods (Apple Pay, Google Pay)
+            // This enables wallet methods for the 'card' type without enabling Amazon Pay
+            automatic_payment_methods: {
+                enabled: true,
+                allow_redirects: 'always' // Allow redirects for 3DS and payment method authentication
+            },
             // Enable 3D Secure authentication for card payments (SCA compliance)
             payment_method_options: {
                 card: {
