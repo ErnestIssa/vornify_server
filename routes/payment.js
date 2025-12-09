@@ -580,12 +580,43 @@ router.post('/create-intent', async (req, res) => {
         
         const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
         
+        // Validate payment intent was created correctly
+        if (!paymentIntent.client_secret) {
+            console.error('❌ [PAYMENT] Payment intent created but client_secret is missing!');
+            return res.status(500).json({
+                success: false,
+                error: 'Payment intent created but client secret is missing',
+                code: 'missing_client_secret'
+            });
+        }
+        
+        if (paymentIntent.status !== 'requires_payment_method') {
+            console.warn(`⚠️ [PAYMENT] Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method'`);
+        }
+        
+        if (!paymentIntent.automatic_payment_methods?.enabled) {
+            console.error('❌ [PAYMENT] Payment intent created but automatic_payment_methods is not enabled!');
+            console.error('❌ [PAYMENT] This will prevent PaymentElement from rendering!');
+        }
+        
         console.log(`✅ [PAYMENT] Payment intent created: ${paymentIntent.id}`);
         console.log(`✅ [PAYMENT] Status: ${paymentIntent.status} (must be 'requires_payment_method' for PaymentElement)`);
         console.log(`✅ [PAYMENT] Client secret: ${paymentIntent.client_secret ? 'Present' : 'Missing'}`);
-        console.log(`✅ [PAYMENT] Automatic payment methods: ${paymentIntent.automatic_payment_methods?.enabled ? 'Enabled' : 'Disabled'}`);
+        console.log(`✅ [PAYMENT] Automatic payment methods: ${paymentIntent.automatic_payment_methods?.enabled ? 'Enabled ✅' : 'Disabled ❌'}`);
         console.log(`✅ [PAYMENT] Payment method types (auto-determined): ${paymentIntent.payment_method_types?.join(', ') || 'Auto-determined by Stripe'}`);
         console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
+        
+        // Log the complete payment intent object for debugging (redact sensitive data)
+        console.log(`🔍 [PAYMENT] Payment intent details:`, JSON.stringify({
+            id: paymentIntent.id,
+            status: paymentIntent.status,
+            amount: paymentIntent.amount,
+            currency: paymentIntent.currency,
+            automatic_payment_methods: paymentIntent.automatic_payment_methods,
+            payment_method_types: paymentIntent.payment_method_types,
+            client_secret_present: !!paymentIntent.client_secret,
+            client_secret_prefix: paymentIntent.client_secret ? paymentIntent.client_secret.substring(0, 20) + '...' : 'Missing'
+        }, null, 2));
 
         // Update order with payment intent ID (only if order exists, not for temporary IDs)
         if (!isTemporaryOrderId) {
@@ -623,7 +654,10 @@ router.post('/create-intent', async (req, res) => {
             isTemporary: isTemporaryOrderId,
             status: paymentIntent.status,
             // Payment intent uses automatic_payment_methods (PaymentElement requirement)
-            automaticPaymentMethods: true,
+            automaticPaymentMethods: {
+                enabled: paymentIntent.automatic_payment_methods?.enabled || false,
+                allow_redirects: paymentIntent.automatic_payment_methods?.allow_redirects || 'always'
+            },
             // Actual payment method types available (determined by Stripe based on availability)
             paymentMethodTypes: actualPaymentMethodTypes,
             // Payment methods that will be available in PaymentElement (when supported)
@@ -633,6 +667,12 @@ router.post('/create-intent', async (req, res) => {
                 klarna: true,      // Available if amount/currency supports it
                 applePay: true,    // Available on Safari (iOS/macOS) when device supports it
                 googlePay: true   // Available on Chrome/Edge when device supports it
+            },
+            // Debug info (can be removed in production)
+            debug: {
+                automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled,
+                status: paymentIntent.status,
+                requires_payment_method: paymentIntent.status === 'requires_payment_method'
             }
         });
     } catch (error) {
