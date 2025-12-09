@@ -571,16 +571,41 @@ router.post('/create-intent', async (req, res) => {
 
         // Create payment intent with logging
         console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${amount} ${currency}`);
-        console.log(`💳 [PAYMENT] Payment intent params:`, JSON.stringify({
+        
+        // Log the EXACT parameters being sent to Stripe (for debugging)
+        const logParams = {
             amount: amountInCents,
             currency: currencyLower,
-            automatic_payment_methods: { enabled: true, allow_redirects: 'always' },
-            has_customer: !!paymentIntentParams.customer
-        }, null, 2));
+            automatic_payment_methods: paymentIntentParams.automatic_payment_methods,
+            payment_method_options: paymentIntentParams.payment_method_options,
+            has_customer: !!paymentIntentParams.customer,
+            has_metadata: !!paymentIntentParams.metadata
+        };
+        console.log(`💳 [PAYMENT] Payment intent params (EXACT):`, JSON.stringify(logParams, null, 2));
+        
+        // CRITICAL: Verify automatic_payment_methods is set correctly
+        if (!paymentIntentParams.automatic_payment_methods || !paymentIntentParams.automatic_payment_methods.enabled) {
+            console.error('❌ [PAYMENT] CRITICAL ERROR: automatic_payment_methods is not enabled!');
+            return res.status(500).json({
+                success: false,
+                error: 'Payment intent configuration error: automatic_payment_methods must be enabled',
+                code: 'invalid_payment_intent_config'
+            });
+        }
+        
+        // CRITICAL: Verify payment_method_types is NOT set (conflicts with automatic_payment_methods)
+        if (paymentIntentParams.payment_method_types) {
+            console.error('❌ [PAYMENT] CRITICAL ERROR: payment_method_types is set! This conflicts with automatic_payment_methods!');
+            return res.status(500).json({
+                success: false,
+                error: 'Payment intent configuration error: Cannot use both payment_method_types and automatic_payment_methods',
+                code: 'conflicting_payment_method_config'
+            });
+        }
         
         const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
         
-        // Validate payment intent was created correctly
+        // CRITICAL: Validate payment intent was created correctly
         if (!paymentIntent.client_secret) {
             console.error('❌ [PAYMENT] Payment intent created but client_secret is missing!');
             return res.status(500).json({
@@ -590,32 +615,68 @@ router.post('/create-intent', async (req, res) => {
             });
         }
         
+        // CRITICAL: Validate status is requires_payment_method (required for PaymentElement)
         if (paymentIntent.status !== 'requires_payment_method') {
-            console.warn(`⚠️ [PAYMENT] Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method'`);
+            console.error(`❌ [PAYMENT] CRITICAL: Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method'`);
+            console.error(`❌ [PAYMENT] PaymentElement will NOT work with status: ${paymentIntent.status}`);
+            return res.status(500).json({
+                success: false,
+                error: `Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method' for PaymentElement`,
+                code: 'invalid_payment_intent_status',
+                actualStatus: paymentIntent.status,
+                expectedStatus: 'requires_payment_method'
+            });
         }
         
+        // CRITICAL: Validate automatic_payment_methods is enabled (required for PaymentElement)
         if (!paymentIntent.automatic_payment_methods?.enabled) {
-            console.error('❌ [PAYMENT] Payment intent created but automatic_payment_methods is not enabled!');
-            console.error('❌ [PAYMENT] This will prevent PaymentElement from rendering!');
+            console.error('❌ [PAYMENT] CRITICAL: Payment intent created but automatic_payment_methods is not enabled!');
+            console.error('❌ [PAYMENT] PaymentElement will NOT render without automatic_payment_methods enabled!');
+            return res.status(500).json({
+                success: false,
+                error: 'Payment intent created but automatic_payment_methods is not enabled. PaymentElement requires this.',
+                code: 'automatic_payment_methods_not_enabled',
+                automatic_payment_methods: paymentIntent.automatic_payment_methods
+            });
+        }
+        
+        // CRITICAL: Verify payment_method_types is NOT present (conflicts with automatic_payment_methods)
+        if (paymentIntent.payment_method_types && paymentIntent.payment_method_types.length > 0) {
+            console.warn(`⚠️ [PAYMENT] Warning: Payment intent has payment_method_types: ${paymentIntent.payment_method_types.join(', ')}`);
+            console.warn(`⚠️ [PAYMENT] This might conflict with automatic_payment_methods for PaymentElement`);
         }
         
         console.log(`✅ [PAYMENT] Payment intent created: ${paymentIntent.id}`);
-        console.log(`✅ [PAYMENT] Status: ${paymentIntent.status} (must be 'requires_payment_method' for PaymentElement)`);
-        console.log(`✅ [PAYMENT] Client secret: ${paymentIntent.client_secret ? 'Present' : 'Missing'}`);
+        console.log(`✅ [PAYMENT] Status: ${paymentIntent.status} ✅ (correct for PaymentElement)`);
+        console.log(`✅ [PAYMENT] Client secret: ${paymentIntent.client_secret ? 'Present ✅' : 'Missing ❌'}`);
         console.log(`✅ [PAYMENT] Automatic payment methods: ${paymentIntent.automatic_payment_methods?.enabled ? 'Enabled ✅' : 'Disabled ❌'}`);
-        console.log(`✅ [PAYMENT] Payment method types (auto-determined): ${paymentIntent.payment_method_types?.join(', ') || 'Auto-determined by Stripe'}`);
+        console.log(`✅ [PAYMENT] Automatic payment methods allow_redirects: ${paymentIntent.automatic_payment_methods?.allow_redirects || 'Not set'}`);
+        console.log(`✅ [PAYMENT] Payment method types (auto-determined by Stripe): ${paymentIntent.payment_method_types?.join(', ') || 'None (auto-determined)'}`);
         console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
         
         // Log the complete payment intent object for debugging (redact sensitive data)
-        console.log(`🔍 [PAYMENT] Payment intent details:`, JSON.stringify({
+        console.log(`🔍 [PAYMENT] Payment intent details (VERIFICATION):`, JSON.stringify({
             id: paymentIntent.id,
             status: paymentIntent.status,
             amount: paymentIntent.amount,
             currency: paymentIntent.currency,
-            automatic_payment_methods: paymentIntent.automatic_payment_methods,
-            payment_method_types: paymentIntent.payment_method_types,
+            automatic_payment_methods: {
+                enabled: paymentIntent.automatic_payment_methods?.enabled,
+                allow_redirects: paymentIntent.automatic_payment_methods?.allow_redirects
+            },
+            payment_method_types: paymentIntent.payment_method_types || [],
+            payment_method_options: paymentIntent.payment_method_options,
             client_secret_present: !!paymentIntent.client_secret,
-            client_secret_prefix: paymentIntent.client_secret ? paymentIntent.client_secret.substring(0, 20) + '...' : 'Missing'
+            client_secret_prefix: paymentIntent.client_secret ? paymentIntent.client_secret.substring(0, 25) + '...' : 'Missing',
+            // Verification flags
+            verification: {
+                has_client_secret: !!paymentIntent.client_secret,
+                status_correct: paymentIntent.status === 'requires_payment_method',
+                automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled === true,
+                ready_for_payment_element: paymentIntent.status === 'requires_payment_method' && 
+                                          paymentIntent.automatic_payment_methods?.enabled === true &&
+                                          !!paymentIntent.client_secret
+            }
         }, null, 2));
 
         // Update order with payment intent ID (only if order exists, not for temporary IDs)
