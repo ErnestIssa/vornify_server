@@ -474,6 +474,17 @@ async function handleChargeRefunded(charge) {
 router.post('/create-intent', async (req, res) => {
     try {
         const { amount, currency, orderId, customerEmail, paymentMethod, metadata = {} } = req.body;
+        
+        // Detect mobile device for logging and debugging
+        const userAgent = req.headers['user-agent'] || '';
+        const isMobile = /Mobile|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
+        const deviceInfo = {
+            isMobile,
+            userAgent: userAgent.substring(0, 100), // Log first 100 chars
+            platform: isMobile ? 'mobile' : 'desktop'
+        };
+        
+        console.log(`📱 [PAYMENT] Request from ${deviceInfo.platform} device`);
 
         // Validate required fields
         if (!amount || amount <= 0) {
@@ -573,6 +584,7 @@ router.post('/create-intent', async (req, res) => {
 
         // Create payment intent with logging
         console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${amount} ${currency}`);
+        console.log(`📱 [PAYMENT] Device: ${deviceInfo.platform}${isMobile ? ` (${userAgent.match(/Mobile|Android|iPhone|iPad/i)?.[0] || 'Mobile'})` : ''}`);
         
         // Log the EXACT parameters being sent to Stripe (for debugging)
         const logParams = {
@@ -581,7 +593,8 @@ router.post('/create-intent', async (req, res) => {
             automatic_payment_methods: paymentIntentParams.automatic_payment_methods,
             payment_method_options: paymentIntentParams.payment_method_options,
             has_customer: !!paymentIntentParams.customer,
-            has_metadata: !!paymentIntentParams.metadata
+            has_metadata: !!paymentIntentParams.metadata,
+            device: deviceInfo.platform
         };
         console.log(`💳 [PAYMENT] Payment intent params (EXACT):`, JSON.stringify(logParams, null, 2));
         
@@ -655,6 +668,7 @@ router.post('/create-intent', async (req, res) => {
         console.log(`✅ [PAYMENT] Automatic payment methods allow_redirects: ${paymentIntent.automatic_payment_methods?.allow_redirects || 'Not set'}`);
         console.log(`✅ [PAYMENT] Payment method types (auto-determined by Stripe): ${paymentIntent.payment_method_types?.join(', ') || 'None (auto-determined)'}`);
         console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
+        console.log(`📱 [PAYMENT] Mobile support: ${isMobile ? 'Mobile device detected - Apple Pay/Google Pay should be available' : 'Desktop device'}`);
         
         // Log the complete payment intent object for debugging (redact sensitive data)
         console.log(`🔍 [PAYMENT] Payment intent details (VERIFICATION):`, JSON.stringify({
@@ -731,19 +745,47 @@ router.post('/create-intent', async (req, res) => {
                 applePay: true,    // Available on Safari (iOS/macOS) when device supports it
                 googlePay: true   // Available on Chrome/Edge when device supports it
             },
+            // Device information for mobile debugging
+            device: {
+                isMobile: isMobile,
+                platform: deviceInfo.platform
+            },
             // Debug info (can be removed in production)
             debug: {
                 automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled,
                 status: paymentIntent.status,
-                requires_payment_method: paymentIntent.status === 'requires_payment_method'
+                requires_payment_method: paymentIntent.status === 'requires_payment_method',
+                device: deviceInfo.platform
             }
         });
     } catch (error) {
-        console.error('Create payment intent error:', error);
+        const userAgent = req.headers['user-agent'] || '';
+        const isMobile = /Mobile|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
+        
+        console.error('❌ [PAYMENT] Create payment intent error:', error);
+        console.error(`📱 [PAYMENT] Error on ${isMobile ? 'mobile' : 'desktop'} device`);
+        console.error(`📱 [PAYMENT] User agent: ${userAgent.substring(0, 100)}`);
+        console.error(`📱 [PAYMENT] Error details:`, {
+            message: error.message,
+            code: error.code,
+            type: error.type,
+            statusCode: error.statusCode
+        });
+        
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to create payment intent',
-            code: error.code || 'payment_intent_creation_failed'
+            code: error.code || 'payment_intent_creation_failed',
+            device: {
+                isMobile,
+                platform: isMobile ? 'mobile' : 'desktop'
+            },
+            // Include Stripe error details if available
+            stripeError: error.type ? {
+                type: error.type,
+                code: error.code,
+                message: error.message
+            } : undefined
         });
     }
 });
