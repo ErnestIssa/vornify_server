@@ -547,12 +547,18 @@ router.post('/create-intent', async (req, res) => {
                 allow_redirects: 'always' // Allows redirect-based payment methods like Klarna
             },
             // Enable 3D Secure authentication for card payments (SCA compliance)
+            // CRITICAL: 3DS must trigger BEFORE checking funds (European PSD2 requirement)
             payment_method_options: {
                 card: {
                     request_three_d_secure: 'automatic' // Automatically request 3DS when required (SCA compliance)
+                    // 'automatic' means: Request 3DS when card issuer requires it (most European cards)
+                    // This ensures 3DS authentication happens BEFORE fund checking
                 }
             }
-            // Note: Removed setup_future_usage to ensure PaymentElement compatibility
+            // Note: 
+            // - Removed setup_future_usage to ensure PaymentElement compatibility
+            // - confirmation_method is NOT needed with automatic_payment_methods (they conflict)
+            // - PaymentElement handles confirmation via stripe.confirmPayment() on frontend
         };
 
         // Add customer if email provided
@@ -668,6 +674,7 @@ router.post('/create-intent', async (req, res) => {
         console.log(`✅ [PAYMENT] Automatic payment methods allow_redirects: ${paymentIntent.automatic_payment_methods?.allow_redirects || 'Not set'}`);
         console.log(`✅ [PAYMENT] Payment method types (auto-determined by Stripe): ${paymentIntent.payment_method_types?.join(', ') || 'None (auto-determined)'}`);
         console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
+        console.log(`🔐 [PAYMENT] 3D Secure configuration: ${paymentIntent.payment_method_options?.card?.request_three_d_secure || 'Not set'} (should be 'automatic' for SCA compliance)`);
         console.log(`📱 [PAYMENT] Mobile support: ${isMobile ? 'Mobile device detected - Apple Pay/Google Pay should be available' : 'Desktop device'}`);
         
         // Log the complete payment intent object for debugging (redact sensitive data)
@@ -689,6 +696,7 @@ router.post('/create-intent', async (req, res) => {
                 has_client_secret: !!paymentIntent.client_secret,
                 status_correct: paymentIntent.status === 'requires_payment_method',
                 automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled === true,
+                three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'automatic',
                 ready_for_payment_element: paymentIntent.status === 'requires_payment_method' && 
                                           paymentIntent.automatic_payment_methods?.enabled === true &&
                                           !!paymentIntent.client_secret
@@ -750,11 +758,18 @@ router.post('/create-intent', async (req, res) => {
                 isMobile: isMobile,
                 platform: deviceInfo.platform
             },
+            // 3D Secure configuration (SCA compliance)
+            threeDSecure: {
+                configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'automatic',
+                request_three_d_secure: paymentIntent.payment_method_options?.card?.request_three_d_secure || 'not_set',
+                note: '3DS will trigger automatically when card issuer requires it (European PSD2 compliance)'
+            },
             // Debug info (can be removed in production)
             debug: {
                 automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled,
                 status: paymentIntent.status,
                 requires_payment_method: paymentIntent.status === 'requires_payment_method',
+                three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'automatic',
                 device: deviceInfo.platform
             }
         });
