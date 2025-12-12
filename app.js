@@ -39,6 +39,64 @@ app.use(cors({
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
+// CRITICAL: Apple Pay domain verification file route MUST be before static middleware
+// This ensures the route is matched before Express tries to serve static files
+// Apple Pay domain verification file
+// CRITICAL: This file must be accessible at BOTH:
+// - https://peakmode.se/.well-known/apple-developer-merchantid-domain-association
+// - https://www.peakmode.se/.well-known/apple-developer-merchantid-domain-association
+// Stripe requires this exact path with no redirects and Content-Type: text/plain
+// Both domains point to the same server, so this single route serves both
+app.get('/.well-known/apple-developer-merchantid-domain-association', (req, res) => {
+    console.log('🔍 [APPLE PAY] Route hit: /.well-known/apple-developer-merchantid-domain-association');
+    console.log('🔍 [APPLE PAY] Request from:', req.headers.host);
+    console.log('🔍 [APPLE PAY] Request URL:', req.url);
+    console.log('🔍 [APPLE PAY] Request method:', req.method);
+    console.log('🔍 [APPLE PAY] Request path:', req.path);
+    
+    try {
+        // Try to read from .well-known folder first
+        const filePath = path.join(__dirname, '.well-known', 'apple-developer-merchantid-domain-association');
+        console.log('🔍 [APPLE PAY] Checking file at:', filePath);
+        console.log('🔍 [APPLE PAY] __dirname:', __dirname);
+        
+        if (fs.existsSync(filePath)) {
+            // File exists - serve it
+            const fileContent = fs.readFileSync(filePath, 'utf8');
+            res.setHeader('Content-Type', 'text/plain');
+            res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+            res.send(fileContent);
+            console.log('✅ [APPLE PAY] Domain verification file served from .well-known folder');
+            console.log('✅ [APPLE PAY] File content length:', fileContent.length);
+            return; // Important: return to prevent further processing
+        } else if (process.env.APPLE_PAY_DOMAIN_VERIFICATION) {
+            // Fallback: serve from environment variable if file doesn't exist
+            const envContent = process.env.APPLE_PAY_DOMAIN_VERIFICATION.trim();
+            res.setHeader('Content-Type', 'text/plain');
+            res.setHeader('Cache-Control', 'public, max-age=3600');
+            res.send(envContent);
+            console.log('✅ [APPLE PAY] Domain verification file served from environment variable');
+            console.log('✅ [APPLE PAY] Content length:', envContent.length);
+            return; // Important: return to prevent further processing
+        } else {
+            // File not found and no environment variable
+            console.error('❌ [APPLE PAY] Domain verification file not found');
+            console.error('❌ [APPLE PAY] Expected location:', filePath);
+            console.error('❌ [APPLE PAY] File exists:', fs.existsSync(filePath));
+            console.error('❌ [APPLE PAY] Env var exists:', !!process.env.APPLE_PAY_DOMAIN_VERIFICATION);
+            console.error('❌ [APPLE PAY] Please download the file from Stripe Dashboard and place it at:', filePath);
+            console.error('❌ [APPLE PAY] OR set APPLE_PAY_DOMAIN_VERIFICATION environment variable');
+            res.status(404).setHeader('Content-Type', 'text/plain').send('Apple Pay domain verification file not found. Please configure the file at .well-known/apple-developer-merchantid-domain-association or set APPLE_PAY_DOMAIN_VERIFICATION environment variable');
+            return; // Important: return to prevent further processing
+        }
+    } catch (error) {
+        console.error('❌ [APPLE PAY] Error serving domain verification file:', error);
+        console.error('❌ [APPLE PAY] Error stack:', error.stack);
+        res.status(500).setHeader('Content-Type', 'text/plain').send('Error serving Apple Pay domain verification file');
+        return; // Important: return to prevent further processing
+    }
+});
+
 // Request timeout middleware for order creation
 app.use('/api/orders/create', (req, res, next) => {
     // Set a 25 second timeout for order creation
@@ -59,41 +117,14 @@ app.use('/api/orders/create', (req, res, next) => {
 app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve uploaded images
 
-// Apple Pay domain verification file
-// CRITICAL: This file must be accessible at BOTH:
-// - https://peakmode.se/.well-known/apple-developer-merchantid-domain-association
-// - https://www.peakmode.se/.well-known/apple-developer-merchantid-domain-association
-// Stripe requires this exact path with no redirects and Content-Type: text/plain
-// Both domains point to the same server, so this single route serves both
-app.get('/.well-known/apple-developer-merchantid-domain-association', (req, res) => {
-    try {
-        // Try to read from .well-known folder first
-        const filePath = path.join(__dirname, '.well-known', 'apple-developer-merchantid-domain-association');
-        
-        if (fs.existsSync(filePath)) {
-            // File exists - serve it
-            res.setHeader('Content-Type', 'text/plain');
-            res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
-            const fileContent = fs.readFileSync(filePath, 'utf8');
-            res.send(fileContent);
-            console.log('✅ [APPLE PAY] Domain verification file served from .well-known folder');
-        } else if (process.env.APPLE_PAY_DOMAIN_VERIFICATION) {
-            // Fallback: serve from environment variable if file doesn't exist
-            res.setHeader('Content-Type', 'text/plain');
-            res.setHeader('Cache-Control', 'public, max-age=3600');
-            res.send(process.env.APPLE_PAY_DOMAIN_VERIFICATION);
-            console.log('✅ [APPLE PAY] Domain verification file served from environment variable');
-        } else {
-            // File not found and no environment variable
-            console.error('❌ [APPLE PAY] Domain verification file not found');
-            console.error('❌ [APPLE PAY] Expected location:', filePath);
-            console.error('❌ [APPLE PAY] Please download the file from Stripe Dashboard and place it at:', filePath);
-            res.status(404).send('Apple Pay domain verification file not found. Please configure the file at .well-known/apple-developer-merchantid-domain-association');
-        }
-    } catch (error) {
-        console.error('❌ [APPLE PAY] Error serving domain verification file:', error);
-        res.status(500).send('Error serving Apple Pay domain verification file');
-    }
+// Test endpoint to verify Apple Pay route is accessible
+app.get('/api/apple-pay/test-route', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Apple Pay route test endpoint is working',
+        route: '/.well-known/apple-developer-merchantid-domain-association',
+        note: 'This endpoint confirms the server is running. The actual verification file route should be tested directly.'
+    });
 });
 
 // Apple Pay domain verification check endpoint
@@ -196,8 +227,13 @@ app.get('/storage/docs', (req, res) => {
 // Error handling middleware
 app.use(errorHandler);
 
-// Handle 404
+// Handle 404 - but exclude Apple Pay verification route (it has its own handler)
 app.use((req, res) => {
+    // Don't handle 404 for Apple Pay verification route - it has its own handler above
+    if (req.path === '/.well-known/apple-developer-merchantid-domain-association') {
+        return; // Let the Apple Pay route handle it
+    }
+    
     res.status(404).json({
         status: false,
         error: 'Not Found',

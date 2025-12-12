@@ -1275,4 +1275,75 @@ router.post('/', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/payments/apple-pay/verification-file
+ * Retrieve the Apple Pay domain verification file content from Stripe
+ * This endpoint fetches the file content that should be hosted at
+ * /.well-known/apple-developer-merchantid-domain-association
+ * 
+ * Query Parameters:
+ * - domainId: Optional - Stripe payment method domain ID (default: retrieves all registered domains)
+ */
+router.get('/apple-pay/verification-file', async (req, res) => {
+    try {
+        const { domainId } = req.query;
+        
+        // If domainId is provided, retrieve that specific domain
+        if (domainId) {
+            try {
+                const domain = await stripe.paymentMethodDomains.retrieve(domainId);
+                
+                // The verification file content is typically in the domain object
+                // However, Stripe might not return it directly - it's usually provided during registration
+                res.json({
+                    success: true,
+                    domain: {
+                        id: domain.id,
+                        domain: domain.domain,
+                        status: domain.status,
+                        note: 'Verification file content is typically provided when registering the domain. Check Stripe Dashboard or contact support for the file content.'
+                    },
+                    message: 'Domain retrieved. Verification file content should be available in Stripe Dashboard when you click on the domain.'
+                });
+            } catch (error) {
+                res.status(404).json({
+                    success: false,
+                    error: 'Domain not found',
+                    message: error.message
+                });
+            }
+        } else {
+            // List all registered domains
+            try {
+                const domains = await stripe.paymentMethodDomains.list({ limit: 100 });
+                
+                res.json({
+                    success: true,
+                    domains: domains.data.map(d => ({
+                        id: d.id,
+                        domain: d.domain,
+                        status: d.status,
+                        enabled: d.enabled
+                    })),
+                    message: 'Domains retrieved. To get verification file content: 1) Click on domain in Stripe Dashboard, 2) Look for "Download" or "View file" option, 3) Or contact Stripe support with domain IDs',
+                    note: 'The verification file content is provided by Stripe when you register the domain. It should be available in the Stripe Dashboard when viewing the domain details.'
+                });
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: 'Failed to retrieve domains',
+                    message: error.message
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Error retrieving Apple Pay verification file:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to retrieve verification file information',
+            note: 'The verification file content is typically provided in Stripe Dashboard when you click on the registered domain. Contact Stripe support if you cannot find it.'
+        });
+    }
+});
+
 module.exports = router; 
