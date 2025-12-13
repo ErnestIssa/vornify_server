@@ -10,10 +10,12 @@ const db = getDBInstance();
 // Base currency (EUR)
 const BASE_CURRENCY = 'EUR';
 
-// Supported EU currencies with symbols
+// Supported currencies with symbols
 const SUPPORTED_CURRENCIES = {
     EUR: { symbol: '€', name: 'Euro', rate: 1.0 },
     SEK: { symbol: 'kr', name: 'Swedish Krona', rate: 11.2345 },
+    GBP: { symbol: '£', name: 'British Pound', rate: 0.85 }, // Approximate: 1 EUR = 0.85 GBP
+    USD: { symbol: '$', name: 'US Dollar', rate: 1.08 }, // Approximate: 1 EUR = 1.08 USD
     DKK: { symbol: 'kr', name: 'Danish Krone', rate: 7.4567 },
     PLN: { symbol: 'zł', name: 'Polish Zloty', rate: 4.3456 },
     CZK: { symbol: 'Kč', name: 'Czech Koruna', rate: 24.5678 },
@@ -212,8 +214,41 @@ async function getSupportedCurrencies() {
 }
 
 /**
+ * Fetch USD rate from free API (exchangerate-api.com)
+ * This API provides free rates without API key for basic usage
+ */
+async function fetchUSDRate() {
+    try {
+        // Using exchangerate-api.com free tier (no API key needed for EUR base)
+        const API_URL = 'https://api.exchangerate-api.com/v4/latest/EUR';
+        
+        console.log('📡 Fetching USD rate from exchangerate-api.com...');
+        const response = await fetch(API_URL);
+        
+        if (!response.ok) {
+            throw new Error(`Exchange rate API returned status ${response.status}`);
+        }
+        
+        const data = await response.json();
+        const usdRate = data.rates?.USD;
+        
+        if (!usdRate || isNaN(usdRate)) {
+            throw new Error('USD rate not found in API response');
+        }
+        
+        console.log(`✅ Fetched USD rate: ${usdRate} (1 EUR = ${usdRate} USD)`);
+        return usdRate;
+
+    } catch (error) {
+        console.error('❌ Error fetching USD rate:', error);
+        throw error;
+    }
+}
+
+/**
  * Fetch exchange rates from ECB (European Central Bank)
  * ECB provides free daily rates, no API key needed
+ * Note: ECB provides GBP but not USD
  */
 async function fetchECBRates() {
     try {
@@ -244,7 +279,16 @@ async function fetchECBRates() {
             }
         });
         
-        console.log(`✅ Fetched ${Object.keys(rates).length} exchange rates from ECB`);
+        // Fetch USD rate separately (ECB doesn't provide USD)
+        try {
+            const usdRate = await fetchUSDRate();
+            rates['USD'] = usdRate;
+        } catch (usdError) {
+            console.warn('⚠️ Failed to fetch USD rate, using default:', usdError.message);
+            // Will use default rate from SUPPORTED_CURRENCIES
+        }
+        
+        console.log(`✅ Fetched ${Object.keys(rates).length} exchange rates from ECB + USD API`);
         return rates;
 
     } catch (error) {
@@ -279,12 +323,12 @@ async function updateExchangeRates() {
                 continue;
             }
 
-            // Get rate from ECB if available, otherwise use default
+            // Get rate from ECB/USD API if available, otherwise use default
             let rate = info.rate; // Default fallback
             if (fetchSuccess && ecbRates[currency]) {
                 rate = ecbRates[currency];
             } else {
-                console.warn(`⚠️ Rate for ${currency} not found in ECB data, using default: ${rate}`);
+                console.warn(`⚠️ Rate for ${currency} not found in fetched data, using default: ${rate}`);
             }
 
             // Check if rate exists in database
