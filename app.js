@@ -114,8 +114,22 @@ app.use('/api/orders/create', (req, res, next) => {
 });
 
 // Middleware
-app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
+app.use(express.static(path.join(__dirname, 'public'))); // Serve static files (includes robots.txt if present)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve uploaded images
+
+// Robots.txt route (if not in public folder, serve default)
+app.get('/robots.txt', (req, res) => {
+    const robotsPath = path.join(__dirname, 'public', 'robots.txt');
+    if (fs.existsSync(robotsPath)) {
+        // Serve from public folder if exists
+        res.setHeader('Content-Type', 'text/plain');
+        res.sendFile(robotsPath);
+    } else {
+        // Default robots.txt allowing all crawlers
+        res.setHeader('Content-Type', 'text/plain');
+        res.send('User-agent: *\nAllow: /\n');
+    }
+});
 
 // Test endpoint to verify Apple Pay route is accessible
 app.get('/api/apple-pay/test-route', (req, res) => {

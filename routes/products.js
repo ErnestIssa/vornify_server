@@ -4,6 +4,8 @@ const getDBInstance = require('../vornifydb/dbInstance');
 const currencyService = require('../services/currencyService');
 const translationService = require('../services/translationService');
 const productTranslationHelper = require('../services/productTranslationHelper');
+const seoHelper = require('../utils/seoHelper');
+const reviewStatsHelper = require('../utils/reviewStatsHelper');
 
 const db = getDBInstance();
 
@@ -185,9 +187,24 @@ router.get('/:id', async (req, res) => {
             // Translate product content based on language
             const translatedProduct = translationService.translateProduct(product, language);
             
+            // Get review statistics for SEO (non-blocking, fails silently)
+            let reviewStats = null;
+            try {
+                reviewStats = await reviewStatsHelper.getProductReviewStats(product.id);
+            } catch (error) {
+                console.warn('Failed to get review stats for SEO:', error);
+            }
+            
+            // Add SEO fields (additive only, does not modify existing product data)
+            const seoFields = seoHelper.getProductSEOFields(translatedProduct, reviewStats);
+            const productWithSEO = {
+                ...translatedProduct,
+                ...seoFields
+            };
+            
             res.json({
                 success: true,
-                data: translatedProduct,
+                data: productWithSEO,
                 language: language // Include language in response for frontend reference
             });
         } else {
@@ -330,10 +347,31 @@ router.get('/', async (req, res) => {
                 return translationService.translateProduct(product, language);
             }));
             
+            // Get review statistics for all products (non-blocking, fails silently)
+            let reviewStatsMap = {};
+            try {
+                const productIds = products.map(p => p.id).filter(Boolean);
+                if (productIds.length > 0) {
+                    reviewStatsMap = await reviewStatsHelper.getMultipleProductReviewStats(productIds);
+                }
+            } catch (error) {
+                console.warn('Failed to get review stats for SEO:', error);
+            }
+            
+            // Add SEO fields to each product (additive only)
+            const productsWithSEO = products.map(product => {
+                const reviewStats = reviewStatsMap[product.id] || null;
+                const seoFields = seoHelper.getProductSEOFields(product, reviewStats);
+                return {
+                    ...product,
+                    ...seoFields
+                };
+            });
+            
             res.json({
                 success: true,
-                data: products,
-                count: products.length,
+                data: productsWithSEO,
+                count: productsWithSEO.length,
                 language: language // Include language in response for frontend reference
             });
         } else {
@@ -539,6 +577,61 @@ router.get('/:id/variants', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve product variants'
+        });
+    }
+});
+
+// GET /api/products/sitemap - Get all products for sitemap generation
+// Returns minimal product data needed for sitemap (id, name, category, updatedAt, slug)
+// This endpoint is for SEO purposes only, no visible changes
+router.get('/sitemap', async (req, res) => {
+    try {
+        // Get all products (we'll filter active ones)
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: {}
+        });
+        
+        if (result.success) {
+            let products = result.data || [];
+            if (!Array.isArray(products)) {
+                products = [products];
+            }
+            
+            // Filter to only active products and map to sitemap format
+            const sitemapProducts = products
+                .filter(product => product.active !== false)
+                .map(product => {
+                    // Generate slug if not present
+                    const slug = product.slug || seoHelper.generateSlug(product.name || product.id);
+                    
+                    return {
+                        id: product.id,
+                        name: product.name,
+                        category: product.category,
+                        updatedAt: product.updatedAt || product.updated_at || new Date().toISOString(),
+                        slug: slug
+                    };
+                });
+            
+            res.json({
+                success: true,
+                data: sitemapProducts,
+                count: sitemapProducts.length
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to retrieve products for sitemap'
+            });
+        }
+    } catch (error) {
+        console.error('Get sitemap products error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve products for sitemap'
         });
     }
 });
