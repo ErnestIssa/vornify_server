@@ -5,6 +5,7 @@ const { parseString } = require('xml2js');
 const { promisify } = require('util');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getLanguageFromRequest, DEFAULT_LANGUAGE } = require('../services/translationService');
+const { getFixedDeliveryOptions, getShippingZone, applyZonePricingToOptions } = require('../utils/shippingZones');
 
 const db = getDBInstance();
 
@@ -33,13 +34,6 @@ const FRAKTJAKT_API = {
     baseUrl: 'https://api.fraktjakt.se/fraktjakt/query_xml',
     consignorId: process.env.FRAKTJAKT_CONSIGNOR_ID || '',
     consignorKey: process.env.FRAKTJAKT_CONSIGNOR_KEY || ''
-};
-
-// Shipmondo API configuration
-const SHIPMONDO_API = {
-    baseUrl: 'https://app.shipmondo.com/api/public/v3',
-    apiUser: process.env.SHIPMONDO_API_USER || '',
-    apiKey: process.env.SHIPMONDO_API_KEY || ''
 };
 
 // Warehouse address for Fraktjakt (hardcoded as per requirements)
@@ -826,7 +820,7 @@ router.post('/calculate-weight', async (req, res) => {
     }
 });
 
-// POST /api/shipping/options - Get PostNord delivery options
+// POST /api/shipping/options - Get PostNord delivery options with zone-based pricing
 router.post('/options', async (req, res) => {
     try {
         const { country, postalCode, street, city } = req.body;
@@ -854,6 +848,17 @@ router.post('/options', async (req, res) => {
         const addressValidation = validateShippingAddress(recipientAddress);
         if (!addressValidation.valid) {
             return res.status(400).json(addressValidation.error);
+        }
+        
+        // Determine shipping zone based on country (for pricing)
+        const zone = getShippingZone(recipientAddress.country);
+        
+        if (!zone) {
+            return res.status(400).json({
+                success: false,
+                error: 'Shipping not available to this country',
+                details: `Shipping is only available to Sweden (SE) and EU countries. Country code: ${recipientAddress.country}`
+            });
         }
         
         // Validate warehouse address is configured
@@ -903,14 +908,6 @@ router.post('/options', async (req, res) => {
         // Build API URL with API key as query parameter (not header)
         const apiUrl = `${POSTNORD_DELIVERY_API.baseUrl}?apikey=${POSTNORD_DELIVERY_API.apiKey}`;
         
-        // Log request for debugging (without sensitive data)
-        console.log('PostNord API Request:', {
-            url: POSTNORD_DELIVERY_API.baseUrl,
-            customerKey: POSTNORD_DELIVERY_API.customerKey,
-            warehouse: requestBody.warehouses[0].address,
-            recipient: requestBody.recipient.address
-        });
-        
         // Make request to PostNord API
         const response = await fetch(apiUrl, {
             method: 'POST',
@@ -926,8 +923,7 @@ router.post('/options', async (req, res) => {
             console.error('PostNord API error:', {
                 status: response.status,
                 statusText: response.statusText,
-                error: errorText,
-                requestBody: requestBody
+                error: errorText
             });
             
             // Provide more helpful error messages
@@ -935,9 +931,9 @@ router.post('/options', async (req, res) => {
             if (response.status === 403) {
                 errorMessage = 'Access forbidden. This may be caused by missing or incorrect customerKey, or invalid sender address. Please verify your PostNord API key, customerKey, and warehouse address configuration.';
             } else if (response.status === 401) {
-                errorMessage = 'Unauthorized. Please check your PostNord API key is correctly set in the X-Api-Key header.';
+                errorMessage = 'Unauthorized. Please check your PostNord API key is correctly set.';
             } else if (response.status === 400) {
-                errorMessage = 'Bad request. Please verify the request format and field names are correct (countryCode, streetName, etc.).';
+                errorMessage = 'Bad request. Please verify the request format and field names are correct.';
             }
             
             return res.status(response.status).json({
@@ -950,9 +946,6 @@ router.post('/options', async (req, res) => {
         
         // Parse response
         const data = await response.json();
-        
-        // Log full response for debugging
-        console.log('PostNord API Response:', JSON.stringify(data, null, 2));
         
         // Extract delivery options from response
         // PostNord API response structure: warehouseToDeliveryOptions array
@@ -990,13 +983,64 @@ router.post('/options', async (req, res) => {
             deliveryOptions = data;
         }
         
-        // Process delivery options using helper functions
-        const homeDelivery = filterHomeDeliveryOptions(deliveryOptions);
-        const servicePoint = filterServicePointOptions(deliveryOptions);
-        const parcelLocker = filterParcelLockerOptions(deliveryOptions);
-        const mailbox = filterMailboxOptions(deliveryOptions);
+        // Process delivery options using helper functions (maintains existing structure)
+        let homeDelivery = filterHomeDeliveryOptions(deliveryOptions);
+        let servicePoint = filterServicePointOptions(deliveryOptions);
+        let parcelLocker = filterParcelLockerOptions(deliveryOptions);
+        let mailbox = filterMailboxOptions(deliveryOptions);
         
-        // Return formatted response
+        // Log zone detection for debugging
+        console.log('📦 [SHIPPING] Zone detected:', zone, 'for country:', recipientAddress.country);
+        console.log('📦 [SHIPPING] Options before pricing:', {
+            home: homeDelivery.length,
+            servicePoint: servicePoint.length,
+            parcelLocker: parcelLocker.length,
+            mailbox: mailbox.length
+        });
+        
+        // Apply zone-based pricing to all options (SECURE - server-side calculation)
+        if (zone) {
+            homeDelivery = applyZonePricingToOptions(homeDelivery, zone);
+            servicePoint = applyZonePricingToOptions(servicePoint, zone);
+            parcelLocker = applyZonePricingToOptions(parcelLocker, zone);
+            mailbox = applyZonePricingToOptions(mailbox, zone);
+            
+            // Log pricing application
+            console.log('📦 [SHIPPING] Pricing applied. Sample home delivery cost:', homeDelivery[0]?.cost);
+            console.log('📦 [SHIPPING] Sample parcel locker cost:', parcelLocker[0]?.cost);
+        } else {
+            console.error('⚠️ [SHIPPING] Zone is undefined! Cannot apply pricing.');
+        }
+        
+        // Combine all options for 'all' array
+        const allOptions = [
+            ...homeDelivery,
+            ...servicePoint,
+            ...parcelLocker,
+            ...mailbox
+        ];
+        
+        // Ensure all options have zone and pricing applied
+        if (!zone) {
+            console.error('❌ [SHIPPING] Zone is undefined! Cannot apply pricing. Country:', recipientAddress.country);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to determine shipping zone',
+                details: `Unable to determine zone for country: ${recipientAddress.country}`
+            });
+        }
+        
+        // Verify pricing was applied (at least one option should have cost > 0)
+        const hasPricing = allOptions.some(opt => opt.cost > 0);
+        if (!hasPricing && allOptions.length > 0) {
+            console.error('❌ [SHIPPING] No pricing applied to options!', {
+                zone: zone,
+                optionsCount: allOptions.length,
+                sampleOption: allOptions[0]
+            });
+        }
+        
+        // Return formatted response (maintains existing structure for frontend compatibility)
         res.json({
             success: true,
             deliveryOptions: {
@@ -1004,8 +1048,9 @@ router.post('/options', async (req, res) => {
                 servicePoint: servicePoint,
                 parcelLocker: parcelLocker,
                 mailbox: mailbox,
-                all: deliveryOptions // Include all options for reference
+                all: allOptions
             },
+            zone: zone, // Include zone for frontend reference (always "SE" or "EU")
             address: {
                 country: recipientAddress.country,
                 postalCode: recipientAddress.postalCode,
@@ -1670,427 +1715,5 @@ router.get('/fraktjakt-service-points', asyncHandler(async (req, res) => {
     }
 }));
 
-// ============================================
-// Shipmondo API Integration
-// ============================================
-
-/**
- * Helper function to create Basic Auth header for Shipmondo API
- * @returns {string} Base64 encoded credentials
- */
-function getShipmondoAuthHeader() {
-    const credentials = `${SHIPMONDO_API.apiUser}:${SHIPMONDO_API.apiKey}`;
-    return `Basic ${Buffer.from(credentials).toString('base64')}`;
-}
-
-/**
- * Helper function to get shipping products from Shipmondo
- * @param {string} countryCode - Country code (e.g., 'SE', 'DK', 'NO')
- * @param {string} carrierCode - Optional carrier code filter
- * @returns {Promise<Array>} Array of shipping products
- */
-async function getShipmondoProducts(countryCode, carrierCode = null) {
-    try {
-        let url = `${SHIPMONDO_API.baseUrl}/products?country_code=${countryCode}&page=1&per_page=100`;
-        
-        if (carrierCode) {
-            url += `&carrier_code=${carrierCode}`;
-        }
-        
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                'Authorization': getShipmondoAuthHeader(),
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            }
-        });
-        
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Shipmondo API error: ${response.status} - ${errorText}`);
-        }
-        
-        const data = await response.json();
-        return Array.isArray(data) ? data : (data.data || []);
-    } catch (error) {
-        console.error('Error fetching Shipmondo products:', error);
-        throw error;
-    }
-}
-
-/**
- * Helper function to get pickup points from Shipmondo
- * @param {string} countryCode - Country code
- * @param {string} zipcode - Postal code
- * @param {string} carrierCode - Optional carrier code filter
- * @returns {Promise<Array>} Array of pickup points
- */
-async function getShipmondoPickupPoints(countryCode, zipcode, carrierCode = null) {
-    try {
-        let url = `${SHIPMONDO_API.baseUrl}/pickup_points?country_code=${countryCode}&zipcode=${zipcode}`;
-        
-        if (carrierCode) {
-            url += `&carrier_code=${carrierCode}`;
-        }
-        
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                'Authorization': getShipmondoAuthHeader(),
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            }
-        });
-        
-        if (!response.ok) {
-            // Pickup points might not be available for all carriers/locations
-            // Return empty array instead of throwing error
-            console.warn(`Shipmondo pickup points not available: ${response.status}`);
-            return [];
-        }
-        
-        const data = await response.json();
-        return Array.isArray(data) ? data : (data.data || []);
-    } catch (error) {
-        console.warn('Error fetching Shipmondo pickup points:', error);
-        return []; // Return empty array on error
-    }
-}
-
-/**
- * Helper function to get shipping rates from Shipmondo
- * @param {object} params - Rate calculation parameters
- * @returns {Promise<Array>} Array of shipping rates
- */
-async function getShipmondoRates(params) {
-    try {
-        const url = `${SHIPMONDO_API.baseUrl}/rates`;
-        
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Authorization': getShipmondoAuthHeader(),
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            },
-            body: JSON.stringify(params)
-        });
-        
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Shipmondo Rates API error: ${response.status} - ${errorText}`);
-        }
-        
-        const data = await response.json();
-        return Array.isArray(data) ? data : (data.data || []);
-    } catch (error) {
-        console.error('Error fetching Shipmondo rates:', error);
-        throw error;
-    }
-}
-
-/**
- * Helper function to format Shipmondo products/rates for frontend
- * @param {Array} products - Array of Shipmondo products
- * @param {Array} pickupPoints - Array of pickup points (optional)
- * @returns {Array} Formatted delivery options
- */
-function formatShipmondoOptions(products, pickupPoints = []) {
-    if (!Array.isArray(products) || products.length === 0) {
-        return [];
-    }
-    
-    // Create pickup points map by carrier
-    const pickupPointsByCarrier = {};
-    if (Array.isArray(pickupPoints)) {
-        pickupPoints.forEach(point => {
-            const carrier = point.carrier_code || point.carrier;
-            if (!pickupPointsByCarrier[carrier]) {
-                pickupPointsByCarrier[carrier] = [];
-            }
-            pickupPointsByCarrier[carrier].push({
-                id: point.id || point.pickup_point_id,
-                name: point.name || point.address || 'Pickup Point',
-                address: {
-                    street: point.street || point.address || '',
-                    city: point.city || '',
-                    postalCode: point.zipcode || point.postal_code || '',
-                    country: point.country_code || point.country || ''
-                },
-                distance: point.distance || null,
-                coordinate: point.latitude && point.longitude ? {
-                    latitude: point.latitude,
-                    longitude: point.longitude
-                } : null,
-                openingHours: point.opening_hours || point.hours || null
-            });
-        });
-    }
-    
-    return products.map(product => {
-        // Extract carrier name (handle both object and string)
-        let carrier = 'Unknown';
-        if (product.carrier) {
-            if (typeof product.carrier === 'object' && product.carrier !== null) {
-                carrier = product.carrier.name || product.carrier.code || product.carrier.toString() || 'Unknown';
-            } else {
-                carrier = String(product.carrier);
-            }
-        } else if (product.carrier_name) {
-            carrier = String(product.carrier_name);
-        }
-        
-        // Extract service name (handle both object and string)
-        let service = 'Standard Delivery';
-        if (product.name) {
-            service = typeof product.name === 'object' ? (product.name.name || product.name.toString() || 'Standard Delivery') : String(product.name);
-        } else if (product.service_name) {
-            service = typeof product.service_name === 'object' ? (product.service_name.name || product.service_name.toString() || 'Standard Delivery') : String(product.service_name);
-        } else if (product.product_name) {
-            service = typeof product.product_name === 'object' ? (product.product_name.name || product.product_name.toString() || 'Standard Delivery') : String(product.product_name);
-        }
-        
-        // Extract product code
-        const productCode = product.product_code || product.code || product.id || '';
-        
-        // Extract price (ensure it's a number)
-        let price = 0;
-        if (product.price !== undefined && product.price !== null) {
-            price = typeof product.price === 'object' ? parseFloat(product.price.amount || product.price.value || product.price || 0) : parseFloat(product.price || 0);
-        } else if (product.rate !== undefined && product.rate !== null) {
-            price = typeof product.rate === 'object' ? parseFloat(product.rate.amount || product.rate.value || product.rate || 0) : parseFloat(product.rate || 0);
-        } else if (product.cost !== undefined && product.cost !== null) {
-            price = typeof product.cost === 'object' ? parseFloat(product.cost.amount || product.cost.value || product.cost || 0) : parseFloat(product.cost || 0);
-        }
-        
-        // Extract delivery type
-        const deliveryType = product.delivery_type || (product.pickup_point_required ? 'pickup' : 'home');
-        
-        // Get carrier code for pickup points lookup
-        let carrierCode = null;
-        if (product.carrier_code) {
-            carrierCode = String(product.carrier_code);
-        } else if (product.carrier && typeof product.carrier === 'object') {
-            carrierCode = product.carrier.code || product.carrier.id || null;
-        } else if (product.carrier) {
-            carrierCode = String(product.carrier);
-        }
-        
-        const pickupPointsForCarrier = carrierCode ? (pickupPointsByCarrier[carrierCode] || []) : [];
-        
-        // Extract description
-        let description = '';
-        if (product.description) {
-            description = typeof product.description === 'object' ? (product.description.text || product.description.toString() || '') : String(product.description);
-        }
-        if (!description) {
-            description = `${carrier} ${service}`;
-        }
-        
-        // Extract estimated days
-        let estimatedDays = null;
-        if (product.estimated_delivery_days !== undefined && product.estimated_delivery_days !== null) {
-            estimatedDays = typeof product.estimated_delivery_days === 'object' ? (product.estimated_delivery_days.days || product.estimated_delivery_days.value || null) : (typeof product.estimated_delivery_days === 'number' ? product.estimated_delivery_days : parseInt(product.estimated_delivery_days) || null);
-        } else if (product.delivery_time !== undefined && product.delivery_time !== null) {
-            estimatedDays = typeof product.delivery_time === 'object' ? (product.delivery_time.days || product.delivery_time.value || null) : (typeof product.delivery_time === 'number' ? product.delivery_time : parseInt(product.delivery_time) || null);
-        }
-        
-        return {
-            id: `shipmondo_${productCode || product.id || Math.random().toString(36).substr(2, 9)}`,
-            carrier: String(carrier), // Ensure it's always a string
-            service: String(service), // Ensure it's always a string
-            name: `${carrier} - ${service}`, // Ensure it's always a string
-            description: String(description), // Ensure it's always a string
-            productCode: String(productCode), // Ensure it's always a string
-            price: Number(price), // Ensure it's always a number
-            currency: String(product.currency || 'SEK'), // Ensure it's always a string
-            deliveryType: String(deliveryType), // Ensure it's always a string
-            estimatedDays: estimatedDays !== null ? Number(estimatedDays) : null, // Ensure it's a number or null
-            trackingEnabled: product.tracking_available !== false,
-            pickupPoints: deliveryType === 'pickup' ? pickupPointsForCarrier : [],
-            type: 'shipmondo',
-            originalData: product
-        };
-    });
-}
-
-// POST /api/shipping/shipmondo-options - Get Shipmondo delivery options
-router.post('/shipmondo-options', asyncHandler(async (req, res) => {
-    try {
-        const { country, postalCode, street, city, weight, length, width, height } = req.body;
-        
-        // Validate required fields
-        if (!country || !postalCode || !street) {
-            return res.status(400).json({
-                success: false,
-                error: 'Missing required fields: country, postalCode, and street are required'
-            });
-        }
-        
-        // Check if Shipmondo credentials are configured
-        if (!SHIPMONDO_API.apiUser || !SHIPMONDO_API.apiKey) {
-            return res.status(500).json({
-                success: false,
-                error: 'Shipmondo API credentials not configured. Please set SHIPMONDO_API_USER and SHIPMONDO_API_KEY environment variables.'
-            });
-        }
-        
-        // Prepare recipient address
-        const recipient = {
-            country: country.toUpperCase(),
-            postalCode: postalCode,
-            street: street,
-            city: city || ''
-        };
-        
-        // Comprehensive address validation
-        const addressValidation = validateShippingAddress(recipient);
-        if (!addressValidation.valid) {
-            return res.status(400).json(addressValidation.error);
-        }
-        
-        // Prepare parcel information (with defaults)
-        const parcel = {
-            weight: weight || 1.0, // Default 1 kg
-            length: length || 30,  // Default 30 cm
-            width: width || 20,    // Default 20 cm
-            height: height || 10   // Default 10 cm
-        };
-        
-        // Prepare warehouse address (sender)
-        const sender = {
-            name: 'PeakMode',
-            address1: WAREHOUSE_ADDRESS.streetName || FRAKTJAKT_WAREHOUSE.street,
-            city: WAREHOUSE_ADDRESS.city || FRAKTJAKT_WAREHOUSE.city,
-            zipcode: WAREHOUSE_ADDRESS.postalCode || FRAKTJAKT_WAREHOUSE.postalCode,
-            country_code: WAREHOUSE_ADDRESS.countryCode || FRAKTJAKT_WAREHOUSE.country
-        };
-        
-        // Prepare receiver address
-        const receiver = {
-            name: 'Customer',
-            address1: recipient.street,
-            city: recipient.city || '',
-            zipcode: recipient.postalCode,
-            country_code: recipient.country
-        };
-        
-        // Try to get rates first (if available)
-        let deliveryOptions = [];
-        let pickupPoints = [];
-        
-        try {
-            // Get shipping rates from Shipmondo
-            const ratesParams = {
-                sender: sender,
-                receiver: receiver,
-                parcels: [{
-                    weight: parcel.weight,
-                    length: parcel.length,
-                    width: parcel.width,
-                    height: parcel.height
-                }]
-            };
-            
-            const rates = await getShipmondoRates(ratesParams);
-            
-            if (Array.isArray(rates) && rates.length > 0) {
-                // Use rates if available
-                deliveryOptions = formatShipmondoOptions(rates, []);
-            } else {
-                // Fallback to products if rates not available
-                const products = await getShipmondoProducts(recipient.country);
-                deliveryOptions = formatShipmondoOptions(products, []);
-            }
-            
-            // Get pickup points for carriers that support them
-            if (deliveryOptions.length > 0) {
-                const carriersWithPickup = deliveryOptions
-                    .filter(opt => opt.deliveryType === 'pickup')
-                    .map(opt => opt.originalData?.carrier_code || opt.originalData?.carrier)
-                    .filter(Boolean);
-                
-                // Get pickup points for each carrier
-                const pickupPromises = carriersWithPickup.map(carrierCode =>
-                    getShipmondoPickupPoints(recipient.country, recipient.postalCode, carrierCode)
-                );
-                
-                const pickupResults = await Promise.all(pickupPromises);
-                pickupPoints = pickupResults.flat();
-                
-                // Update delivery options with pickup points
-                deliveryOptions = formatShipmondoOptions(
-                    deliveryOptions.map(opt => opt.originalData),
-                    pickupPoints
-                );
-            }
-            
-        } catch (ratesError) {
-            console.warn('Shipmondo rates API failed, trying products API:', ratesError);
-            
-            // Fallback to products API
-            try {
-                const products = await getShipmondoProducts(recipient.country);
-                deliveryOptions = formatShipmondoOptions(products, []);
-                
-                // Try to get pickup points
-                if (deliveryOptions.length > 0) {
-                    pickupPoints = await getShipmondoPickupPoints(recipient.country, recipient.postalCode);
-                    deliveryOptions = formatShipmondoOptions(
-                        deliveryOptions.map(opt => opt.originalData),
-                        pickupPoints
-                    );
-                }
-            } catch (productsError) {
-                console.error('Shipmondo products API error:', productsError);
-                throw productsError;
-            }
-        }
-        
-        if (deliveryOptions.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'No delivery options found for the provided address',
-                address: recipient
-            });
-        }
-        
-        // Return formatted response
-        res.json({
-            success: true,
-            deliveryOptions: deliveryOptions,
-            pickupPoints: pickupPoints,
-            address: {
-                country: recipient.country,
-                postalCode: recipient.postalCode,
-                street: recipient.street,
-                city: recipient.city || null
-            },
-            warehouse: {
-                country: sender.country_code,
-                postalCode: sender.zipcode,
-                city: sender.city,
-                street: sender.address1
-            },
-            parcel: parcel,
-            currency: 'SEK',
-            timestamp: new Date().toISOString()
-        });
-        
-    } catch (error) {
-        console.error('Shipmondo delivery options error:', error);
-        console.error('Error stack:', error.stack);
-        console.error('Request body:', req.body);
-        
-        // Return proper error response
-        res.status(500).json({
-            success: false,
-            error: 'Failed to get delivery options from Shipmondo',
-            details: error.message,
-            status: 500
-        });
-    }
-}));
 
 module.exports = router;

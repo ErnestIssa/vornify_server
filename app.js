@@ -12,6 +12,8 @@ const emailTestRoutes = require('./routes/emailTest');
 const newsletterRoutes = require('./routes/newsletter');
 const authRoutes = require('./routes/auth');
 const emailStatsRoutes = require('./routes/emailStats');
+const emailVerificationRoutes = require('./routes/emailVerification');
+const emailVerificationRoutes = require('./routes/emailVerification');
 const supportRoutes = require('./routes/support');
 const cartRoutes = require('./routes/cart');
 const productRoutes = require('./routes/products');
@@ -217,6 +219,9 @@ app.use('/api/email-test', emailTestRoutes);
 app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
+
+const emailVerificationRoutes = require('./routes/emailVerification');
+app.use('/api/email/verify', emailVerificationRoutes); // Email verification and testing
 app.use('/api/support', supportRoutes); // Support/contact messages
 app.use('/api/cart', cartRoutes); // Cart management
 app.use('/api/products', productRoutes); // Product management

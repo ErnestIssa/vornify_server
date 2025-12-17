@@ -279,6 +279,53 @@ router.post('/create', async (req, res) => {
             total: orderData.total || orderData.totals?.total
         });
         
+        // SECURITY: Validate and recalculate shipping cost server-side
+        const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
+        const shippingAddress = orderData.shippingAddress || orderData.customer;
+        const shippingMethod = orderData.shippingMethod;
+        
+        if (shippingAddress && shippingMethod) {
+            const country = shippingAddress.country || shippingAddress.countryCode;
+            if (country) {
+                const zone = getShippingZone(country.toUpperCase());
+                if (zone) {
+                    // Recalculate correct shipping cost based on zone and method type
+                    const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
+                    const correctShippingCost = validatedMethod.cost || 0;
+                    const providedShippingCost = orderData.shippingCost || orderData.totals?.shipping || 0;
+                    
+                    // Log price mismatch for security monitoring
+                    if (Math.abs(providedShippingCost - correctShippingCost) > 0.01) {
+                        console.warn('⚠️ [SECURITY] Shipping cost mismatch detected:', {
+                            orderId: 'pending',
+                            provided: providedShippingCost,
+                            correct: correctShippingCost,
+                            zone: zone,
+                            methodType: shippingMethod.type || shippingMethod.id,
+                            country: country
+                        });
+                    }
+                    
+                    // Use server-calculated price (secure, cannot be manipulated)
+                    orderData.shippingCost = correctShippingCost;
+                    if (orderData.totals) {
+                        orderData.totals.shipping = correctShippingCost;
+                    }
+                    
+                    // Update shipping method with correct cost
+                    if (orderData.shippingMethod) {
+                        orderData.shippingMethod.cost = correctShippingCost;
+                    }
+                    
+                    console.log('✅ [SECURITY] Shipping cost validated:', {
+                        zone: zone,
+                        correctCost: correctShippingCost,
+                        methodType: shippingMethod.type || shippingMethod.id
+                    });
+                }
+            }
+        }
+        
         // Generate unique Order ID with timeout protection
         console.log('📦 [ORDER CREATE] Generating unique order ID...');
         const orderId = await Promise.race([
