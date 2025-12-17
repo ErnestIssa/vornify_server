@@ -132,10 +132,14 @@ router.post('/order-confirmation', async (req, res) => {
             });
         }
 
+        // Get language from orderDetails if provided
+        const language = orderDetails.language || 'en';
+
         const result = await emailService.sendOrderConfirmationEmail(
             to,
             name,
-            orderDetails
+            orderDetails,
+            language
         );
 
         if (result.success) {
@@ -654,17 +658,39 @@ router.post('/support-confirmation', async (req, res) => {
 
 /**
  * GET /api/email/verify
- * Verify SendGrid connection
+ * Verify SendGrid connection and configuration
  */
 router.get('/verify', async (req, res) => {
     try {
+        const apiKeyConfigured = !!process.env.SENDGRID_API_KEY;
+        const fromEmail = process.env.EMAIL_FROM || 'support@peakmode.se';
+        
+        // Check if template IDs are configured
+        const orderConfirmationTemplate = process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_EN;
+        const newsletterTemplate = process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID;
+        
         const isConnected = await emailService.verifyConnection();
         
         return res.status(200).json({
-            success: isConnected,
-            message: isConnected 
+            success: isConnected && apiKeyConfigured,
+            configured: {
+                apiKey: apiKeyConfigured,
+                fromEmail: fromEmail,
+                orderConfirmationTemplate: !!orderConfirmationTemplate,
+                newsletterTemplate: !!newsletterTemplate
+            },
+            templateIds: {
+                orderConfirmation: orderConfirmationTemplate ? orderConfirmationTemplate.substring(0, 20) + '...' : 'Not configured',
+                newsletter: newsletterTemplate ? newsletterTemplate.substring(0, 20) + '...' : 'Not configured'
+            },
+            message: isConnected && apiKeyConfigured
                 ? 'SendGrid API is properly configured' 
-                : 'SendGrid API configuration failed'
+                : 'SendGrid API configuration issues detected. Please check environment variables.',
+            warnings: [
+                !apiKeyConfigured ? 'SENDGRID_API_KEY is not set' : null,
+                !orderConfirmationTemplate ? 'SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID is not set' : null,
+                !newsletterTemplate ? 'SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID is not set' : null
+            ].filter(Boolean)
         });
 
     } catch (error) {

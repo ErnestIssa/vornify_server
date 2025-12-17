@@ -91,14 +91,30 @@ router.post('/subscribe', async (req, res) => {
         }
 
         // Send welcome email with discount code
-        const emailResult = await emailService.sendNewsletterWelcomeEmail(
-            subscriberData.email,
-            subscriberData.name,
-            subscriberData.discountCode
-        );
-        
-        if (!emailResult.success) {
-            console.error('Failed to send welcome email:', emailResult.error);
+        let emailResult = { success: false, error: 'Email not sent' };
+        try {
+            emailResult = await emailService.sendNewsletterWelcomeEmail(
+                subscriberData.email,
+                subscriberData.name || 'Peak Mode Member',
+                subscriberData.discountCode
+            );
+            
+            if (!emailResult.success) {
+                console.error('❌ Failed to send newsletter welcome email:', {
+                    email: subscriberData.email,
+                    error: emailResult.error,
+                    details: emailResult.details
+                });
+            } else {
+                console.log(`✅ Newsletter welcome email sent to ${subscriberData.email}`);
+            }
+        } catch (emailError) {
+            console.error('❌ Exception sending newsletter welcome email:', emailError);
+            emailResult = {
+                success: false,
+                error: emailError.message || 'Failed to send email',
+                details: emailError
+            };
         }
 
         res.json({

@@ -31,12 +31,26 @@ class EmailService {
      */
     async sendCustomEmail(to, subject, templateId, dynamicData) {
         try {
+            // Check if SendGrid API key is configured
+            if (!process.env.SENDGRID_API_KEY) {
+                const errorMsg = 'SENDGRID_API_KEY is not configured in environment variables';
+                console.error('❌ SendGrid Error:', errorMsg);
+                return {
+                    success: false,
+                    error: 'Email service not configured',
+                    details: errorMsg
+                };
+            }
+
             if (!to) {
                 throw new Error('Recipient email address is required');
             }
 
-            if (!templateId) {
-                throw new Error('Template ID is required');
+            if (!templateId || templateId.startsWith('d-') && !templateId.includes(process.env.SENDGRID_API_KEY?.substring(0, 5))) {
+                // Warn if using placeholder template ID
+                if (templateId.startsWith('d-') && templateId.includes('template_id')) {
+                    console.warn(`⚠️ Warning: Using placeholder template ID: ${templateId}. Please set proper SendGrid template ID in environment variables.`);
+                }
             }
 
             const msg = {
@@ -51,24 +65,54 @@ class EmailService {
                 msg.subject = subject;
             }
 
+            console.log(`📧 Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
+            
             const response = await sgMail.send(msg);
             
-            console.log(`✅ Email sent successfully to ${to}`);
+            console.log(`✅ Email sent successfully to ${to}`, {
+                messageId: response[0]?.headers?.['x-message-id'],
+                statusCode: response[0]?.statusCode
+            });
             
             return {
                 success: true,
                 message: 'Email sent successfully',
-                messageId: response[0].headers['x-message-id'],
+                messageId: response[0]?.headers?.['x-message-id'],
                 timestamp: new Date().toISOString()
             };
 
         } catch (error) {
-            console.error('❌ SendGrid Error:', error.response?.body || error.message);
+            const errorDetails = error.response?.body || error.message;
+            console.error('❌ SendGrid Error Details:', {
+                message: error.message,
+                code: error.code,
+                response: error.response?.body,
+                statusCode: error.response?.statusCode,
+                to: to,
+                templateId: templateId
+            });
+            
+            // Provide more helpful error messages
+            let userFriendlyError = 'Failed to send email';
+            if (error.response?.body?.errors) {
+                const firstError = error.response.body.errors[0];
+                userFriendlyError = firstError.message || userFriendlyError;
+                
+                // Handle specific SendGrid errors
+                if (firstError.field === 'template_id') {
+                    userFriendlyError = 'Invalid email template configuration. Please contact support.';
+                } else if (error.response.statusCode === 401) {
+                    userFriendlyError = 'Email service authentication failed. Please check API key configuration.';
+                } else if (error.response.statusCode === 403) {
+                    userFriendlyError = 'Email service authorization failed. Please check API permissions.';
+                }
+            }
             
             return {
                 success: false,
-                error: 'Failed to send email',
-                details: error.response?.body?.errors || error.message
+                error: userFriendlyError,
+                details: errorDetails,
+                timestamp: new Date().toISOString()
             };
         }
     }
