@@ -43,18 +43,31 @@ router.post('/subscribe', async (req, res) => {
             const subscribedDate = new Date(subscriber.subscribedAt);
             const daysSince = (Date.now() - subscribedDate.getTime()) / (1000 * 60 * 60 * 24);
             const codeExpired = daysSince > 14;
+            const daysRemaining = codeExpired ? 0 : Math.ceil(14 - daysSince);
             
-            console.log(`✅ Email already subscribed: ${normalizedEmail}, returning existing code: ${subscriber.discountCode}`);
+            console.log(`✅ [NEWSLETTER] Email already subscribed: ${normalizedEmail}, returning existing code: ${subscriber.discountCode}`);
             
+            // Return consistent structure with all fields
             return res.json({
                 success: true,
-                message: "You're already subscribed! Here's your discount code.",
-                discountCode: subscriber.discountCode,
-                isUsed: subscriber.isUsed || false,
-                expired: codeExpired,
-                alreadySubscribed: true,
-                expiresAt: subscriber.expiresAt,
-                daysRemaining: codeExpired ? 0 : Math.ceil(14 - daysSince)
+                message: "You're already a Peak Mode member! Here's your discount code.",
+                data: {
+                    email: subscriber.email,
+                    name: subscriber.name || name || '',
+                    discountCode: subscriber.discountCode,
+                    isNewSubscriber: false,
+                    alreadySubscribed: true,
+                    isUsed: subscriber.isUsed || false,
+                    expired: codeExpired,
+                    daysRemaining: daysRemaining,
+                    expiresAt: subscriber.expiresAt,
+                    subscribedAt: subscriber.subscribedAt,
+                    status: subscriber.status || 'active',
+                    // Additional info for frontend
+                    subscriptionStatus: 'existing',
+                    codeStatus: codeExpired ? 'expired' : (subscriber.isUsed ? 'used' : 'active'),
+                    messageType: 'already_subscribed' // For frontend to show different UI
+                }
             });
         }
 
@@ -143,20 +156,30 @@ router.post('/subscribe', async (req, res) => {
             };
         }
 
+        // Calculate days remaining for new subscriber
+        const daysRemaining = 14; // New codes are valid for 14 days
+        
         res.json({
             success: true,
-            message: 'Successfully subscribed to newsletter',
+            message: 'Welcome to Peak Mode! Here\'s your 10% discount code.',
             data: {
                 email: subscriberData.email,
                 name: subscriberData.name,
                 discountCode: subscriberData.discountCode,
-                isNewSubscriber: isNewSubscriber,
-                alreadySubscribed: !isNewSubscriber,
+                isNewSubscriber: true,
+                alreadySubscribed: false,
                 isUsed: subscriberData.isUsed || false,
-                expired: subscriberData.expired || false,
-                daysRemaining: subscriberData.daysRemaining || null,
+                expired: false,
+                daysRemaining: daysRemaining,
+                expiresAt: subscriberData.expiresAt,
+                subscribedAt: subscriberData.subscribedAt,
+                status: subscriberData.status || 'active',
                 emailSent: emailSent, // Include email sending status
-                emailError: emailSent ? null : emailResult.error // Include error if email failed
+                emailError: emailSent ? null : emailResult.error, // Include error if email failed
+                // Additional info for frontend
+                subscriptionStatus: 'new',
+                codeStatus: 'active',
+                messageType: 'new_subscription' // For frontend to show different UI
             }
         });
 
