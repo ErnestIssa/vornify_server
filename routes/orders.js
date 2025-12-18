@@ -524,76 +524,12 @@ router.post('/create', async (req, res) => {
                         // Don't fail - this is background processing
             }
 
-                    // Send order confirmation email (background)
-                    if (!order.emailSent && order.customer?.email) {
-                        console.log('📦 [ORDER CREATE] Background: Sending confirmation email to:', order.customer.email);
-                        
-                        // Verify SendGrid is configured
-                        const isConfigured = await emailService.verifyConnection();
-                        if (!isConfigured) {
-                            console.error('❌ [ORDER CREATE] Background: SendGrid is not properly configured');
-                        } else {
-                            try {
-                                const customerName = order.customer.name || 
-                                                   `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
-                                                   order.customerName ||
-                                                   'Valued Customer';
-                                
-                                // Get language from order (defaults to 'en')
-                                const orderLanguage = order.language || 'en';
-                                
-                                const emailResult = await Promise.race([
-                                    emailService.sendOrderConfirmationEmail(
-                                        order.customer.email,
-                                        customerName,
-                                        order,
-                                        orderLanguage
-                                    ),
-                                    new Promise((_, reject) => 
-                                        setTimeout(() => reject(new Error('Email send timeout')), 20000)
-                                    )
-                                ]);
-                                
-                                if (emailResult && emailResult.success) {
-                                    // Mark email as sent
-                                    await db.executeOperation({
-                                        database_name: 'peakmode',
-                                        collection_name: 'orders',
-                                        command: '--update',
-                                        data: {
-                                            filter: { orderId },
-                                            update: { emailSent: true }
-                                        }
-                                    });
-                                    
-                                    console.log(`✅ [ORDER CREATE] Background: Order confirmation email sent to ${order.customer.email}`, {
-                                        messageId: emailResult.messageId,
-                                        timestamp: emailResult.timestamp
-                                    });
-                                } else {
-                                    console.error('❌ [ORDER CREATE] Background: Email sending returned failure:', {
-                                        email: order.customer.email,
-                                        error: emailResult?.error,
-                                        details: emailResult?.details
-                                    });
-                                }
-                            } catch (emailError) {
-                                console.error('❌ [ORDER CREATE] Background: Failed to send order confirmation email:', {
-                                    email: order.customer.email,
-                                    error: emailError.message,
-                                    stack: emailError.stack,
-                                    details: emailError
-                                });
-                                // Don't fail - this is background processing
-                            }
-                        }
-                    } else {
-                        if (order.emailSent) {
-                            console.log('📦 [ORDER CREATE] Background: Email already sent, skipping');
-                        } else if (!order.customer?.email) {
-                            console.warn('⚠️ [ORDER CREATE] Background: No customer email, cannot send confirmation');
-                        }
-                    }
+                    // CRITICAL: DO NOT send order confirmation email here!
+                    // Order confirmation emails should ONLY be sent AFTER payment is confirmed
+                    // This prevents sending confirmation emails for unpaid orders
+                    // Email will be sent in payment webhook handler (handlePaymentIntentSucceeded)
+                    console.log('📦 [ORDER CREATE] Background: Order created. Waiting for payment confirmation before sending email.');
+                    console.log('📦 [ORDER CREATE] Background: Email will be sent when payment is confirmed via Stripe webhook.');
                     
                     const totalTime = Date.now() - startTime;
                     console.log(`📦 [ORDER CREATE] Background operations completed in ${totalTime}ms total`);

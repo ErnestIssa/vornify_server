@@ -305,9 +305,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             }
         });
 
-        // Send order confirmation email if not already sent
+        // CRITICAL: Only send order confirmation email AFTER payment is confirmed
+        // This ensures customers only receive confirmation for paid orders
         if (!order.emailSent && order.customer?.email) {
             try {
+                // Verify payment status before sending email
+                if (order.paymentStatus !== 'succeeded') {
+                    console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} payment status is not 'succeeded' (${order.paymentStatus}). Skipping email.`);
+                    return;
+                }
+                
                 const customerName = order.customer.name || 
                                    `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
                                    order.customerName ||
@@ -315,27 +322,51 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
                 
                 const orderLanguage = order.language || 'en';
                 
-                await emailService.sendOrderConfirmationEmail(
+                console.log(`📧 [PAYMENT WEBHOOK] Payment confirmed for order ${orderId}. Sending confirmation email to ${order.customer.email}`);
+                
+                const emailResult = await emailService.sendOrderConfirmationEmail(
                     order.customer.email,
                     customerName,
                     order,
                     orderLanguage
                 );
                 
-                // Mark email as sent
-                await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'orders',
-                    command: '--update',
-                    data: {
-                        filter: { orderId },
-                        update: { emailSent: true }
-                    }
-                });
-                
-                console.log(`📧 [PAYMENT WEBHOOK] Order confirmation email sent to ${order.customer.email}`);
+                if (emailResult && emailResult.success) {
+                    // Mark email as sent
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId },
+                            update: { emailSent: true }
+                        }
+                    });
+                    
+                    console.log(`✅ [PAYMENT WEBHOOK] Order confirmation email sent to ${order.customer.email}`, {
+                        messageId: emailResult.messageId,
+                        timestamp: emailResult.timestamp,
+                        currency: order.currency || 'SEK'
+                    });
+                } else {
+                    console.error('❌ [PAYMENT WEBHOOK] Failed to send order confirmation email:', {
+                        email: order.customer.email,
+                        error: emailResult?.error,
+                        details: emailResult?.details
+                    });
+                }
             } catch (emailError) {
-                console.error('❌ [PAYMENT WEBHOOK] Failed to send order confirmation email:', emailError);
+                console.error('❌ [PAYMENT WEBHOOK] Exception sending order confirmation email:', {
+                    email: order.customer.email,
+                    error: emailError.message,
+                    stack: emailError.stack
+                });
+            }
+        } else {
+            if (order.emailSent) {
+                console.log(`📧 [PAYMENT WEBHOOK] Order ${orderId} confirmation email already sent, skipping`);
+            } else if (!order.customer?.email) {
+                console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} has no customer email, cannot send confirmation`);
             }
         }
 

@@ -174,22 +174,32 @@ class EmailService {
                               orderDetails.total || 
                               (orderDetails.items ? orderDetails.items.reduce((sum, item) => sum + (item.price * item.quantity), 0) : 0);
             
-            // Get currency symbol
-            const currency = orderDetails.currency || 'EUR';
-            const currencySymbols = {
-                'EUR': '€',
-                'SEK': 'kr',
-                'DKK': 'kr',
-                'PLN': 'zł',
-                'CZK': 'Kč',
-                'HUF': 'Ft',
-                'BGN': 'лв',
-                'RON': 'lei'
-            };
-            const currencySymbol = currencySymbols[currency] || currency;
+            // Get currency from order (CRITICAL: Use order's actual currency, not default)
+            // Check multiple possible currency fields
+            const currency = (orderDetails.currency || 
+                             orderDetails.baseCurrency || 
+                             'SEK').toUpperCase(); // Default to SEK (Peak Mode's base currency)
             
-            // Format order items as structured data (not HTML)
-            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            // Currency symbols and display formats
+            const currencyFormats = {
+                'SEK': { symbol: 'SEK', display: 'SEK' }, // Use "SEK" not "kr" for clarity
+                'EUR': { symbol: '€', display: 'EUR' },
+                'DKK': { symbol: 'kr', display: 'DKK' },
+                'NOK': { symbol: 'kr', display: 'NOK' },
+                'PLN': { symbol: 'zł', display: 'PLN' },
+                'CZK': { symbol: 'Kč', display: 'CZK' },
+                'HUF': { symbol: 'Ft', display: 'HUF' },
+                'BGN': { symbol: 'лв', display: 'BGN' },
+                'RON': { symbol: 'lei', display: 'RON' },
+                'USD': { symbol: '$', display: 'USD' },
+                'GBP': { symbol: '£', display: 'GBP' }
+            };
+            
+            const currencyFormat = currencyFormats[currency] || { symbol: currency, display: currency };
+            const currencySymbol = currencyFormat.display; // Use full currency code for clarity
+            
+            // Format order items as structured data (not HTML) - pass currency to ensure correct formatting
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], currency);
             
             // Format address as plain text (not HTML)
             const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress);
@@ -205,7 +215,9 @@ class EmailService {
                 customer_name: name || 'Valued Customer',
                 order_number: orderDetails.orderId || 'N/A',
                 order_date: orderDetails.orderDate || orderDetails.createdAt || new Date().toISOString(),
-                order_total: `${orderTotal} ${currencySymbol}`,
+                order_total: `${orderTotal} ${currencySymbol}`, // e.g., "92 SEK" not "92 e"
+                order_currency: currency, // Include currency code separately for template use
+                order_currency_symbol: currencyFormat.symbol, // Include symbol separately if needed
                 order_items: formattedItems, // Array of objects - template should format
                 order_items_count: formattedItems.length,
                 shipping_address: formattedAddress, // Plain text - template should format
@@ -325,7 +337,9 @@ class EmailService {
             const templateId = process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID || 'd-order_processing_template_id';
             
             // Format items and address as plain data (not HTML)
-            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            // Get currency from order
+            const orderCurrency = (orderDetails.currency || orderDetails.baseCurrency || 'SEK').toUpperCase();
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], orderCurrency);
             const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress);
             
             const dynamicData = {
@@ -333,7 +347,8 @@ class EmailService {
                 order_number: orderDetails.orderId,
                 order_items: formattedItems, // Structured data - template should format
                 order_items_count: formattedItems.length,
-                order_total: orderDetails.totals?.total || '0',
+                order_total: `${orderDetails.totals?.total || 0} ${orderCurrency}`,
+                order_currency: orderCurrency,
                 shipping_address: formattedAddress, // Plain text - template should format
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
@@ -405,13 +420,16 @@ class EmailService {
             const templateId = process.env.SENDGRID_DELIVERY_CONFIRMATION_TEMPLATE_ID || 'd-delivery_confirmation_template_id';
             
             // Format items as structured data (not HTML)
-            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            // Get currency from order
+            const orderCurrency = (orderDetails.currency || orderDetails.baseCurrency || 'SEK').toUpperCase();
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], orderCurrency);
             
             const dynamicData = {
                 customer_name: orderDetails.customer?.name || 'Valued Customer',
                 order_number: orderDetails.orderId,
                 order_items: formattedItems, // Structured data - template should format
                 order_items_count: formattedItems.length,
+                order_currency: orderCurrency,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -1165,8 +1183,26 @@ class EmailService {
      * @param {array} items - Order items array
      * @returns {array} Formatted items array (template should handle HTML formatting)
      */
-    formatOrderItemsForEmail(items) {
+    formatOrderItemsForEmail(items, currency = 'SEK') {
         if (!items || !Array.isArray(items)) return [];
+        
+        // Ensure currency is uppercase
+        const orderCurrency = (currency || 'SEK').toUpperCase();
+        
+        // Currency formats for display
+        const currencyFormats = {
+            'SEK': { symbol: 'SEK', display: 'SEK' },
+            'EUR': { symbol: '€', display: 'EUR' },
+            'DKK': { symbol: 'kr', display: 'DKK' },
+            'NOK': { symbol: 'kr', display: 'NOK' },
+            'PLN': { symbol: 'zł', display: 'PLN' },
+            'CZK': { symbol: 'Kč', display: 'CZK' },
+            'USD': { symbol: '$', display: 'USD' },
+            'GBP': { symbol: '£', display: 'GBP' }
+        };
+        
+        const currencyFormat = currencyFormats[orderCurrency] || { symbol: orderCurrency, display: orderCurrency };
+        const currencyDisplay = currencyFormat.display;
         
         // Return structured data - SendGrid template should format it
         // Template can iterate over items and format as needed
@@ -1189,9 +1225,10 @@ class EmailService {
                 price: item.price || 0,
                 total: itemTotal,
                 displayName: variant ? `${item.name} (${variant})` : item.name,
-                displayPrice: `${item.price} SEK`,
-                displayTotal: `${itemTotal} SEK`,
-                displayLine: `${item.quantity} × ${item.price} SEK = ${itemTotal} SEK`
+                displayPrice: `${item.price} ${currencyDisplay}`, // Use order's currency
+                displayTotal: `${itemTotal} ${currencyDisplay}`, // Use order's currency
+                displayLine: `${item.quantity} × ${item.price} ${currencyDisplay} = ${itemTotal} ${currencyDisplay}`,
+                currency: orderCurrency // Include currency for template
             };
         });
     }

@@ -847,7 +847,12 @@ router.post('/options', async (req, res) => {
         // Comprehensive address validation
         const addressValidation = validateShippingAddress(recipientAddress);
         if (!addressValidation.valid) {
-            return res.status(400).json(addressValidation.error);
+            const errorResponse = {
+                ...addressValidation.error,
+                errorCode: 'INVALID_ADDRESS',
+                validationError: true
+            };
+            return res.status(400).json(errorResponse);
         }
         
         // Determine shipping zone based on country (for pricing)
@@ -856,8 +861,11 @@ router.post('/options', async (req, res) => {
         if (!zone) {
             return res.status(400).json({
                 success: false,
-                error: 'Shipping not available to this country',
-                details: `Shipping is only available to Sweden (SE) and EU countries. Country code: ${recipientAddress.country}`
+                error: `Shipping is not available to ${recipientAddress.country}. We currently ship to Sweden and EU countries only.`,
+                errorCode: 'SHIPPING_UNAVAILABLE',
+                validationError: true,
+                field: 'country',
+                details: `Country code ${recipientAddress.country} is not in our shipping zones.`
             });
         }
         
@@ -1023,10 +1031,12 @@ router.post('/options', async (req, res) => {
         // Ensure all options have zone and pricing applied
         if (!zone) {
             console.error('❌ [SHIPPING] Zone is undefined! Cannot apply pricing. Country:', recipientAddress.country);
-            return res.status(500).json({
+            return res.status(400).json({
                 success: false,
-                error: 'Failed to determine shipping zone',
-                details: `Unable to determine zone for country: ${recipientAddress.country}`
+                error: 'Shipping not available to this country',
+                errorCode: 'SHIPPING_UNAVAILABLE',
+                details: `Shipping is only available to Sweden (SE) and EU countries. Country code: ${recipientAddress.country}`,
+                field: 'country'
             });
         }
         
@@ -1069,10 +1079,32 @@ router.post('/options', async (req, res) => {
         
     } catch (error) {
         console.error('Delivery options error:', error);
+        
+        // Check if it's a validation error
+        if (error.message && error.message.includes('Missing required')) {
+            return res.status(400).json({
+                success: false,
+                error: error.message,
+                errorCode: 'MISSING_REQUIRED_FIELD',
+                validationError: true
+            });
+        }
+        
+        // Check if it's an address validation error
+        if (error.message && (error.message.includes('postal code') || error.message.includes('address'))) {
+            return res.status(400).json({
+                success: false,
+                error: error.message,
+                errorCode: 'INVALID_ADDRESS',
+                validationError: true
+            });
+        }
+        
         res.status(500).json({
             success: false,
-            error: 'Failed to get delivery options',
-            details: error.message
+            error: 'Unable to fetch delivery options. Please check your address and try again.',
+            errorCode: 'SHIPPING_ERROR',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 });
