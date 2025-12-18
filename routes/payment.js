@@ -291,6 +291,10 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             updateData.status = 'processing';
         }
 
+        // Cancel any scheduled payment failure email if payment succeeded
+        const paymentFailureService = require('../services/paymentFailureService');
+        paymentFailureService.cancelScheduledEmail(orderId);
+
         await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
@@ -351,6 +355,21 @@ async function handlePaymentIntentFailed(paymentIntent) {
             return;
         }
 
+        // Get order to update
+        const findResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
+        });
+
+        if (!findResult.success || !findResult.data) {
+            console.warn(`⚠️ [PAYMENT FAILURE] Order ${orderId} not found when handling payment failure`);
+            return;
+        }
+
+        const order = findResult.data;
+
         // Update order with failed payment status
         await db.executeOperation({
             database_name: 'peakmode',
@@ -361,8 +380,10 @@ async function handlePaymentIntentFailed(paymentIntent) {
                 update: {
                     paymentStatus: 'failed',
                     paymentIntentId: paymentIntent.id,
+                    paymentFailedAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
                     timeline: [
+                        ...(order.timeline || []),
                         {
                             status: 'Payment Failed',
                             date: new Date().toISOString(),
@@ -374,7 +395,23 @@ async function handlePaymentIntentFailed(paymentIntent) {
             }
         });
 
-        console.log(`❌ Order ${orderId} payment failed via webhook`);
+        console.log(`❌ [PAYMENT FAILURE] Order ${orderId} payment failed via webhook`);
+
+        // Schedule payment failure reminder email (10 minutes)
+        const paymentFailureService = require('../services/paymentFailureService');
+        const scheduleResult = await paymentFailureService.schedulePaymentFailureEmail(
+            orderId,
+            paymentIntent.id,
+            order
+        );
+
+        if (scheduleResult.success) {
+            console.log(`⏰ [PAYMENT FAILURE] Scheduled reminder email for order ${orderId}`);
+        } else if (scheduleResult.skipped) {
+            console.log(`⏭️ [PAYMENT FAILURE] Skipped scheduling email for order ${orderId}: ${scheduleResult.reason}`);
+        } else {
+            console.error(`❌ [PAYMENT FAILURE] Failed to schedule reminder email for order ${orderId}:`, scheduleResult.error);
+        }
     } catch (error) {
         console.error('Error handling payment_intent.payment_failed:', error);
         throw error;

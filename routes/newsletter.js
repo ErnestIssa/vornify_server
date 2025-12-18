@@ -92,36 +92,72 @@ router.post('/subscribe', async (req, res) => {
 
         // Send welcome email with discount code
         let emailResult = { success: false, error: 'Email not sent' };
+        let emailSent = false;
+        
         try {
-            emailResult = await emailService.sendNewsletterWelcomeEmail(
-                subscriberData.email,
-                subscriberData.name || 'Peak Mode Member',
-                subscriberData.discountCode
-            );
+            console.log('📧 [NEWSLETTER] Attempting to send welcome email to:', subscriberData.email);
             
-            if (!emailResult.success) {
-                console.error('❌ Failed to send newsletter welcome email:', {
-                    email: subscriberData.email,
-                    error: emailResult.error,
-                    details: emailResult.details
-                });
+            // Verify SendGrid is configured
+            const isConfigured = await emailService.verifyConnection();
+            if (!isConfigured) {
+                console.error('❌ [NEWSLETTER] SendGrid is not properly configured');
+                emailResult = {
+                    success: false,
+                    error: 'Email service not configured',
+                    details: 'SENDGRID_API_KEY is missing or invalid'
+                };
             } else {
-                console.log(`✅ Newsletter welcome email sent to ${subscriberData.email}`);
+                emailResult = await emailService.sendNewsletterWelcomeEmail(
+                    subscriberData.email,
+                    subscriberData.name || 'Peak Mode Member',
+                    subscriberData.discountCode
+                );
+                
+                emailSent = emailResult.success;
+                
+                if (!emailResult.success) {
+                    console.error('❌ [NEWSLETTER] Failed to send welcome email:', {
+                        email: subscriberData.email,
+                        error: emailResult.error,
+                        details: emailResult.details,
+                        messageId: emailResult.messageId
+                    });
+                } else {
+                    console.log(`✅ [NEWSLETTER] Welcome email sent successfully to ${subscriberData.email}`, {
+                        messageId: emailResult.messageId,
+                        timestamp: emailResult.timestamp
+                    });
+                }
             }
         } catch (emailError) {
-            console.error('❌ Exception sending newsletter welcome email:', emailError);
+            console.error('❌ [NEWSLETTER] Exception sending welcome email:', {
+                email: subscriberData.email,
+                error: emailError.message,
+                stack: emailError.stack,
+                details: emailError
+            });
             emailResult = {
                 success: false,
                 error: emailError.message || 'Failed to send email',
-                details: emailError
+                details: emailError.toString()
             };
         }
 
         res.json({
             success: true,
             message: 'Successfully subscribed to newsletter',
-            discountCode: discountCode,
-            emailSent: emailResult.success
+            data: {
+                email: subscriberData.email,
+                name: subscriberData.name,
+                discountCode: subscriberData.discountCode,
+                isNewSubscriber: isNewSubscriber,
+                alreadySubscribed: !isNewSubscriber,
+                isUsed: subscriberData.isUsed || false,
+                expired: subscriberData.expired || false,
+                daysRemaining: subscriberData.daysRemaining || null,
+                emailSent: emailSent, // Include email sending status
+                emailError: emailSent ? null : emailResult.error // Include error if email failed
+            }
         });
 
     } catch (error) {

@@ -13,6 +13,9 @@ const newsletterRoutes = require('./routes/newsletter');
 const authRoutes = require('./routes/auth');
 const emailStatsRoutes = require('./routes/emailStats');
 const emailVerificationRoutes = require('./routes/emailVerification');
+const emailDiagnosticsRoutes = require('./routes/emailDiagnostics');
+const abandonedCartRoutes = require('./routes/abandonedCart');
+const paymentFailureRoutes = require('./routes/paymentFailure');
 const supportRoutes = require('./routes/support');
 const cartRoutes = require('./routes/cart');
 const productRoutes = require('./routes/products');
@@ -22,6 +25,8 @@ const customerRoutes = require('./routes/customers');
 const reviewRoutes = require('./routes/reviews');
 const currencyRoutes = require('./routes/currency');
 const errorHandler = require('./middleware/errorHandler');
+const abandonedCartService = require('./services/abandonedCartService');
+const paymentFailureService = require('./services/paymentFailureService');
 require('dotenv').config();
 
 const app = express();
@@ -219,6 +224,9 @@ app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
 app.use('/api/email/verify', emailVerificationRoutes); // Email verification and testing
+app.use('/api/email', emailDiagnosticsRoutes); // Email diagnostics
+app.use('/api/abandoned-cart', abandonedCartRoutes); // Abandoned cart processing
+app.use('/api/payment-failure', paymentFailureRoutes); // Payment failure email processing
 app.use('/api/support', supportRoutes); // Support/contact messages
 app.use('/api/cart', cartRoutes); // Cart management
 app.use('/api/products', productRoutes); // Product management
@@ -262,6 +270,41 @@ if (process.env.NODE_ENV !== 'test') {
     app.listen(port, () => {
         console.log(`Server is running on port ${port}`);
         console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+        
+        // Start abandoned cart processing (runs every 10 minutes)
+        if (process.env.ENABLE_ABANDONED_CART !== 'false') {
+            console.log('🛒 [ABANDONED CART] Service enabled - checking every 10 minutes');
+            
+            // Run immediately on startup (after 1 minute delay to let server stabilize)
+            setTimeout(() => {
+                abandonedCartService.processAbandonedCarts().catch(err => {
+                    console.error('❌ [ABANDONED CART] Initial processing error:', err);
+                });
+            }, 60000); // 1 minute delay
+            
+            // Then run every 10 minutes
+            setInterval(() => {
+                abandonedCartService.processAbandonedCarts().catch(err => {
+                    console.error('❌ [ABANDONED CART] Scheduled processing error:', err);
+                });
+            }, 10 * 60 * 1000); // 10 minutes
+        } else {
+            console.log('🛒 [ABANDONED CART] Service disabled (ENABLE_ABANDONED_CART=false)');
+        }
+        
+        // Process pending payment failure emails on startup (for recovery after restart)
+        if (process.env.ENABLE_PAYMENT_FAILURE_EMAIL !== 'false') {
+            console.log('💳 [PAYMENT FAILURE] Service enabled');
+            
+            // Process pending emails after 2 minutes (let server stabilize)
+            setTimeout(() => {
+                paymentFailureService.processPendingPaymentFailures().catch(err => {
+                    console.error('❌ [PAYMENT FAILURE] Initial processing error:', err);
+                });
+            }, 120000); // 2 minute delay
+        } else {
+            console.log('💳 [PAYMENT FAILURE] Service disabled (ENABLE_PAYMENT_FAILURE_EMAIL=false)');
+        }
     });
 }
 

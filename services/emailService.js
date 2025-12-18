@@ -188,8 +188,11 @@ class EmailService {
             };
             const currencySymbol = currencySymbols[currency] || currency;
             
-            // Format order items properly
+            // Format order items as structured data (not HTML)
             const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            
+            // Format address as plain text (not HTML)
+            const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress);
             
             // Language-specific subject
             const subjects = {
@@ -203,8 +206,9 @@ class EmailService {
                 order_number: orderDetails.orderId || 'N/A',
                 order_date: orderDetails.orderDate || orderDetails.createdAt || new Date().toISOString(),
                 order_total: `${orderTotal} ${currencySymbol}`,
-                order_items: formattedItems,
-                shipping_address: this.formatAddressForEmail(orderDetails.shippingAddress),
+                order_items: formattedItems, // Array of objects - template should format
+                order_items_count: formattedItems.length,
+                shipping_address: formattedAddress, // Plain text - template should format
                 order_status_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/track-order?orderId=${orderDetails.orderId}`,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear(),
@@ -320,12 +324,17 @@ class EmailService {
         try {
             const templateId = process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID || 'd-order_processing_template_id';
             
+            // Format items and address as plain data (not HTML)
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress);
+            
             const dynamicData = {
                 customer_name: orderDetails.customer?.name || 'Valued Customer',
                 order_number: orderDetails.orderId,
-                order_items: orderDetails.items || [],
+                order_items: formattedItems, // Structured data - template should format
+                order_items_count: formattedItems.length,
                 order_total: orderDetails.totals?.total || '0',
-                shipping_address: this.formatAddress(orderDetails.shippingAddress),
+                shipping_address: formattedAddress, // Plain text - template should format
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -395,10 +404,14 @@ class EmailService {
         try {
             const templateId = process.env.SENDGRID_DELIVERY_CONFIRMATION_TEMPLATE_ID || 'd-delivery_confirmation_template_id';
             
+            // Format items as structured data (not HTML)
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || []);
+            
             const dynamicData = {
                 customer_name: orderDetails.customer?.name || 'Valued Customer',
                 order_number: orderDetails.orderId,
-                order_items: orderDetails.items || [],
+                order_items: formattedItems, // Structured data - template should format
+                order_items_count: formattedItems.length,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -550,6 +563,90 @@ class EmailService {
             'imported': 'Imported'
         };
         return sources[source] || source;
+    }
+
+    /**
+     * Send abandoned cart email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {array} cartItems - Array of cart items
+     * @param {string} cartTotal - Formatted cart total (e.g., "897 SEK")
+     * @param {string} cartUrl - URL to recover cart
+     * @returns {Promise<object>} Result object
+     */
+    async sendAbandonedCartEmail(to, name, cartItems, cartTotal, cartUrl) {
+        try {
+            const templateId = process.env.SENDGRID_ABANDONED_CART_TEMPLATE_ID || 'd-89a7f48daa654d1b8b04da1d1a7eda58';
+            
+            // Format cart items as structured data (no HTML)
+            const formattedItems = (cartItems || []).map(item => ({
+                name: item.name || 'Product',
+                quantity: item.quantity || 1,
+                displayPrice: `${(item.price || 0) * (item.quantity || 1)} SEK`
+            }));
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                cart_items: formattedItems, // Array of objects - template should format
+                cart_total: cartTotal || '0 SEK',
+                cart_url: cartUrl || 'https://peakmode.se/cart',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Complete Your Peak Mode Order',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Abandoned cart email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send abandoned cart email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send payment failed email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {string} orderNumber - Order reference number
+     * @param {string} paymentRetryUrl - URL to retry payment
+     * @returns {Promise<object>} Result object
+     */
+    async sendPaymentFailedEmail(to, name, orderNumber, paymentRetryUrl) {
+        try {
+            const templateId = process.env.SENDGRID_PAYMENT_FAILED_TEMPLATE_ID || 'd-b57316a019694027b0a303c1d056bc1c';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                order_number: orderNumber || 'N/A',
+                payment_retry_url: paymentRetryUrl || 'https://peakmode.se/checkout',
+                support_email: 'support@peakmode.se',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Payment Failed - Complete Your Peak Mode Order',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Payment failed email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send payment failed email',
+                details: error.message
+            };
+        }
     }
 
     /**
@@ -1025,23 +1122,28 @@ class EmailService {
     }
 
     /**
-     * Helper method to format address for email templates
+     * Helper method to format address for email templates (plain text)
      * @param {object} address - Address object
-     * @returns {string} Formatted address string
+     * @returns {string} Formatted address as plain text
      */
     formatAddress(address) {
         if (!address) return 'No address provided';
         
-        return `${address.name || ''}<br>
-${address.street || ''}<br>
-${address.postalCode || ''} ${address.city || ''}<br>
-${address.country || ''}`.trim();
+        // Return plain text - SendGrid template should format it
+        const name = address.name || '';
+        const street = address.street || '';
+        const postalCode = address.postalCode || '';
+        const city = address.city || '';
+        const country = address.country || '';
+        
+        return `${name}\n${street}\n${postalCode} ${city}\n${country}`.trim();
     }
 
     /**
-     * Helper method to format address for email templates (HTML-safe)
+     * Helper method to format address for email templates (plain text)
+     * SendGrid templates should handle formatting - we provide plain text
      * @param {object} address - Address object
-     * @returns {string} Formatted address string with proper HTML breaks
+     * @returns {string} Formatted address as plain text (newlines for template processing)
      */
     formatAddressForEmail(address) {
         if (!address) return 'No address provided';
@@ -1052,41 +1154,46 @@ ${address.country || ''}`.trim();
         const city = address.city || '';
         const country = address.country || '';
         
-        return `${name}<br>${street}<br>${postalCode} ${city}<br>${country}`;
+        // Return plain text - SendGrid template should format it
+        // If template needs HTML, it should use {{{shipping_address}}} (triple braces)
+        return `${name}\n${street}\n${postalCode} ${city}\n${country}`.trim();
     }
 
     /**
      * Helper method to format order items for email templates
+     * Returns structured data for SendGrid templates to format
      * @param {array} items - Order items array
-     * @returns {string} Formatted items HTML
+     * @returns {array} Formatted items array (template should handle HTML formatting)
      */
     formatOrderItemsForEmail(items) {
-        if (!items || !Array.isArray(items)) return '<p>No items found</p>';
+        if (!items || !Array.isArray(items)) return [];
         
-        let itemsHtml = '';
-        items.forEach(item => {
+        // Return structured data - SendGrid template should format it
+        // Template can iterate over items and format as needed
+        return items.map(item => {
             let variant = '';
             if (item.size && item.color) {
-                variant = ` (${item.color}, ${item.size})`;
+                variant = `${item.color}, ${item.size}`;
             } else if (item.size) {
-                variant = ` (${item.size})`;
+                variant = item.size;
             } else if (item.color) {
-                variant = ` (${item.color})`;
+                variant = item.color;
             }
             
             const itemTotal = item.price * item.quantity;
             
-            itemsHtml += `
-                <div class="item" style="margin-bottom: 10px; padding: 10px; border-bottom: 1px solid #eee;">
-                    <div class="item-name" style="font-weight: bold;">${item.name}${variant}</div>
-                    <div class="item-details" style="color: #666;">
-                        Quantity: ${item.quantity} × ${item.price} SEK = ${itemTotal} SEK
-                    </div>
-                </div>
-            `;
+            return {
+                name: item.name || 'Product',
+                variant: variant,
+                quantity: item.quantity || 1,
+                price: item.price || 0,
+                total: itemTotal,
+                displayName: variant ? `${item.name} (${variant})` : item.name,
+                displayPrice: `${item.price} SEK`,
+                displayTotal: `${itemTotal} SEK`,
+                displayLine: `${item.quantity} × ${item.price} SEK = ${itemTotal} SEK`
+            };
         });
-        
-        return itemsHtml;
     }
 
     /**
@@ -1151,17 +1258,32 @@ ${address.country || ''}`.trim();
      */
     async verifyConnection() {
         try {
-            // SendGrid doesn't have a built-in verify method like nodemailer
-            // We can check if the API key is set
+            // Check if the API key is set
             if (!process.env.SENDGRID_API_KEY) {
-                console.error('❌ SENDGRID_API_KEY not configured');
+                console.error('❌ [EMAIL SERVICE] SENDGRID_API_KEY not configured in environment variables');
                 return false;
             }
             
-            console.log('✅ SendGrid API key is configured');
+            // Check if API key is valid format (SendGrid API keys start with 'SG.')
+            const apiKey = process.env.SENDGRID_API_KEY.trim();
+            if (!apiKey.startsWith('SG.')) {
+                console.warn('⚠️ [EMAIL SERVICE] SENDGRID_API_KEY format may be invalid (should start with "SG.")');
+            }
+            
+            // Check if from email is configured
+            if (!this.fromEmail) {
+                console.warn('⚠️ [EMAIL SERVICE] EMAIL_FROM not configured, using default: support@peakmode.se');
+            }
+            
+            console.log('✅ [EMAIL SERVICE] SendGrid API key is configured', {
+                apiKeyLength: apiKey.length,
+                fromEmail: this.fromEmail,
+                hasApiKey: !!apiKey
+            });
+            
             return true;
         } catch (error) {
-            console.error('❌ SendGrid verification error:', error);
+            console.error('❌ [EMAIL SERVICE] SendGrid verification error:', error);
             return false;
         }
     }
