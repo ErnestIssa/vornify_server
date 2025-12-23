@@ -59,6 +59,28 @@ function getZonePricing(zone) {
 }
 
 /**
+ * Get all valid prices for a zone (for validation)
+ * @param {string} zone - Shipping zone ('SE' or 'EU')
+ * @returns {array} Array of valid prices for this zone
+ */
+function getValidZonePrices(zone) {
+    const pricing = getZonePricing(zone);
+    if (!pricing) return [];
+    return Object.values(pricing);
+}
+
+/**
+ * Get all valid prices for a zone (for validation)
+ * @param {string} zone - Shipping zone ('SE' or 'EU')
+ * @returns {array} Array of valid prices for this zone
+ */
+function getValidZonePrices(zone) {
+    const pricing = getZonePricing(zone);
+    if (!pricing) return [];
+    return Object.values(pricing);
+}
+
+/**
  * Apply zone-based pricing to a delivery option based on its type
  * @param {object} option - Delivery option object
  * @param {string} zone - Shipping zone ('SE' or 'EU')
@@ -101,10 +123,11 @@ function applyZonePricingToOption(option, zone) {
         cost = pricing.parcelLocker;
         pricingReason = 'parcel_locker (type match)';
     }
-    // Mailbox / door
+    // Mailbox / door - check multiple type variations
     else if (optionType === 'mailbox' || 
              optionType === 'express-mailbox' ||
-             optionType === 'express_mailbox') {
+             optionType === 'express_mailbox' ||
+             optionType === 'mailbox_door') {
         cost = pricing.mailbox;
         pricingReason = 'mailbox (type match)';
     }
@@ -269,6 +292,7 @@ function getFixedDeliveryOptions(countryCode) {
 module.exports = {
     getShippingZone,
     getZonePricing,
+    getValidZonePrices,
     getFixedDeliveryOptions,
     applyZonePricingToOption,
     applyZonePricingToOptions,

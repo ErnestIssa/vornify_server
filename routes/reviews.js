@@ -196,9 +196,18 @@ router.get('/', async (req, res) => {
             const endIndex = startIndex + parseInt(limit);
             const paginatedReviews = reviews.slice(startIndex, endIndex);
 
+            // Ensure all reviews have location and images fields (even if empty)
+            const normalizedReviews = paginatedReviews.map(review => ({
+                ...review,
+                location: review.location || null, // Always include location field
+                images: Array.isArray(review.images) ? review.images : (review.images ? [review.images] : []), // Always include images as array
+                // Ensure isVerified field exists (for frontend compatibility)
+                isVerified: review.verifiedPurchase || false
+            }));
+
             res.json({
                 success: true,
-                data: paginatedReviews,
+                data: normalizedReviews,
                 pagination: {
                     page: parseInt(page),
                     limit: parseInt(limit),
@@ -359,9 +368,19 @@ router.get('/:id', async (req, res) => {
         });
         
         if (result.success && result.data) {
+            // Normalize review data to ensure location and images fields are always present
+            const review = result.data;
+            const normalizedReview = {
+                ...review,
+                location: review.location || null, // Always include location field
+                images: Array.isArray(review.images) ? review.images : (review.images ? [review.images] : []), // Always include images as array
+                // Ensure isVerified field exists (for frontend compatibility)
+                isVerified: review.verifiedPurchase || false
+            };
+            
             res.json({
                 success: true,
-                data: result.data
+                data: normalizedReview
             });
         } else {
             res.status(404).json({
@@ -545,7 +564,8 @@ router.post('/', async (req, res) => {
             ...(reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null' ? { customerId: reviewData.customerId } : {}),
             ...(reviewData.orderId ? { orderId: reviewData.orderId } : {}),
             ...(reviewData.title ? { title: reviewData.title } : {}),
-            ...(reviewData.location ? { location: reviewData.location } : {}),
+            // Always include location field (null if not provided) - frontend expects this field
+            location: reviewData.location || null,
             
             // Metadata fields
             customer: customerInfo,

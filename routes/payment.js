@@ -541,7 +541,7 @@ async function handleChargeRefunded(charge) {
  */
 router.post('/create-intent', async (req, res) => {
     try {
-        const { amount, currency, orderId, customerEmail, paymentMethod, metadata = {} } = req.body;
+        const { amount, currency, orderId, customerEmail, paymentMethod, metadata = {}, orderData } = req.body;
         
         // Detect mobile device for logging and debugging
         const userAgent = req.headers['user-agent'] || '';
@@ -569,13 +569,74 @@ router.post('/create-intent', async (req, res) => {
             });
         }
 
+        // SECURITY: Recalculate total amount including shipping if orderData is provided
+        // This ensures the payment amount matches the actual order total (subtotal + shipping + tax - discount)
+        let validatedAmount = parseFloat(amount);
+        
+        if (orderData && typeof orderData === 'object') {
+            const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
+            const shippingAddress = orderData.shippingAddress || orderData.customer;
+            const shippingMethod = orderData.shippingMethod;
+            
+            // Recalculate shipping cost server-side if shipping method is provided
+            if (shippingAddress && shippingMethod) {
+                const country = shippingAddress.country || shippingAddress.countryCode;
+                if (country) {
+                    const zone = getShippingZone(country.toUpperCase());
+                    if (zone) {
+                        const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
+                        const correctShippingCost = validatedMethod.cost || 0;
+                        
+                        // Calculate correct total from order totals
+                        const subtotal = orderData.totals?.subtotal || orderData.subtotal || 0;
+                        const tax = orderData.totals?.tax || orderData.tax || 0;
+                        const discount = orderData.totals?.discount || orderData.discount || 0;
+                        const shipping = correctShippingCost;
+                        
+                        const calculatedTotal = subtotal + tax + shipping - discount;
+                        
+                        // Compare with provided amount
+                        if (Math.abs(calculatedTotal - validatedAmount) > 0.01) {
+                            console.warn('⚠️ [PAYMENT SECURITY] Amount mismatch detected:', {
+                                provided: validatedAmount,
+                                calculated: calculatedTotal,
+                                difference: calculatedTotal - validatedAmount,
+                                subtotal: subtotal,
+                                shipping: shipping,
+                                tax: tax,
+                                discount: discount
+                            });
+                            
+                            // Use server-calculated total (secure, cannot be manipulated)
+                            validatedAmount = calculatedTotal;
+                            
+                            console.log('✅ [PAYMENT SECURITY] Using server-calculated amount:', validatedAmount);
+                        }
+                    }
+                }
+            } else if (orderData.totals) {
+                // If order totals are provided but no shipping method, use totals.total
+                const orderTotal = orderData.totals.total || 0;
+                if (orderTotal > 0 && Math.abs(orderTotal - validatedAmount) > 0.01) {
+                    console.warn('⚠️ [PAYMENT SECURITY] Amount mismatch with order totals:', {
+                        provided: validatedAmount,
+                        orderTotal: orderTotal,
+                        difference: orderTotal - validatedAmount
+                    });
+                    
+                    validatedAmount = orderTotal;
+                    console.log('✅ [PAYMENT SECURITY] Using order total from orderData:', validatedAmount);
+                }
+            }
+        }
+
         // orderId is now optional - can be temporary or added later
         // If not provided, generate a temporary ID
         const tempOrderId = orderId || `TEMP-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
         const isTemporaryOrderId = !orderId || orderId.startsWith('TEMP-');
 
-        // Convert amount to cents
-        const amountInCents = Math.round(parseFloat(amount) * 100);
+        // Convert validated amount to cents
+        const amountInCents = Math.round(validatedAmount * 100);
 
         // Prepare payment intent metadata
         const paymentMetadata = {
@@ -657,7 +718,10 @@ router.post('/create-intent', async (req, res) => {
         }
 
         // Create payment intent with logging
-        console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${amount} ${currency}`);
+        console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${validatedAmount} ${currency} (${amountInCents} cents)`);
+        if (validatedAmount !== parseFloat(amount)) {
+            console.log(`⚠️ [PAYMENT] Amount was corrected from ${amount} to ${validatedAmount}`);
+        }
         console.log(`📱 [PAYMENT] Device: ${deviceInfo.platform}${isMobile ? ` (${userAgent.match(/Mobile|Android|iPhone|iPad/i)?.[0] || 'Mobile'})` : ''}`);
         
         // Log the EXACT parameters being sent to Stripe (for debugging)
@@ -869,6 +933,124 @@ router.post('/create-intent', async (req, res) => {
                 code: error.code,
                 message: error.message
             } : undefined
+        });
+    }
+});
+
+/**
+ * POST /api/payments/payment-failed
+ * Handle payment failure when user clicks "Complete Order" but payment fails/declines
+ * This is called by the frontend immediately when confirmPayment fails
+ * 
+ * Body:
+ * {
+ *   "orderId": "PM123456",
+ *   "paymentIntentId": "pi_xxx",
+ *   "error": "Payment declined" (optional)
+ * }
+ */
+router.post('/payment-failed', async (req, res) => {
+    try {
+        const { orderId, paymentIntentId, error } = req.body;
+        
+        if (!orderId) {
+            return res.status(400).json({
+                success: false,
+                error: 'orderId is required'
+            });
+        }
+        
+        console.log(`❌ [PAYMENT FAILURE] Payment failed for order ${orderId} (from frontend)`, {
+            paymentIntentId: paymentIntentId,
+            error: error
+        });
+        
+        // Get order to verify it exists and update status
+        const findResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
+        });
+        
+        if (!findResult.success || !findResult.data) {
+            console.warn(`⚠️ [PAYMENT FAILURE] Order ${orderId} not found when handling payment failure from frontend`);
+            return res.status(404).json({
+                success: false,
+                error: 'Order not found'
+            });
+        }
+        
+        const order = findResult.data;
+        
+        // Only update if payment hasn't succeeded yet
+        if (order.paymentStatus !== 'succeeded') {
+            // Update order with failed payment status
+            await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'orders',
+                command: '--update',
+                data: {
+                    filter: { orderId },
+                    update: {
+                        paymentStatus: 'failed',
+                        paymentIntentId: paymentIntentId || order.paymentIntentId,
+                        paymentFailedAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                        timeline: [
+                            ...(order.timeline || []),
+                            {
+                                status: 'Payment Failed',
+                                date: new Date().toISOString(),
+                                description: `Payment failed: ${error || 'Payment was declined or canceled'}`,
+                                timestamp: new Date().toISOString(),
+                                source: 'frontend'
+                            }
+                        ]
+                    }
+                }
+            });
+            
+            // Schedule payment failure reminder email (10 minutes)
+            const paymentFailureService = require('../services/paymentFailureService');
+            const scheduleResult = await paymentFailureService.schedulePaymentFailureEmail(
+                orderId,
+                paymentIntentId || order.paymentIntentId,
+                { ...order, paymentStatus: 'failed' }
+            );
+            
+            if (scheduleResult.success) {
+                console.log(`⏰ [PAYMENT FAILURE] Scheduled reminder email for order ${orderId} (will send in 10 minutes if payment not retried)`);
+            } else if (scheduleResult.skipped) {
+                console.log(`⏭️ [PAYMENT FAILURE] Skipped scheduling email for order ${orderId}: ${scheduleResult.reason}`);
+            } else {
+                console.error(`❌ [PAYMENT FAILURE] Failed to schedule reminder email for order ${orderId}:`, scheduleResult.error);
+            }
+        } else {
+            console.log(`✅ [PAYMENT FAILURE] Order ${orderId} payment already succeeded, skipping failure handling`);
+        }
+        
+        // Generate retry URL for frontend
+        const paymentFailureService = require('../services/paymentFailureService');
+        const retryUrl = paymentFailureService.generatePaymentRetryUrl(
+            orderId,
+            paymentIntentId || order.paymentIntentId || ''
+        );
+        
+        res.json({
+            success: true,
+            message: 'Payment failure recorded',
+            orderId: orderId,
+            paymentIntentId: paymentIntentId || order.paymentIntentId || null,
+            emailScheduled: scheduleResult?.success || false,
+            retryUrl: retryUrl // Provide retry URL for frontend
+        });
+        
+    } catch (error) {
+        console.error('Error handling payment failure from frontend:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to handle payment failure'
         });
     }
 });

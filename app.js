@@ -282,12 +282,12 @@ if (process.env.NODE_ENV !== 'test') {
                 });
             }, 60000); // 1 minute delay
             
-            // Then run every 10 minutes
+            // Then run every 5 minutes (to catch carts abandoned 10 minutes ago)
             setInterval(() => {
                 abandonedCartService.processAbandonedCarts().catch(err => {
                     console.error('❌ [ABANDONED CART] Scheduled processing error:', err);
                 });
-            }, 10 * 60 * 1000); // 10 minutes
+            }, 5 * 60 * 1000); // 5 minutes (check twice per 10-minute window)
         } else {
             console.log('🛒 [ABANDONED CART] Service disabled (ENABLE_ABANDONED_CART=false)');
         }

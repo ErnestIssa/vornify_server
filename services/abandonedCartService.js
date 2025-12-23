@@ -4,7 +4,7 @@ const emailService = require('./emailService');
 const db = getDBInstance();
 
 // Abandoned cart detection settings
-const ABANDONED_CART_TIMEOUT = 30 * 60 * 1000; // 30 minutes in milliseconds
+const ABANDONED_CART_TIMEOUT = 10 * 60 * 1000; // 10 minutes in milliseconds (changed from 30 minutes)
 
 /**
  * Format cart items for email (structured data, no HTML)
@@ -47,7 +47,7 @@ function generateCartUrl(userId) {
 }
 
 /**
- * Check if cart is abandoned (no activity for 30 minutes)
+ * Check if cart is abandoned (no activity for 10 minutes)
  * @param {object} cart - Cart object
  * @returns {boolean} True if cart is abandoned
  */
@@ -64,7 +64,7 @@ function isCartAbandoned(cart) {
     const now = new Date();
     const timeSinceUpdate = now - lastUpdate;
     
-    // Cart is abandoned if last update was more than 30 minutes ago
+    // Cart is abandoned if last update was more than 10 minutes ago
     return timeSinceUpdate >= ABANDONED_CART_TIMEOUT;
 }
 
@@ -230,15 +230,34 @@ async function processAbandonedCart(cart) {
             };
         }
         
-        // Get customer email
-        const customerEmail = await getCustomerEmail(userId);
+        // Get customer email - try cart first, then customer/user collections
+        let customerEmail = cart.email || cart.customerEmail || null;
+        
+        // If no email in cart, try to get from customer/user collections
         if (!customerEmail) {
+            customerEmail = await getCustomerEmail(userId);
+        }
+        
+        if (!customerEmail) {
+            console.warn(`⚠️ [ABANDONED CART] No email found for cart ${userId}`, {
+                cartEmail: cart.email,
+                cartCustomerEmail: cart.customerEmail,
+                hasItems: (cart.items?.length || 0) > 0,
+                itemsCount: cart.items?.length || 0
+            });
             return {
                 success: false,
                 skipped: true,
-                reason: 'No customer email found'
+                reason: 'No customer email found in cart or customer records'
             };
         }
+        
+        console.log(`📧 [ABANDONED CART] Found email for cart ${userId}:`, {
+            email: customerEmail,
+            source: cart.email ? 'cart.email' : (cart.customerEmail ? 'cart.customerEmail' : 'customer/user collection'),
+            hasItems: (cart.items?.length || 0) > 0,
+            itemsCount: cart.items?.length || 0
+        });
         
         // Get customer name
         const customerName = await getCustomerName(userId);
@@ -247,6 +266,14 @@ async function processAbandonedCart(cart) {
         const formattedItems = formatCartItemsForEmail(cart.items);
         const cartTotal = formatCartTotal(cart.totals);
         const cartUrl = generateCartUrl(userId);
+        
+        console.log(`📧 [ABANDONED CART] Preparing to send email for cart ${userId}:`, {
+            email: customerEmail,
+            name: customerName,
+            itemsCount: formattedItems.length,
+            cartTotal: cartTotal,
+            cartUrl: cartUrl
+        });
         
         // Send email
         const emailResult = await emailService.sendAbandonedCartEmail(
@@ -261,7 +288,12 @@ async function processAbandonedCart(cart) {
             // Mark email as sent
             await markEmailAsSent(userId);
             
-            console.log(`✅ Abandoned cart email sent to ${customerEmail} for cart ${userId}`);
+            console.log(`✅ [ABANDONED CART] Email sent successfully to ${customerEmail} for cart ${userId}`, {
+                messageId: emailResult.messageId,
+                timestamp: emailResult.timestamp,
+                itemsCount: formattedItems.length,
+                cartTotal: cartTotal
+            });
             
             return {
                 success: true,
@@ -270,7 +302,11 @@ async function processAbandonedCart(cart) {
                 messageId: emailResult.messageId
             };
         } else {
-            console.error(`❌ Failed to send abandoned cart email to ${customerEmail}:`, emailResult.error);
+            console.error(`❌ [ABANDONED CART] Failed to send email to ${customerEmail} for cart ${userId}:`, {
+                error: emailResult.error,
+                details: emailResult.details,
+                itemsCount: formattedItems.length
+            });
             
             return {
                 success: false,
@@ -300,8 +336,9 @@ async function processAbandonedCarts() {
         
         // Find all carts that:
         // 1. Have items (not empty)
-        // 2. Were last updated more than 30 minutes ago
-        // 3. Haven't had email sent yet
+        // 2. Have an email address (either in cart.email or cart.customerEmail)
+        // 3. Were last updated more than 10 minutes ago
+        // 4. Haven't had email sent yet
         const cartsResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
@@ -358,13 +395,25 @@ async function processCartsArray(carts) {
     };
     
     for (const cart of carts) {
+        // Check if cart has email (required for abandoned cart email)
+        const hasEmail = cart.email || cart.customerEmail;
+        if (!hasEmail) {
+            results.skipped++;
+            results.details.push({
+                userId: cart.userId,
+                status: 'skipped',
+                reason: 'No email in cart'
+            });
+            continue;
+        }
+        
         // Double-check cart is abandoned
         if (!isCartAbandoned(cart)) {
             results.skipped++;
             results.details.push({
                 userId: cart.userId,
                 status: 'skipped',
-                reason: 'Not abandoned (within 30 minutes)'
+                reason: 'Not abandoned (within 10 minutes)'
             });
             continue;
         }

@@ -368,6 +368,103 @@ router.delete('/:userId/clear', async (req, res) => {
     }
 });
 
+// PUT /api/cart/:userId/save-email - Save customer email to cart (for abandoned cart emails)
+router.put('/:userId/save-email', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { email } = req.body;
+        
+        if (!email) {
+            return res.status(400).json({
+                success: false,
+                error: 'Email is required'
+            });
+        }
+        
+        // Validate email format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid email format'
+            });
+        }
+        
+        // Get existing cart
+        const cartResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--read',
+            data: { userId }
+        });
+        
+        // Create cart if it doesn't exist (for cases where user enters email before adding items)
+        let cart = cartResult.success && cartResult.data ? cartResult.data : {
+            userId,
+            items: [],
+            totals: {
+                subtotal: 0,
+                tax: 0,
+                shipping: 0,
+                discount: 0,
+                total: 0
+            },
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        
+        // Update email fields
+        const normalizedEmail = email.trim().toLowerCase();
+        cart.email = normalizedEmail;
+        cart.customerEmail = normalizedEmail; // Also save as customerEmail for compatibility
+        cart.emailUpdatedAt = new Date().toISOString(); // Track when email was saved
+        cart.updatedAt = new Date().toISOString();
+        
+        // Save updated cart
+        const saveResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--upsert',
+            data: {
+                filter: { userId },
+                update: cart
+            }
+        });
+        
+        if (saveResult.success) {
+            console.log(`📧 [CART] Email saved to cart for user ${userId}:`, {
+                email: normalizedEmail,
+                hasItems: (cart.items?.length || 0) > 0,
+                itemsCount: cart.items?.length || 0,
+                total: cart.totals?.total || 0
+            });
+            
+            res.json({
+                success: true,
+                message: 'Email saved to cart',
+                data: {
+                    userId: cart.userId,
+                    email: cart.email,
+                    itemsCount: cart.items?.length || 0,
+                    hasItems: (cart.items?.length || 0) > 0
+                }
+            });
+        } else {
+            console.error(`❌ [CART] Failed to save email to cart for user ${userId}`);
+            res.status(500).json({
+                success: false,
+                error: 'Failed to save email to cart'
+            });
+        }
+    } catch (error) {
+        console.error('Save email to cart error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to save email to cart'
+        });
+    }
+});
+
 // POST /api/cart/:userId/apply-discount - Apply discount code to cart
 router.post('/:userId/apply-discount', async (req, res) => {
     try {

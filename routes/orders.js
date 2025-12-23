@@ -280,7 +280,7 @@ router.post('/create', async (req, res) => {
         });
         
         // SECURITY: Validate and recalculate shipping cost server-side
-        const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
+        const { getShippingZone, applyZonePricingToOption, getZonePricing } = require('../utils/shippingZones');
         const shippingAddress = orderData.shippingAddress || orderData.customer;
         const shippingMethod = orderData.shippingMethod;
         
@@ -289,39 +289,66 @@ router.post('/create', async (req, res) => {
             if (country) {
                 const zone = getShippingZone(country.toUpperCase());
                 if (zone) {
-                    // Recalculate correct shipping cost based on zone and method type
-                    const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
-                    const correctShippingCost = validatedMethod.cost || 0;
-                    const providedShippingCost = orderData.shippingCost || orderData.totals?.shipping || 0;
+                    const providedShippingCost = orderData.shippingCost || orderData.totals?.shipping || shippingMethod.cost || 0;
                     
-                    // Log price mismatch for security monitoring
-                    if (Math.abs(providedShippingCost - correctShippingCost) > 0.01) {
-                        console.warn('⚠️ [SECURITY] Shipping cost mismatch detected:', {
+                    // Get valid prices for this zone to check if provided price is valid
+                    const { getZonePricing } = require('../utils/shippingZones');
+                    const zonePricing = getZonePricing(zone);
+                    const validPrices = zonePricing ? Object.values(zonePricing) : [];
+                    
+                    // Check if provided cost matches any valid price for this zone (within 1 SEK tolerance)
+                    const isValidPrice = validPrices.some(price => Math.abs(price - providedShippingCost) < 1);
+                    
+                    if (isValidPrice && providedShippingCost > 0) {
+                        // Provided price is valid - trust it (user selected this price)
+                        console.log('✅ [SHIPPING] Using provided shipping cost (valid for zone):', {
+                            provided: providedShippingCost,
+                            zone: zone,
+                            methodType: shippingMethod.type || shippingMethod.id
+                        });
+                        
+                        // Ensure shipping cost is set correctly
+                        orderData.shippingCost = providedShippingCost;
+                        if (orderData.totals) {
+                            orderData.totals.shipping = providedShippingCost;
+                        }
+                        if (orderData.shippingMethod) {
+                            orderData.shippingMethod.cost = providedShippingCost;
+                        }
+                    } else {
+                        // Provided price is invalid - recalculate based on method type
+                        const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
+                        const correctShippingCost = validatedMethod.cost || 0;
+                        
+                        console.warn('⚠️ [SECURITY] Shipping cost mismatch detected, recalculating:', {
                             orderId: 'pending',
                             provided: providedShippingCost,
                             correct: correctShippingCost,
                             zone: zone,
                             methodType: shippingMethod.type || shippingMethod.id,
-                            country: country
+                            methodId: shippingMethod.id,
+                            methodName: shippingMethod.name,
+                            country: country,
+                            validPrices: validPrices
+                        });
+                        
+                        // Use server-calculated price (secure, cannot be manipulated)
+                        orderData.shippingCost = correctShippingCost;
+                        if (orderData.totals) {
+                            orderData.totals.shipping = correctShippingCost;
+                        }
+                        
+                        // Update shipping method with correct cost
+                        if (orderData.shippingMethod) {
+                            orderData.shippingMethod.cost = correctShippingCost;
+                        }
+                        
+                        console.log('✅ [SECURITY] Shipping cost validated and corrected:', {
+                            zone: zone,
+                            correctCost: correctShippingCost,
+                            methodType: shippingMethod.type || shippingMethod.id
                         });
                     }
-                    
-                    // Use server-calculated price (secure, cannot be manipulated)
-                    orderData.shippingCost = correctShippingCost;
-                    if (orderData.totals) {
-                        orderData.totals.shipping = correctShippingCost;
-                    }
-                    
-                    // Update shipping method with correct cost
-                    if (orderData.shippingMethod) {
-                        orderData.shippingMethod.cost = correctShippingCost;
-                    }
-                    
-                    console.log('✅ [SECURITY] Shipping cost validated:', {
-                        zone: zone,
-                        correctCost: correctShippingCost,
-                        methodType: shippingMethod.type || shippingMethod.id
-                    });
                 }
             }
         }

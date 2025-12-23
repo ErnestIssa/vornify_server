@@ -548,10 +548,10 @@ function filterMailboxOptions(deliveryOptions) {
             return {
                 id: bookingInstructions.deliveryOptionId || `mailbox_${option.type}`,
                 type: option.type === 'express-mailbox' ? 'express_mailbox' : 'mailbox',
-                name: checkoutTexts.title || (option.type === 'express-mailbox' ? 'Express Mailbox Delivery' : 'Mailbox Delivery'),
+                name: checkoutTexts.title || (option.type === 'express-mailbox' ? 'Express Mailbox Delivery' : 'Collect at Mailbox'),
                 description: checkoutTexts.briefDescription || checkoutTexts.fullDescription || 'Delivery to your mailbox',
                 fullDescription: checkoutTexts.fullDescription,
-                cost: 0, // Price not in response
+                cost: 0, // Will be overridden by applyZonePricingToOptions
                 currency: 'SEK',
                 estimatedDays: dayRange.days || checkoutTexts.friendlyDeliveryInfo || '2-5 business days',
                 trackingEnabled: false,
@@ -559,6 +559,7 @@ function filterMailboxOptions(deliveryOptions) {
                 serviceCode: bookingInstructions.serviceCode,
                 deliveryOptionId: bookingInstructions.deliveryOptionId,
                 sustainability: option.sustainability || {},
+                deliveryMethod: option.deliveryMethod || 'MAILBOX', // Ensure deliveryMethod is set for pricing
                 originalData: option
             };
         });
@@ -823,7 +824,7 @@ router.post('/calculate-weight', async (req, res) => {
 // POST /api/shipping/options - Get PostNord delivery options with zone-based pricing
 router.post('/options', async (req, res) => {
     try {
-        const { country, postalCode, street, city } = req.body;
+        const { country, postalCode, street, city, currency } = req.body;
         
         // Validate required fields
         if (!country || !postalCode || !street) {
@@ -1016,6 +1017,17 @@ router.post('/options', async (req, res) => {
             // Log pricing application
             console.log('📦 [SHIPPING] Pricing applied. Sample home delivery cost:', homeDelivery[0]?.cost);
             console.log('📦 [SHIPPING] Sample parcel locker cost:', parcelLocker[0]?.cost);
+            console.log('📦 [SHIPPING] Sample mailbox cost:', mailbox[0]?.cost);
+            
+            // Verify all mailbox options have prices
+            const mailboxWithoutPrice = mailbox.filter(opt => !opt.cost || opt.cost === 0);
+            if (mailboxWithoutPrice.length > 0) {
+                console.error('❌ [SHIPPING] Mailbox options without prices:', mailboxWithoutPrice.map(opt => ({
+                    id: opt.id,
+                    type: opt.type,
+                    name: opt.name
+                })));
+            }
         } else {
             console.error('⚠️ [SHIPPING] Zone is undefined! Cannot apply pricing.');
         }
@@ -1050,15 +1062,60 @@ router.post('/options', async (req, res) => {
             });
         }
         
+        // Convert shipping prices to requested currency if different from SEK
+        let finalOptions = allOptions;
+        let finalHomeDelivery = homeDelivery;
+        let finalServicePoint = servicePoint;
+        let finalParcelLocker = parcelLocker;
+        let finalMailbox = mailbox;
+        let responseCurrency = 'SEK';
+        let exchangeRate = 1.0;
+        
+        if (currency && currency.toUpperCase() !== 'SEK') {
+            try {
+                const currencyService = require('../services/currencyService');
+                const conversionResult = await currencyService.convertCurrency(100, 'SEK', currency.toUpperCase());
+                
+                if (conversionResult.success) {
+                    exchangeRate = conversionResult.rate;
+                    responseCurrency = currency.toUpperCase();
+                    
+                    // Helper function to convert option costs
+                    const convertOption = (option) => ({
+                        ...option,
+                        cost: Math.round(option.cost * exchangeRate * 100) / 100,
+                        currency: responseCurrency,
+                        baseCost: option.cost, // Keep original SEK cost
+                        baseCurrency: 'SEK',
+                        exchangeRate: exchangeRate
+                    });
+                    
+                    // Convert all option arrays
+                    finalHomeDelivery = homeDelivery.map(convertOption);
+                    finalServicePoint = servicePoint.map(convertOption);
+                    finalParcelLocker = parcelLocker.map(convertOption);
+                    finalMailbox = mailbox.map(convertOption);
+                    finalOptions = allOptions.map(convertOption);
+                    
+                    console.log(`💱 [SHIPPING] Converted shipping prices from SEK to ${responseCurrency} at rate ${exchangeRate}`);
+                } else {
+                    console.warn(`⚠️ [SHIPPING] Currency conversion failed, using SEK:`, conversionResult.error);
+                }
+            } catch (currencyError) {
+                console.error('❌ [SHIPPING] Currency conversion error:', currencyError);
+                // Continue with SEK if conversion fails
+            }
+        }
+        
         // Return formatted response (maintains existing structure for frontend compatibility)
         res.json({
             success: true,
             deliveryOptions: {
-                home: homeDelivery,
-                servicePoint: servicePoint,
-                parcelLocker: parcelLocker,
-                mailbox: mailbox,
-                all: allOptions
+                home: finalHomeDelivery,
+                servicePoint: finalServicePoint,
+                parcelLocker: finalParcelLocker,
+                mailbox: finalMailbox,
+                all: finalOptions
             },
             zone: zone, // Include zone for frontend reference (always "SE" or "EU")
             address: {
@@ -1073,7 +1130,9 @@ router.post('/options', async (req, res) => {
                 city: WAREHOUSE_ADDRESS.city,
                 streetName: WAREHOUSE_ADDRESS.streetName
             },
-            currency: 'SEK',
+            currency: responseCurrency,
+            baseCurrency: 'SEK',
+            exchangeRate: exchangeRate,
             timestamp: new Date().toISOString()
         });
         
