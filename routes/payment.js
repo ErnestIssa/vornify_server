@@ -714,12 +714,14 @@ router.post('/create-intent', async (req, res) => {
                 allow_redirects: 'always' // Allows redirect-based payment methods like Klarna
             },
             // Enable 3D Secure authentication for card payments (SCA compliance)
-            // CRITICAL: 3DS must trigger BEFORE checking funds (European PSD2 requirement)
+            // CRITICAL: 3DS must trigger for all card payments (SCA/PSD2 requirement)
+            // 'any' means: Always request 3DS if the card supports it (forces 3DS for all cards)
+            // This ensures SCA compliance and better security
             payment_method_options: {
                 card: {
-                    request_three_d_secure: 'automatic' // Automatically request 3DS when required (SCA compliance)
-                    // 'automatic' means: Request 3DS when card issuer requires it (most European cards)
-                    // This ensures 3DS authentication happens BEFORE fund checking
+                    request_three_d_secure: 'any' // Force 3DS for all card payments (SCA compliance)
+                    // 'any' ensures 3DS is requested for all cards that support it
+                    // This provides better security and SCA compliance
                 }
             }
             // Note: 
@@ -866,7 +868,7 @@ router.post('/create-intent', async (req, res) => {
                 has_client_secret: !!paymentIntent.client_secret,
                 status_correct: paymentIntent.status === 'requires_payment_method',
                 automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled === true,
-                three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'automatic',
+                three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'any',
                 ready_for_payment_element: paymentIntent.status === 'requires_payment_method' && 
                                           paymentIntent.automatic_payment_methods?.enabled === true &&
                                           !!paymentIntent.client_secret
@@ -939,7 +941,7 @@ router.post('/create-intent', async (req, res) => {
                 automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled,
                 status: paymentIntent.status,
                 requires_payment_method: paymentIntent.status === 'requires_payment_method',
-                three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'automatic',
+                three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'any',
                 device: deviceInfo.platform
             }
         });
@@ -1089,6 +1091,175 @@ router.post('/payment-failed', async (req, res) => {
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to handle payment failure'
+        });
+    }
+});
+
+/**
+ * PUT /api/payments/update-intent/:paymentIntentId
+ * Update payment intent amount when shipping is selected
+ * This allows updating the payment amount to include shipping costs
+ * 
+ * Body:
+ * {
+ *   "amount": 82,
+ *   "currency": "sek",
+ *   "orderData": {
+ *     "totals": {
+ *       "subtotal": 3,
+ *       "shipping": 79,
+ *       "tax": 0,
+ *       "discount": 0,
+ *       "total": 82
+ *     },
+ *     "shippingMethod": { ... }
+ *   }
+ * }
+ */
+router.put('/update-intent/:paymentIntentId', async (req, res) => {
+    try {
+        const { paymentIntentId } = req.params;
+        const { amount, currency, orderData } = req.body;
+
+        if (!paymentIntentId) {
+            return res.status(400).json({
+                success: false,
+                error: 'paymentIntentId is required',
+                errorCode: 'MISSING_PAYMENT_INTENT_ID'
+            });
+        }
+
+        if (!amount || amount <= 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Valid amount is required',
+                errorCode: 'INVALID_AMOUNT'
+            });
+        }
+
+        console.log(`🔄 [PAYMENT] Updating payment intent ${paymentIntentId} with new amount: ${amount} ${currency || 'SEK'}`);
+
+        // Retrieve existing payment intent to check status
+        const existingIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+        
+        // Check if payment intent can be updated (must be in correct status)
+        if (existingIntent.status !== 'requires_payment_method' && existingIntent.status !== 'requires_confirmation') {
+            return res.status(400).json({
+                success: false,
+                error: `Cannot update payment intent with status: ${existingIntent.status}. Payment intent can only be updated when status is 'requires_payment_method' or 'requires_confirmation'`,
+                errorCode: 'INVALID_PAYMENT_INTENT_STATUS',
+                currentStatus: existingIntent.status
+            });
+        }
+
+        // Validate and calculate correct amount (same logic as create-intent)
+        let validatedAmount = parseFloat(amount);
+        
+        if (orderData && typeof orderData === 'object') {
+            // PRIORITY 1: Use orderData.totals.total if provided
+            if (orderData.totals && orderData.totals.total && orderData.totals.total > 0) {
+                const orderTotal = parseFloat(orderData.totals.total);
+                
+                if (Math.abs(orderTotal - validatedAmount) > 0.01) {
+                    console.warn('⚠️ [PAYMENT UPDATE] Amount mismatch with order totals.total:', {
+                        provided: validatedAmount,
+                        orderTotal: orderTotal,
+                        difference: orderTotal - validatedAmount
+                    });
+                    
+                    validatedAmount = orderTotal;
+                    console.log('✅ [PAYMENT UPDATE] Using orderData.totals.total:', validatedAmount);
+                }
+            }
+            
+            // PRIORITY 2: Validate by recalculating from components
+            const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
+            const shippingAddress = orderData.shippingAddress || orderData.customer;
+            const shippingMethod = orderData.shippingMethod;
+            
+            if (shippingAddress && shippingMethod && orderData.totals) {
+                const country = shippingAddress.country || shippingAddress.countryCode;
+                if (country) {
+                    const zone = getShippingZone(country.toUpperCase());
+                    if (zone) {
+                        const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
+                        const correctShippingCost = validatedMethod.cost || 0;
+                        
+                        const subtotal = orderData.totals.subtotal || 0;
+                        const tax = orderData.totals.tax || 0;
+                        const discount = orderData.totals.discount || 0;
+                        const shipping = correctShippingCost;
+                        
+                        const calculatedTotal = subtotal + tax + shipping - discount;
+                        
+                        if (Math.abs(calculatedTotal - validatedAmount) > 0.01) {
+                            console.error('❌ [PAYMENT UPDATE] Calculated total does not match provided amount!', {
+                                provided: validatedAmount,
+                                calculated: calculatedTotal,
+                                difference: calculatedTotal - validatedAmount
+                            });
+                            
+                            validatedAmount = calculatedTotal;
+                            console.log('✅ [PAYMENT UPDATE] Using server-calculated total:', validatedAmount);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert to cents
+        const amountInCents = Math.round(validatedAmount * 100);
+        const currencyLower = (currency || existingIntent.currency || 'sek').toLowerCase();
+
+        // Update payment intent with new amount
+        const updateParams = {
+            amount: amountInCents,
+            currency: currencyLower
+        };
+
+        // Update metadata with order totals if provided
+        if (orderData && orderData.totals) {
+            updateParams.metadata = {
+                ...existingIntent.metadata,
+                shippingCost: (orderData.totals.shipping || 0).toString(),
+                orderTotal: validatedAmount.toString(),
+                subtotal: (orderData.totals.subtotal || 0).toString(),
+                tax: (orderData.totals.tax || 0).toString(),
+                discount: (orderData.totals.discount || 0).toString(),
+                updatedAt: new Date().toISOString()
+            };
+        }
+
+        const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
+
+        console.log(`✅ [PAYMENT] Payment intent ${paymentIntentId} updated successfully:`, {
+            oldAmount: existingIntent.amount / 100,
+            newAmount: paymentIntent.amount / 100,
+            currency: paymentIntent.currency,
+            status: paymentIntent.status
+        });
+
+        res.json({
+            success: true,
+            clientSecret: paymentIntent.client_secret,
+            paymentIntentId: paymentIntent.id,
+            amount: paymentIntent.amount / 100,
+            currency: paymentIntent.currency,
+            status: paymentIntent.status
+        });
+
+    } catch (error) {
+        console.error('❌ [PAYMENT] Update payment intent error:', error);
+        
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to update payment intent',
+            errorCode: error.code || 'PAYMENT_INTENT_UPDATE_FAILED',
+            stripeError: error.type ? {
+                type: error.type,
+                code: error.code,
+                message: error.message
+            } : undefined
         });
     }
 });
