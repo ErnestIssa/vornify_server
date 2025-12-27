@@ -573,13 +573,47 @@ router.post('/create-intent', async (req, res) => {
         // This ensures the payment amount matches the actual order total (subtotal + shipping + tax - discount)
         let validatedAmount = parseFloat(amount);
         
+        // Log what we received for debugging
+        console.log('💳 [PAYMENT INTENT] Creating payment intent:', {
+            providedAmount: amount,
+            currency: currency,
+            hasOrderData: !!orderData,
+            orderTotals: orderData?.totals,
+            shippingMethod: orderData?.shippingMethod ? {
+                id: orderData.shippingMethod.id,
+                type: orderData.shippingMethod.type,
+                cost: orderData.shippingMethod.cost
+            } : null
+        });
+        
         if (orderData && typeof orderData === 'object') {
+            // PRIORITY 1: If orderData.totals.total exists, use it (most reliable)
+            // This is the authoritative total calculated by the frontend/backend
+            if (orderData.totals && orderData.totals.total && orderData.totals.total > 0) {
+                const orderTotal = parseFloat(orderData.totals.total);
+                
+                if (Math.abs(orderTotal - validatedAmount) > 0.01) {
+                    console.warn('⚠️ [PAYMENT SECURITY] Amount mismatch with order totals.total:', {
+                        provided: validatedAmount,
+                        orderTotal: orderTotal,
+                        difference: orderTotal - validatedAmount,
+                        orderTotals: orderData.totals
+                    });
+                    
+                    validatedAmount = orderTotal;
+                    console.log('✅ [PAYMENT SECURITY] Using orderData.totals.total:', validatedAmount);
+                } else {
+                    console.log('✅ [PAYMENT SECURITY] Amount matches orderData.totals.total:', validatedAmount);
+                }
+            }
+            
+            // PRIORITY 2: Recalculate from components if shipping method is provided (for validation)
+            // This serves as a double-check, but totals.total takes precedence
             const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
             const shippingAddress = orderData.shippingAddress || orderData.customer;
             const shippingMethod = orderData.shippingMethod;
             
-            // Recalculate shipping cost server-side if shipping method is provided
-            if (shippingAddress && shippingMethod) {
+            if (shippingAddress && shippingMethod && orderData.totals) {
                 const country = shippingAddress.country || shippingAddress.countryCode;
                 if (country) {
                     const zone = getShippingZone(country.toUpperCase());
@@ -587,48 +621,52 @@ router.post('/create-intent', async (req, res) => {
                         const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
                         const correctShippingCost = validatedMethod.cost || 0;
                         
-                        // Calculate correct total from order totals
-                        const subtotal = orderData.totals?.subtotal || orderData.subtotal || 0;
-                        const tax = orderData.totals?.tax || orderData.tax || 0;
-                        const discount = orderData.totals?.discount || orderData.discount || 0;
+                        // Calculate correct total from order totals components
+                        const subtotal = orderData.totals.subtotal || 0;
+                        const tax = orderData.totals.tax || 0;
+                        const discount = orderData.totals.discount || 0;
                         const shipping = correctShippingCost;
                         
                         const calculatedTotal = subtotal + tax + shipping - discount;
                         
-                        // Compare with provided amount
+                        // Validate that our calculation matches the provided total
                         if (Math.abs(calculatedTotal - validatedAmount) > 0.01) {
-                            console.warn('⚠️ [PAYMENT SECURITY] Amount mismatch detected:', {
+                            console.error('❌ [PAYMENT SECURITY] CRITICAL: Calculated total does not match provided amount!', {
                                 provided: validatedAmount,
                                 calculated: calculatedTotal,
                                 difference: calculatedTotal - validatedAmount,
-                                subtotal: subtotal,
-                                shipping: shipping,
-                                tax: tax,
-                                discount: discount
+                                components: {
+                                    subtotal: subtotal,
+                                    shipping: shipping,
+                                    tax: tax,
+                                    discount: discount
+                                },
+                                orderTotals: orderData.totals
                             });
                             
-                            // Use server-calculated total (secure, cannot be manipulated)
+                            // Use calculated total (server-side validation wins)
                             validatedAmount = calculatedTotal;
-                            
-                            console.log('✅ [PAYMENT SECURITY] Using server-calculated amount:', validatedAmount);
+                            console.log('✅ [PAYMENT SECURITY] Using server-calculated total (components):', validatedAmount);
+                        } else {
+                            console.log('✅ [PAYMENT SECURITY] Calculated total matches provided amount:', validatedAmount);
                         }
                     }
                 }
-            } else if (orderData.totals) {
-                // If order totals are provided but no shipping method, use totals.total
-                const orderTotal = orderData.totals.total || 0;
-                if (orderTotal > 0 && Math.abs(orderTotal - validatedAmount) > 0.01) {
-                    console.warn('⚠️ [PAYMENT SECURITY] Amount mismatch with order totals:', {
-                        provided: validatedAmount,
-                        orderTotal: orderTotal,
-                        difference: orderTotal - validatedAmount
-                    });
-                    
-                    validatedAmount = orderTotal;
-                    console.log('✅ [PAYMENT SECURITY] Using order total from orderData:', validatedAmount);
-                }
             }
         }
+        
+        // Final validation: Ensure amount is positive
+        if (validatedAmount <= 0) {
+            console.error('❌ [PAYMENT SECURITY] Invalid validated amount:', validatedAmount);
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid payment amount calculated',
+                errorCode: 'INVALID_AMOUNT',
+                details: 'The calculated payment amount is invalid. Please contact support.'
+            });
+        }
+        
+        console.log('💳 [PAYMENT INTENT] Final validated amount:', validatedAmount, currency);
 
         // orderId is now optional - can be temporary or added later
         // If not provided, generate a temporary ID
