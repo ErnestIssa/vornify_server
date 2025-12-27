@@ -70,17 +70,6 @@ function getValidZonePrices(zone) {
 }
 
 /**
- * Get all valid prices for a zone (for validation)
- * @param {string} zone - Shipping zone ('SE' or 'EU')
- * @returns {array} Array of valid prices for this zone
- */
-function getValidZonePrices(zone) {
-    const pricing = getZonePricing(zone);
-    if (!pricing) return [];
-    return Object.values(pricing);
-}
-
-/**
  * Apply zone-based pricing to a delivery option based on its type
  * @param {object} option - Delivery option object
  * @param {string} zone - Shipping zone ('SE' or 'EU')
