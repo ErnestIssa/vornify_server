@@ -391,7 +391,7 @@ function filterHomeDeliveryOptions(deliveryOptions) {
                 name: checkoutTexts.title || 'Home Delivery',
                 description: checkoutTexts.briefDescription || checkoutTexts.fullDescription || 'Delivery to your home address',
                 fullDescription: checkoutTexts.fullDescription,
-                cost: 0, // Price not in response, would need separate pricing API
+                cost: 0, // Will be overridden by applyZonePricingToOptions
                 currency: 'SEK',
                 estimatedDays: dayRange.days || checkoutTexts.friendlyDeliveryInfo || '2-5 business days',
                 trackingEnabled: true,
@@ -399,6 +399,7 @@ function filterHomeDeliveryOptions(deliveryOptions) {
                 serviceCode: bookingInstructions.serviceCode,
                 deliveryOptionId: bookingInstructions.deliveryOptionId,
                 sustainability: option.sustainability || {},
+                deliveryMethod: option.deliveryMethod || 'HOME_DELIVERY', // Ensure deliveryMethod is set for pricing
                 originalData: option
             };
         });
@@ -432,7 +433,7 @@ function filterServicePointOptions(deliveryOptions) {
                     name: checkoutTexts.title || 'Service Point Delivery',
                     description: checkoutTexts.briefDescription || checkoutTexts.fullDescription || 'Pick up from a nearby service point',
                     fullDescription: checkoutTexts.fullDescription,
-                    cost: 0, // Price not in response
+                    cost: 0, // Will be overridden by applyZonePricingToOptions
                     currency: 'SEK',
                     estimatedDays: dayRange.days || checkoutTexts.friendlyDeliveryInfo || '2-5 business days',
                     trackingEnabled: true,
@@ -441,6 +442,7 @@ function filterServicePointOptions(deliveryOptions) {
                     deliveryOptionId: bookingInstructions.deliveryOptionId,
                     location: location,
                     sustainability: option.sustainability || {},
+                    deliveryMethod: option.deliveryMethod || 'SERVICE_POINT', // Ensure deliveryMethod is set for pricing
                     isDefault: true,
                     originalData: option
                 });
@@ -461,7 +463,7 @@ function filterServicePointOptions(deliveryOptions) {
                             name: addTexts.title || 'Service Point Delivery',
                             description: addTexts.briefDescription || addTexts.fullDescription || 'Pick up from a nearby service point',
                             fullDescription: addTexts.fullDescription,
-                            cost: 0,
+                            cost: 0, // Will be overridden by applyZonePricingToOptions
                             currency: 'SEK',
                             estimatedDays: addTime.days || addTexts.friendlyDeliveryInfo || '2-5 business days',
                             trackingEnabled: true,
@@ -470,6 +472,7 @@ function filterServicePointOptions(deliveryOptions) {
                             deliveryOptionId: addBooking.deliveryOptionId,
                             location: addLocation,
                             sustainability: additionalOption.sustainability || {},
+                            deliveryMethod: additionalOption.deliveryMethod || 'SERVICE_POINT', // Ensure deliveryMethod is set for pricing
                             isDefault: false,
                             originalData: additionalOption
                         });
@@ -509,7 +512,7 @@ function filterParcelLockerOptions(deliveryOptions) {
                             name: lockerTexts.title || 'Parcel Locker Delivery',
                             description: lockerTexts.briefDescription || lockerTexts.fullDescription || 'Delivery to a parcel locker',
                             fullDescription: lockerTexts.fullDescription,
-                            cost: 0,
+                            cost: 0, // Will be overridden by applyZonePricingToOptions
                             currency: 'SEK',
                             estimatedDays: lockerTime.days || lockerTexts.friendlyDeliveryInfo || '2-5 business days',
                             trackingEnabled: true,
@@ -518,6 +521,7 @@ function filterParcelLockerOptions(deliveryOptions) {
                             deliveryOptionId: locker.bookingInstructions.deliveryOptionId,
                             location: locker.location || {},
                             sustainability: locker.sustainability || {},
+                            deliveryMethod: locker.deliveryMethod || 'PARCEL_LOCKER', // Ensure deliveryMethod is set for pricing
                             originalData: locker
                         });
                     }
@@ -1014,19 +1018,37 @@ router.post('/options', async (req, res) => {
             parcelLocker = applyZonePricingToOptions(parcelLocker, zone);
             mailbox = applyZonePricingToOptions(mailbox, zone);
             
-            // Log pricing application
-            console.log('📦 [SHIPPING] Pricing applied. Sample home delivery cost:', homeDelivery[0]?.cost);
-            console.log('📦 [SHIPPING] Sample parcel locker cost:', parcelLocker[0]?.cost);
-            console.log('📦 [SHIPPING] Sample mailbox cost:', mailbox[0]?.cost);
+            // Log pricing application with detailed info
+            console.log('📦 [SHIPPING] Pricing applied. Sample costs:', {
+                home: homeDelivery[0]?.cost || 'N/A',
+                homeCount: homeDelivery.length,
+                parcelLocker: parcelLocker[0]?.cost || 'N/A',
+                parcelLockerCount: parcelLocker.length,
+                mailbox: mailbox[0]?.cost || 'N/A',
+                mailboxCount: mailbox.length,
+                servicePoint: servicePoint[0]?.cost || 'N/A',
+                servicePointCount: servicePoint.length
+            });
             
-            // Verify all mailbox options have prices
-            const mailboxWithoutPrice = mailbox.filter(opt => !opt.cost || opt.cost === 0);
-            if (mailboxWithoutPrice.length > 0) {
-                console.error('❌ [SHIPPING] Mailbox options without prices:', mailboxWithoutPrice.map(opt => ({
+            // Verify all options have prices
+            const optionsWithoutPrice = [
+                ...homeDelivery.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'home' })),
+                ...parcelLocker.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'parcelLocker' })),
+                ...mailbox.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'mailbox' })),
+                ...servicePoint.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'servicePoint' }))
+            ];
+            
+            if (optionsWithoutPrice.length > 0) {
+                console.error('❌ [SHIPPING] Options without prices:', optionsWithoutPrice.map(opt => ({
+                    category: opt.category,
                     id: opt.id,
                     type: opt.type,
-                    name: opt.name
+                    name: opt.name,
+                    deliveryMethod: opt.deliveryMethod,
+                    pricingReason: opt.pricingReason
                 })));
+            } else {
+                console.log('✅ [SHIPPING] All options have prices applied correctly');
             }
         } else {
             console.error('⚠️ [SHIPPING] Zone is undefined! Cannot apply pricing.');

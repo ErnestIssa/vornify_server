@@ -162,14 +162,27 @@ function applyZonePricingToOption(option, zone) {
         cost = pricing.parcelLocker;
         pricingReason = 'parcel_locker (id match)';
     }
-    else if (id.includes('mailbox') || id.includes('door')) {
+    else if (id.includes('mailbox') || id.includes('door') || name.includes('mailbox')) {
         cost = pricing.mailbox;
-        pricingReason = 'mailbox (id match)';
+        pricingReason = 'mailbox (id/name match)';
     }
-    // Default to home delivery pricing if type is unknown
+    // Check name for other types before defaulting
+    else if (name.includes('parcel locker') || name.includes('locker')) {
+        cost = pricing.parcelLocker;
+        pricingReason = 'parcel_locker (name match)';
+    }
+    else if (name.includes('service point') || name.includes('pickup point')) {
+        cost = pricing.parcelLocker; // Service points use parcel locker pricing
+        pricingReason = 'service_point (name match, using parcel_locker pricing)';
+    }
+    else if (name.includes('home delivery') || name.includes('home')) {
+        cost = pricing.home;
+        pricingReason = 'home (name match)';
+    }
+    // Default to home delivery pricing if type is unknown (LAST RESORT)
     else {
         cost = pricing.home;
-        pricingReason = 'home (default fallback)';
+        pricingReason = 'home (default fallback - unknown type)';
         console.warn('⚠️ [PRICING] Unknown option type, using default home pricing:', {
             type: option.type,
             deliveryMethod: option.deliveryMethod,
@@ -185,7 +198,8 @@ function applyZonePricingToOption(option, zone) {
         cost: cost,
         currency: 'SEK',
         zone: zone,
-        pricingSource: 'zone_based' // Flag to indicate pricing is zone-based
+        pricingSource: 'zone_based', // Flag to indicate pricing is zone-based
+        pricingReason: pricingReason // Include reason for debugging
     };
     
     // Log if cost is still 0 (should never happen with valid zone)
