@@ -18,6 +18,7 @@ const abandonedCartRoutes = require('./routes/abandonedCart');
 const paymentFailureRoutes = require('./routes/paymentFailure');
 const supportRoutes = require('./routes/support');
 const cartRoutes = require('./routes/cart');
+const checkoutRoutes = require('./routes/checkout');
 const productRoutes = require('./routes/products');
 const shippingRoutes = require('./routes/shipping');
 const trackingRoutes = require('./routes/tracking');
@@ -26,6 +27,7 @@ const reviewRoutes = require('./routes/reviews');
 const currencyRoutes = require('./routes/currency');
 const errorHandler = require('./middleware/errorHandler');
 const abandonedCartService = require('./services/abandonedCartService');
+const abandonedCheckoutService = require('./services/abandonedCheckoutService');
 const paymentFailureService = require('./services/paymentFailureService');
 require('dotenv').config();
 
@@ -229,6 +231,7 @@ app.use('/api/abandoned-cart', abandonedCartRoutes); // Abandoned cart processin
 app.use('/api/payment-failure', paymentFailureRoutes); // Payment failure email processing
 app.use('/api/support', supportRoutes); // Support/contact messages
 app.use('/api/cart', cartRoutes); // Cart management
+app.use('/api/checkout', checkoutRoutes); // Checkout email capture
 app.use('/api/products', productRoutes); // Product management
 app.use('/api/shipping', shippingRoutes); // Shipping quotes and methods
 app.use('/api/tracking', trackingRoutes); // Package tracking
@@ -304,6 +307,29 @@ if (process.env.NODE_ENV !== 'test') {
             }, 120000); // 2 minute delay
         } else {
             console.log('💳 [PAYMENT FAILURE] Service disabled (ENABLE_PAYMENT_FAILURE_EMAIL=false)');
+        }
+
+        // Start abandoned checkout processing (runs every 5 minutes to catch 10-minute windows)
+        if (process.env.ENABLE_ABANDONED_CHECKOUT !== 'false') {
+            console.log('🛒 [ABANDONED CHECKOUT] Service enabled - checking every 5 minutes');
+            console.log('🛒 [ABANDONED CHECKOUT] First email: 10 minutes after abandonment');
+            console.log('🛒 [ABANDONED CHECKOUT] Second email: 20 minutes after abandonment (10 minutes after first)');
+            
+            // Run immediately on startup (after 2 minute delay to let server stabilize)
+            setTimeout(() => {
+                abandonedCheckoutService.processAbandonedCheckouts().catch(err => {
+                    console.error('❌ [ABANDONED CHECKOUT] Initial processing error:', err);
+                });
+            }, 120000); // 2 minute delay
+            
+            // Then run every 5 minutes (to catch 10-minute windows accurately)
+            setInterval(() => {
+                abandonedCheckoutService.processAbandonedCheckouts().catch(err => {
+                    console.error('❌ [ABANDONED CHECKOUT] Scheduled processing error:', err);
+                });
+            }, 5 * 60 * 1000); // 5 minutes (checks twice per 10-minute window)
+        } else {
+            console.log('🛒 [ABANDONED CHECKOUT] Service disabled (ENABLE_ABANDONED_CHECKOUT=false)');
         }
     });
 }

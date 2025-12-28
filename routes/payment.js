@@ -264,6 +264,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         }
 
         const order = findResult.data;
+        const normalizedEmail = (order.customer?.email || order.customerEmail || '').toLowerCase().trim();
 
         // Update order with payment status
         const updateData = {
@@ -367,6 +368,48 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
                 console.log(`📧 [PAYMENT WEBHOOK] Order ${orderId} confirmation email already sent, skipping`);
             } else if (!order.customer?.email) {
                 console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} has no customer email, cannot send confirmation`);
+            }
+        }
+
+        // Mark abandoned checkout as completed (if exists)
+        if (normalizedEmail) {
+            try {
+                const checkoutResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'abandoned_checkouts',
+                    command: '--read',
+                    data: {
+                        email: normalizedEmail,
+                        status: 'pending'
+                    }
+                });
+
+                if (checkoutResult.success && checkoutResult.data) {
+                    const checkouts = Array.isArray(checkoutResult.data) ? checkoutResult.data : [checkoutResult.data];
+                    
+                    // Mark all pending checkouts for this email as completed
+                    for (const checkout of checkouts) {
+                        await db.executeOperation({
+                            database_name: 'peakmode',
+                            collection_name: 'abandoned_checkouts',
+                            command: '--update',
+                            data: {
+                                filter: { id: checkout.id },
+                                update: {
+                                    status: 'completed',
+                                    completedAt: new Date().toISOString(),
+                                    orderId: orderId,
+                                    updatedAt: new Date().toISOString()
+                                }
+                            }
+                        });
+                        
+                        console.log(`✅ [PAYMENT WEBHOOK] Marked abandoned checkout ${checkout.id} as completed for order ${orderId}`);
+                    }
+                }
+            } catch (checkoutError) {
+                // Don't fail if checkout update fails - this is not critical
+                console.warn('⚠️ [PAYMENT WEBHOOK] Failed to mark checkout as completed:', checkoutError.message);
             }
         }
 
