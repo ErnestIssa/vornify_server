@@ -99,7 +99,12 @@ router.post('/welcome', async (req, res) => {
 
 /**
  * POST /api/email/order-confirmation
- * Send order confirmation email
+ * Send order confirmation email (ADMIN/TESTING ONLY)
+ * 
+ * ⚠️ WARNING: This endpoint should ONLY be used for testing/admin purposes.
+ * Order confirmation emails are automatically sent via Stripe webhook after payment success.
+ * 
+ * This endpoint verifies payment status before sending to prevent emails for unpaid orders.
  * 
  * Body:
  * {
@@ -130,6 +135,59 @@ router.post('/order-confirmation', async (req, res) => {
                 success: false,
                 error: 'Order details are required'
             });
+        }
+
+        // CRITICAL: Verify payment status before sending email
+        // Order confirmation emails should ONLY be sent for paid orders
+        if (orderDetails.orderId) {
+            try {
+                const getDBInstance = require('../vornifydb/dbInstance');
+                const db = getDBInstance();
+                
+                // Fetch order from database to verify payment status
+                const orderResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'orders',
+                    command: '--read',
+                    data: { orderId: orderDetails.orderId }
+                });
+
+                if (orderResult.success && orderResult.data) {
+                    const order = Array.isArray(orderResult.data) ? orderResult.data[0] : orderResult.data;
+                    
+                    // Verify payment status - ONLY send if payment succeeded
+                    if (order.paymentStatus !== 'succeeded') {
+                        return res.status(400).json({
+                            success: false,
+                            error: 'Order confirmation email can only be sent for paid orders',
+                            errorCode: 'ORDER_NOT_PAID',
+                            paymentStatus: order.paymentStatus,
+                            message: `Order ${orderDetails.orderId} payment status is '${order.paymentStatus}', not 'succeeded'. Email cannot be sent.`
+                        });
+                    }
+
+                    // Check if email was already sent (prevent duplicates)
+                    if (order.emailSent === true) {
+                        return res.status(400).json({
+                            success: false,
+                            error: 'Order confirmation email has already been sent',
+                            errorCode: 'EMAIL_ALREADY_SENT',
+                            message: `Order ${orderDetails.orderId} confirmation email was already sent. Use Stripe webhook for automatic sending.`
+                        });
+                    }
+                } else {
+                    // Order not found - allow sending but log warning (for testing scenarios)
+                    console.warn(`⚠️ [EMAIL ROUTE] Order ${orderDetails.orderId} not found in database. Proceeding with email send (testing scenario?).`);
+                }
+            } catch (dbError) {
+                console.error('Failed to verify order payment status:', dbError);
+                // For testing scenarios, allow email but log error
+                // In production, you might want to fail here
+                console.warn('⚠️ [EMAIL ROUTE] Could not verify payment status, proceeding with caution (testing scenario?)');
+            }
+        } else {
+            // No orderId provided - this is a testing scenario
+            console.warn('⚠️ [EMAIL ROUTE] No orderId provided in orderDetails. This endpoint should only be used for testing/admin purposes.');
         }
 
         // Get language from orderDetails if provided
