@@ -76,70 +76,84 @@ router.post('/email-capture', async (req, res) => {
         
         let checkoutId;
         let saveResult;
+        let existingCheckout = null;
         
         if (existingCheckoutResult.success && existingCheckoutResult.data) {
-            // Update existing checkout
-            const existingCheckout = Array.isArray(existingCheckoutResult.data) 
-                ? existingCheckoutResult.data[0] 
-                : existingCheckoutResult.data;
-            checkoutId = existingCheckout.id;
+            // Extract existing checkout data
+            if (Array.isArray(existingCheckoutResult.data)) {
+                existingCheckout = existingCheckoutResult.data.length > 0 ? existingCheckoutResult.data[0] : null;
+            } else {
+                existingCheckout = existingCheckoutResult.data;
+            }
             
-            // Build update object - DO NOT include _id (it's immutable)
-            // Only include fields we want to update
-            const updateData = {
-                email: normalizedEmail,
-                cart: Array.isArray(cartItems) ? cartItems : (existingCheckout.cart || []),
-                total: typeof total === 'number' ? total : (existingCheckout.total || 0),
-                lastActivityAt: now, // Update activity time (user is active)
-                updatedAt: now
-            };
+            // Validate existing checkout has valid ID
+            if (existingCheckout && existingCheckout.id) {
+                checkoutId = existingCheckout.id;
+                
+                // Build update object - DO NOT include _id (it's immutable)
+                // Only include fields we want to update
+                const updateData = {
+                    email: normalizedEmail,
+                    cart: Array.isArray(cartItems) ? cartItems : (existingCheckout.cart || []),
+                    total: typeof total === 'number' ? total : (existingCheckout.total || 0),
+                    lastActivityAt: now, // Update activity time (user is active)
+                    updatedAt: now
+                };
 
-            // Only add optional fields if they have values
-            if (userId) updateData.userId = userId;
-            if (customer && typeof customer === 'object' && Object.keys(customer).length > 0) {
-                updateData.customer = customer;
-            } else if (existingCheckout.customer) {
-                updateData.customer = existingCheckout.customer;
-            }
-            if (shippingAddress && typeof shippingAddress === 'object' && Object.keys(shippingAddress).length > 0) {
-                updateData.shippingAddress = shippingAddress;
-            } else if (existingCheckout.shippingAddress) {
-                updateData.shippingAddress = existingCheckout.shippingAddress;
-            }
-            if (shippingMethod && typeof shippingMethod === 'object' && Object.keys(shippingMethod).length > 0) {
-                updateData.shippingMethod = shippingMethod;
-            } else if (existingCheckout.shippingMethod) {
-                updateData.shippingMethod = existingCheckout.shippingMethod;
-            }
-
-            // Log before update for debugging
-            console.log('💾 [CHECKOUT] Attempting to update abandoned checkout:', {
-                checkoutId: checkoutId,
-                email: normalizedEmail,
-                hasCartItems: !!cartItems && cartItems.length > 0,
-                cartItemsCount: cartItems?.length || 0,
-                total: total
-            });
-
-            saveResult = await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'abandoned_checkouts',
-                command: '--update',
-                data: {
-                    filter: { id: checkoutId },
-                    update: updateData  // Only update fields, don't include _id
+                // Only add optional fields if they have values
+                if (userId) updateData.userId = userId;
+                if (customer && typeof customer === 'object' && Object.keys(customer).length > 0) {
+                    updateData.customer = customer;
+                } else if (existingCheckout.customer) {
+                    updateData.customer = existingCheckout.customer;
                 }
-            });
+                if (shippingAddress && typeof shippingAddress === 'object' && Object.keys(shippingAddress).length > 0) {
+                    updateData.shippingAddress = shippingAddress;
+                } else if (existingCheckout.shippingAddress) {
+                    updateData.shippingAddress = existingCheckout.shippingAddress;
+                }
+                if (shippingMethod && typeof shippingMethod === 'object' && Object.keys(shippingMethod).length > 0) {
+                    updateData.shippingMethod = shippingMethod;
+                } else if (existingCheckout.shippingMethod) {
+                    updateData.shippingMethod = existingCheckout.shippingMethod;
+                }
 
-            // Log result for debugging
-            console.log('💾 [CHECKOUT] Database update result:', {
-                success: saveResult.success,
-                status: saveResult.status,
-                message: saveResult.message,
-                error: saveResult.error,
-                data: saveResult.data ? 'present' : 'missing'
-            });
-        } else {
+                // Log before update for debugging
+                console.log('💾 [CHECKOUT] Attempting to update abandoned checkout:', {
+                    checkoutId: checkoutId,
+                    email: normalizedEmail,
+                    hasCartItems: !!cartItems && cartItems.length > 0,
+                    cartItemsCount: cartItems?.length || 0,
+                    total: total
+                });
+
+                saveResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'abandoned_checkouts',
+                    command: '--update',
+                    data: {
+                        filter: { id: checkoutId },
+                        update: updateData  // Only update fields, don't include _id
+                    }
+                });
+
+                // Log result for debugging
+                console.log('💾 [CHECKOUT] Database update result:', {
+                    success: saveResult.success,
+                    status: saveResult.status,
+                    message: saveResult.message,
+                    error: saveResult.error,
+                    data: saveResult.data ? 'present' : 'missing'
+                });
+            } else {
+                // Existing checkout data found but invalid, will create new one
+                console.log('⚠️ [CHECKOUT] Existing checkout data found but no valid checkout ID, creating new checkout instead');
+                existingCheckout = null; // Clear invalid checkout
+            }
+        }
+        
+        // If no checkoutId yet, create new checkout record
+        if (!checkoutId) {
             // Create new checkout record
             checkoutId = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
             
