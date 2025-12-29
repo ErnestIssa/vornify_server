@@ -93,34 +93,61 @@ router.post('/email-capture', async (req, res) => {
             // Create new checkout record
             checkoutId = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
             
+            // Build abandoned checkout object, only including fields with values (avoid null)
             const abandonedCheckout = {
                 id: checkoutId,
                 email: normalizedEmail,
-                cart: cartItems || [],
-                total: total || 0,
+                cart: Array.isArray(cartItems) ? cartItems : [],
+                total: typeof total === 'number' ? total : 0,
                 status: 'pending', // Will be changed to 'completed' on payment success
                 emailSent: false,
                 createdAt: now,
                 lastActivityAt: now, // Track last activity time (user activity, not creation time)
-                updatedAt: now,
-                userId: userId || null,
-                // Store customer information if provided
-                customer: customer || null,
-                // Store shipping address if provided
-                shippingAddress: shippingAddress || null,
-                // Store shipping method if provided
-                shippingMethod: shippingMethod || null
+                updatedAt: now
             };
+
+            // Only add optional fields if they have values
+            if (userId) abandonedCheckout.userId = userId;
+            if (customer && typeof customer === 'object' && Object.keys(customer).length > 0) {
+                abandonedCheckout.customer = customer;
+            }
+            if (shippingAddress && typeof shippingAddress === 'object' && Object.keys(shippingAddress).length > 0) {
+                abandonedCheckout.shippingAddress = shippingAddress;
+            }
+            if (shippingMethod && typeof shippingMethod === 'object' && Object.keys(shippingMethod).length > 0) {
+                abandonedCheckout.shippingMethod = shippingMethod;
+            }
             
+            // Log before save for debugging
+            console.log('💾 [CHECKOUT] Attempting to save abandoned checkout:', {
+                checkoutId: checkoutId,
+                email: normalizedEmail,
+                hasCartItems: !!cartItems && cartItems.length > 0,
+                cartItemsCount: cartItems?.length || 0,
+                total: total
+            });
+
             saveResult = await db.executeOperation({
                 database_name: 'peakmode',
                 collection_name: 'abandoned_checkouts',
                 command: '--create',
                 data: abandonedCheckout
             });
+
+            // Log result for debugging
+            console.log('💾 [CHECKOUT] Database save result:', {
+                success: saveResult.success,
+                status: saveResult.status,
+                message: saveResult.message,
+                error: saveResult.error,
+                data: saveResult.data ? 'present' : 'missing'
+            });
         }
 
-        if (saveResult.success) {
+        // Check both success and status (VornifyDB may use either)
+        const isSuccess = saveResult.success === true || saveResult.status === true || saveResult.success !== false;
+        
+        if (isSuccess) {
             console.log(`✅ [CHECKOUT] Email captured for abandoned checkout:`, {
                 checkoutId: checkoutId,
                 email: normalizedEmail,
@@ -176,11 +203,18 @@ router.post('/email-capture', async (req, res) => {
                 }
             });
         } else {
-            console.error('❌ [CHECKOUT] Failed to save abandoned checkout:', saveResult);
+            console.error('❌ [CHECKOUT] Failed to save abandoned checkout:', {
+                success: saveResult.success,
+                status: saveResult.status,
+                message: saveResult.message,
+                error: saveResult.error,
+                fullResult: JSON.stringify(saveResult, null, 2)
+            });
             res.status(500).json({
                 success: false,
                 error: 'Failed to capture email',
-                errorCode: 'DATABASE_ERROR'
+                errorCode: 'DATABASE_ERROR',
+                details: saveResult.message || saveResult.error || 'Unknown database error'
             });
         }
     } catch (error) {

@@ -73,25 +73,40 @@ async function saveFailedCheckout(paymentIntent, order) {
         // Calculate total from order
         const total = order.totals?.total || order.total || (paymentIntent.amount / 100);
 
+        // Build failed checkout object, only including fields with values (avoid null)
         const failedCheckout = {
             id: `failed_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
             email: customerEmail.toLowerCase().trim(),
-            cart: cartItems,
-            total: total,
+            cart: Array.isArray(cartItems) ? cartItems : [],
+            total: typeof total === 'number' ? total : 0,
             status: 'failed',
             retryToken: retryToken,
             emailSent: false,
-            orderId: order.orderId || null,
             paymentIntentId: paymentIntent.id,
             createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            // Store customer information from order
-            customer: order.customer || null,
-            // Store shipping address from order
-            shippingAddress: order.shippingAddress || null,
-            // Store shipping method from order
-            shippingMethod: order.shippingMethod || null
+            updatedAt: new Date().toISOString()
         };
+
+        // Only add optional fields if they have values
+        if (order.orderId) failedCheckout.orderId = order.orderId;
+        if (order.customer && typeof order.customer === 'object' && Object.keys(order.customer).length > 0) {
+            failedCheckout.customer = order.customer;
+        }
+        if (order.shippingAddress && typeof order.shippingAddress === 'object' && Object.keys(order.shippingAddress).length > 0) {
+            failedCheckout.shippingAddress = order.shippingAddress;
+        }
+        if (order.shippingMethod && typeof order.shippingMethod === 'object' && Object.keys(order.shippingMethod).length > 0) {
+            failedCheckout.shippingMethod = order.shippingMethod;
+        }
+
+        // Log before save for debugging
+        console.log('💾 [PAYMENT FAILURE] Attempting to save failed checkout:', {
+            id: failedCheckout.id,
+            email: failedCheckout.email,
+            total: failedCheckout.total,
+            itemsCount: cartItems.length,
+            retryToken: retryToken
+        });
 
         // Save to failed_checkouts collection
         const saveResult = await db.executeOperation({
@@ -101,7 +116,19 @@ async function saveFailedCheckout(paymentIntent, order) {
             data: failedCheckout
         });
 
-        if (saveResult.success) {
+        // Log result for debugging
+        console.log('💾 [PAYMENT FAILURE] Database save result:', {
+            success: saveResult.success,
+            status: saveResult.status,
+            message: saveResult.message,
+            error: saveResult.error,
+            data: saveResult.data ? 'present' : 'missing'
+        });
+
+        // Check both success and status (VornifyDB may use either)
+        const isSuccess = saveResult.success === true || saveResult.status === true || saveResult.success !== false;
+
+        if (isSuccess) {
             console.log(`✅ [PAYMENT FAILURE] Failed checkout saved:`, {
                 id: failedCheckout.id,
                 email: failedCheckout.email,
@@ -116,10 +143,17 @@ async function saveFailedCheckout(paymentIntent, order) {
                 failedCheckoutId: failedCheckout.id
             };
         } else {
-            console.error('❌ [PAYMENT FAILURE] Failed to save failed checkout:', saveResult);
+            console.error('❌ [PAYMENT FAILURE] Failed to save failed checkout:', {
+                success: saveResult.success,
+                status: saveResult.status,
+                message: saveResult.message,
+                error: saveResult.error,
+                fullResult: JSON.stringify(saveResult, null, 2)
+            });
             return {
                 success: false,
-                error: 'Failed to save failed checkout'
+                error: 'Failed to save failed checkout',
+                details: saveResult.message || saveResult.error || 'Unknown database error'
             };
         }
     } catch (error) {
