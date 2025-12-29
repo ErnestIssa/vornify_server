@@ -4,8 +4,9 @@ const crypto = require('crypto');
 
 const db = getDBInstance();
 
-// Payment failure email delay (3 minutes)
-const PAYMENT_FAILURE_EMAIL_DELAY = 3 * 60 * 1000; // 3 minutes in milliseconds
+// Payment failure email delays
+const PAYMENT_FAILURE_EMAIL_DELAY_1 = 10 * 60 * 1000; // 10 minutes for first email
+const PAYMENT_FAILURE_EMAIL_DELAY_2 = 20 * 60 * 1000; // 20 minutes for second email (10 minutes after first)
 
 /**
  * Generate unique retry token
@@ -92,13 +93,16 @@ async function saveFailedCheckout(paymentIntent, order) {
             status: 'failed',
             retryToken: retryToken,
             emailSent: false,
+            secondEmailSent: false,
             paymentIntentId: paymentIntent.id,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
 
         // Only add optional fields if they have values
-        if (order.orderId) failedCheckout.orderId = order.orderId;
+        // Try to get orderId from order first, then from payment intent metadata
+        const orderId = order.orderId || paymentIntent.metadata?.orderId || null;
+        if (orderId) failedCheckout.orderId = orderId;
         if (order.customer && typeof order.customer === 'object' && Object.keys(order.customer).length > 0) {
             failedCheckout.customer = order.customer;
         }
@@ -238,7 +242,6 @@ async function processPendingPaymentFailures() {
         console.log('💳 [PAYMENT FAILURE] Checking for pending payment failures...');
         
         const now = new Date();
-        const cutoffTime = new Date(now - PAYMENT_FAILURE_EMAIL_DELAY); // 3 minutes ago
 
         // Find all failed checkouts (VornifyDB doesn't support complex queries)
         // We'll filter in memory for eligibility
@@ -263,23 +266,31 @@ async function processPendingPaymentFailures() {
         const checkoutsArray = Array.isArray(checkouts) ? checkouts : (checkouts ? [checkouts] : []);
 
         // Filter checkouts in memory for eligibility
-        const eligibleCheckouts = checkoutsArray.filter(checkout => {
+        // Separate into first email (10 minutes) and second email (20 minutes) eligible checkouts
+        const firstEmailCheckouts = [];
+        const secondEmailCheckouts = [];
+        
+        checkoutsArray.forEach(checkout => {
             // Must be failed status
-            if (checkout.status !== 'failed') return false;
-            
-            // Email must not be sent
-            if (checkout.emailSent === true) return false;
+            if (checkout.status !== 'failed') return;
             
             // Must have email
-            if (!checkout.email) return false;
+            if (!checkout.email) return;
             
-            // Must be created more than 3 minutes ago
             const createdAt = new Date(checkout.createdAt);
             const minutesElapsed = Math.floor((now - createdAt) / (60 * 1000));
-            if (minutesElapsed < 3) return false;
             
-            return true;
+            // First email: not sent yet, created more than 10 minutes ago
+            if (!checkout.emailSent && minutesElapsed >= 10) {
+                firstEmailCheckouts.push(checkout);
+            }
+            // Second email: first email sent, second not sent, created more than 20 minutes ago
+            else if (checkout.emailSent && !checkout.secondEmailSent && minutesElapsed >= 20) {
+                secondEmailCheckouts.push(checkout);
+            }
         });
+        
+        const eligibleCheckouts = [...firstEmailCheckouts, ...secondEmailCheckouts];
 
         console.log(`💳 [PAYMENT FAILURE] Found ${checkoutsArray.length} failed checkouts, ${eligibleCheckouts.length} eligible for emails`);
 
@@ -321,41 +332,66 @@ async function processPendingPaymentFailures() {
 
             // Generate retry URL
             const paymentRetryUrl = generatePaymentRetryUrl(checkout.retryToken);
+            
+            // Determine if this is first or second email
+            const isSecondEmail = checkout.emailSent === true && !checkout.secondEmailSent;
+            const emailType = isSecondEmail ? 'second' : 'first';
+
+            // Get order number - try checkout.orderId, then payment intent metadata
+            let orderNumber = checkout.orderId || 'N/A';
+            if (orderNumber === 'N/A' && checkout.paymentIntentId) {
+                try {
+                    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+                    const paymentIntent = await stripe.paymentIntents.retrieve(checkout.paymentIntentId);
+                    orderNumber = paymentIntent.metadata?.orderId || 'N/A';
+                } catch (error) {
+                    console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve orderId from payment intent:', error.message);
+                }
+            }
 
             // Send email
             const emailResult = await emailService.sendPaymentFailedEmail(
                 customerEmail,
                 customerName,
-                checkout.orderId || 'N/A',
+                orderNumber,
                 paymentRetryUrl
             );
 
             if (emailResult.success) {
-                // Mark email as sent
+                // Mark appropriate email as sent
+                const updateData = {
+                    updatedAt: new Date().toISOString()
+                };
+                
+                if (isSecondEmail) {
+                    updateData.secondEmailSent = true;
+                    updateData.secondEmailSentAt = new Date().toISOString();
+                } else {
+                    updateData.emailSent = true;
+                    updateData.emailSentAt = new Date().toISOString();
+                }
+                
                 await db.executeOperation({
                     database_name: 'peakmode',
                     collection_name: 'failed_checkouts',
                     command: '--update',
                     data: {
                         filter: { id: checkout.id },
-                        update: {
-                            emailSent: true,
-                            emailSentAt: new Date().toISOString(),
-                            updatedAt: new Date().toISOString()
-                        }
+                        update: updateData
                     }
                 });
 
                 results.sent++;
-                console.log(`✅ [PAYMENT FAILURE] Payment failure email sent to ${customerEmail}`, {
+                console.log(`✅ [PAYMENT FAILURE] Payment failure email (${emailType}) sent to ${customerEmail}`, {
                     failedCheckoutId: checkout.id,
                     retryToken: checkout.retryToken,
+                    orderNumber: orderNumber,
                     messageId: emailResult.messageId,
                     timestamp: emailResult.timestamp
                 });
             } else {
                 results.errors++;
-                console.error(`❌ [PAYMENT FAILURE] Failed to send email to ${customerEmail}:`, {
+                console.error(`❌ [PAYMENT FAILURE] Failed to send email (${emailType}) to ${customerEmail}:`, {
                     failedCheckoutId: checkout.id,
                     error: emailResult.error
                 });
