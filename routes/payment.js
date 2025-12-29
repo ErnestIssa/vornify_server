@@ -1052,6 +1052,15 @@ router.post('/create-intent', async (req, res) => {
  * }
  */
 router.post('/payment-failed', async (req, res) => {
+    // CRITICAL: Log that endpoint was hit
+    console.log('🔔 [PAYMENT FAILURE] Payment failed endpoint HIT:', {
+        timestamp: new Date().toISOString(),
+        hasOrderId: !!req.body.orderId,
+        hasPaymentIntentId: !!req.body.paymentIntentId,
+        orderId: req.body.orderId || 'missing',
+        paymentIntentId: req.body.paymentIntentId ? req.body.paymentIntentId.substring(0, 20) + '...' : 'missing'
+    });
+
     try {
         const { orderId, paymentIntentId, error } = req.body;
         

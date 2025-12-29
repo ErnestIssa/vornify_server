@@ -21,6 +21,15 @@ const db = getDBInstance();
  * }
  */
 router.post('/email-capture', async (req, res) => {
+    // CRITICAL: Log that endpoint was hit
+    console.log('🔔 [CHECKOUT] Email capture endpoint HIT:', {
+        timestamp: new Date().toISOString(),
+        hasEmail: !!req.body.email,
+        hasCartItems: !!req.body.cartItems,
+        email: req.body.email ? req.body.email.substring(0, 10) + '...' : 'missing',
+        cartItemsCount: req.body.cartItems?.length || 0
+    });
+
     try {
         const { email, cartItems, total, userId, customer, shippingAddress, shippingMethod } = req.body;
 
@@ -45,12 +54,24 @@ router.post('/email-capture', async (req, res) => {
         const normalizedEmail = email.trim().toLowerCase();
         const now = new Date().toISOString();
         
+        console.log('🔍 [CHECKOUT] Checking for existing checkout:', {
+            email: normalizedEmail,
+            database: 'peakmode',
+            collection: 'abandoned_checkouts'
+        });
+        
         // Check if checkout already exists (user updating existing checkout)
         const existingCheckoutResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'abandoned_checkouts',
             command: '--read',
             data: { email: normalizedEmail, status: 'pending' }
+        });
+
+        console.log('🔍 [CHECKOUT] Existing checkout check result:', {
+            success: existingCheckoutResult.success,
+            hasData: !!existingCheckoutResult.data,
+            dataType: existingCheckoutResult.data ? (Array.isArray(existingCheckoutResult.data) ? 'array' : 'object') : 'null'
         });
         
         let checkoutId;
@@ -237,13 +258,19 @@ router.post('/email-capture', async (req, res) => {
                 status: saveResult.status,
                 message: saveResult.message,
                 error: saveResult.error,
-                fullResult: JSON.stringify(saveResult, null, 2)
+                fullResult: JSON.stringify(saveResult, null, 2),
+                database: 'peakmode',
+                collection: 'abandoned_checkouts',
+                checkoutId: checkoutId,
+                email: normalizedEmail
             });
             res.status(500).json({
                 success: false,
                 error: 'Failed to capture email',
                 errorCode: 'DATABASE_ERROR',
-                details: saveResult.message || saveResult.error || 'Unknown database error'
+                details: saveResult.message || saveResult.error || 'Unknown database error',
+                database: 'peakmode',
+                collection: 'abandoned_checkouts'
             });
         }
     } catch (error) {
@@ -419,6 +446,98 @@ router.put('/activity/:checkoutId', async (req, res) => {
             success: false,
             error: 'Failed to update activity',
             errorCode: 'INTERNAL_ERROR'
+        });
+    }
+});
+
+/**
+ * GET /api/checkout/diagnostic
+ * Diagnostic endpoint to verify database connectivity and collection access
+ */
+router.get('/diagnostic', async (req, res) => {
+    try {
+        console.log('🔍 [CHECKOUT DIAGNOSTIC] Running diagnostic check...');
+        
+        // Test 1: Check database connection
+        const testRead = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'abandoned_checkouts',
+            command: '--read',
+            data: {}
+        });
+        
+        // Test 2: Try to create a test record
+        const testCheckout = {
+            id: `diagnostic_${Date.now()}`,
+            email: 'diagnostic@test.com',
+            cart: [{ name: 'Test', quantity: 1 }],
+            total: 0,
+            status: 'pending',
+            emailSent: false,
+            createdAt: new Date().toISOString(),
+            lastActivityAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        
+        const testCreate = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'abandoned_checkouts',
+            command: '--create',
+            data: testCheckout
+        });
+        
+        // Test 3: Try to read it back
+        let testReadBack = null;
+        if (testCreate.success || testCreate.status) {
+            testReadBack = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'abandoned_checkouts',
+                command: '--read',
+                data: { id: testCheckout.id }
+            });
+            
+            // Clean up test record
+            if (testReadBack.success && testReadBack.data) {
+                await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'abandoned_checkouts',
+                    command: '--delete',
+                    data: { id: testCheckout.id }
+                });
+            }
+        }
+        
+        res.json({
+            success: true,
+            diagnostic: {
+                database: 'peakmode',
+                collection: 'abandoned_checkouts',
+                readTest: {
+                    success: testRead.success || testRead.status,
+                    recordCount: Array.isArray(testRead.data) ? testRead.data.length : (testRead.data ? 1 : 0),
+                    error: testRead.error || testRead.message
+                },
+                createTest: {
+                    success: testCreate.success || testCreate.status,
+                    error: testCreate.error || testCreate.message,
+                    insertedId: testCreate.data?.insertedId || null
+                },
+                readBackTest: testReadBack ? {
+                    success: testReadBack.success || testReadBack.status,
+                    found: !!testReadBack.data,
+                    error: testReadBack.error || testReadBack.message
+                } : null,
+                endpoint: 'POST /api/checkout/email-capture',
+                routeRegistered: true
+            }
+        });
+    } catch (error) {
+        console.error('❌ [CHECKOUT DIAGNOSTIC] Error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Diagnostic failed',
+            details: error.message,
+            stack: error.stack
         });
     }
 });

@@ -32,6 +32,16 @@ function generatePaymentRetryUrl(retryToken) {
  * @returns {Promise<object>} Result object with retryToken
  */
 async function saveFailedCheckout(paymentIntent, order) {
+    // CRITICAL: Log that function was called
+    console.log('🔔 [PAYMENT FAILURE] saveFailedCheckout function CALLED:', {
+        timestamp: new Date().toISOString(),
+        hasPaymentIntent: !!paymentIntent,
+        hasOrder: !!order,
+        paymentIntentId: paymentIntent?.id || 'missing',
+        orderId: order?.orderId || 'missing',
+        hasCustomerEmail: !!(order?.customer?.email || order?.customerEmail)
+    });
+
     try {
         // Try multiple ways to get customer email
         let customerEmail = order.customer?.email || 
