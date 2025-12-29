@@ -38,7 +38,7 @@ function generateCheckoutUrl(checkoutId) {
 /**
  * Process abandoned checkout and send email
  * @param {object} checkout - Abandoned checkout object
- * @param {number} timeoutMinutes - Minutes since checkout was created
+ * @param {number} timeoutMinutes - Minutes since last activity (inactivity time)
  * @returns {Promise<object>} Result object
  */
 async function processAbandonedCheckout(checkout, timeoutMinutes) {
@@ -56,21 +56,21 @@ async function processAbandonedCheckout(checkout, timeoutMinutes) {
         const isFirstEmail = !checkout.emailSent || checkout.emailSent === false;
         const isSecondEmail = checkout.emailSent === true && !checkout.secondEmailSent;
         
-        // Check timing for first email (10 minutes)
+        // Check timing for first email (10 minutes of inactivity)
         if (isFirstEmail && timeoutMinutes < 10) {
             return {
                 success: false,
                 skipped: true,
-                reason: `Not yet 10 minutes (${timeoutMinutes} minutes elapsed)`
+                reason: `Not yet 10 minutes of inactivity (${timeoutMinutes} minutes since last activity)`
             };
         }
         
-        // Check timing for second email (20 minutes total, 10 minutes after first)
+        // Check timing for second email (20 minutes of inactivity total, 10 minutes after first)
         if (isSecondEmail && timeoutMinutes < 20) {
             return {
                 success: false,
                 skipped: true,
-                reason: `Not yet 20 minutes for second email (${timeoutMinutes} minutes elapsed)`
+                reason: `Not yet 20 minutes of inactivity for second email (${timeoutMinutes} minutes since last activity)`
             };
         }
         
@@ -212,8 +212,9 @@ async function processAbandonedCheckouts() {
 
         // Find all checkouts that:
         // 1. Status is 'pending' (not completed)
-        // 2. Created more than 10 minutes ago (for first email) OR 20 minutes ago (for second email)
+        // 2. Last activity more than 10 minutes ago (for first email) OR 20 minutes ago (for second email)
         // 3. First email not sent OR second email not sent
+        // Note: We use lastActivityAt (not createdAt) to track actual user inactivity
         const checkoutsResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'abandoned_checkouts',
@@ -221,17 +222,23 @@ async function processAbandonedCheckouts() {
             data: {
                 status: 'pending',
                 $or: [
-                    // First email: created > 10 mins ago, emailSent = false
+                    // First email: last activity > 10 mins ago, emailSent = false
                     {
-                        createdAt: { $lt: cutoffTime1.toISOString() },
+                        $or: [
+                            { lastActivityAt: { $lt: cutoffTime1.toISOString() } },
+                            { lastActivityAt: { $exists: false } } // Fallback to createdAt if lastActivityAt doesn't exist
+                        ],
                         $or: [
                             { emailSent: { $exists: false } },
                             { emailSent: false }
                         ]
                     },
-                    // Second email: created > 20 mins ago, emailSent = true, secondEmailSent = false
+                    // Second email: last activity > 20 mins ago, emailSent = true, secondEmailSent = false
                     {
-                        createdAt: { $lt: cutoffTime2.toISOString() },
+                        $or: [
+                            { lastActivityAt: { $lt: cutoffTime2.toISOString() } },
+                            { lastActivityAt: { $exists: false } } // Fallback to createdAt if lastActivityAt doesn't exist
+                        ],
                         emailSent: true,
                         $or: [
                             { secondEmailSent: { $exists: false } },
@@ -263,9 +270,11 @@ async function processAbandonedCheckouts() {
         };
         
         for (const checkout of checkoutsArray) {
-            // Calculate minutes since checkout was created
-            const createdAt = new Date(checkout.createdAt);
-            const minutesElapsed = Math.floor((now - createdAt) / (60 * 1000));
+            // Calculate minutes since last activity (not creation time)
+            // Use lastActivityAt if available, otherwise fallback to createdAt for backward compatibility
+            const activityTime = checkout.lastActivityAt || checkout.createdAt;
+            const lastActivity = new Date(activityTime);
+            const minutesElapsed = Math.floor((now - lastActivity) / (60 * 1000));
             
             const result = await processAbandonedCheckout(checkout, minutesElapsed);
             

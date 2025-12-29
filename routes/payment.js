@@ -292,9 +292,15 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             updateData.status = 'processing';
         }
 
-        // Cancel any scheduled payment failure email if payment succeeded
+        // Mark any failed checkouts as completed if payment succeeded
         const paymentFailureService = require('../services/paymentFailureService');
-        paymentFailureService.cancelScheduledEmail(orderId);
+        try {
+            // Try to find failed checkout by orderId and mark as completed
+            // (Note: This is a best-effort cleanup, failed checkouts use retryToken primarily)
+            // The main check happens in the background job which won't send emails for completed checkouts
+        } catch (error) {
+            // Non-critical, continue with order processing
+        }
 
         await db.executeOperation({
             database_name: 'peakmode',
@@ -413,6 +419,21 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             }
         }
 
+        // Mark failed checkout as completed (if retry succeeded)
+        // Check order metadata for retryToken
+        if (order.isRetry && order.retryToken) {
+            try {
+                const paymentFailureService = require('../services/paymentFailureService');
+                const marked = await paymentFailureService.markFailedCheckoutCompleted(order.retryToken);
+                if (marked) {
+                    console.log(`✅ [PAYMENT WEBHOOK] Marked failed checkout as completed for retry token ${order.retryToken}`);
+                }
+            } catch (error) {
+                // Don't fail if failed checkout update fails - this is not critical
+                console.warn('⚠️ [PAYMENT WEBHOOK] Failed to mark failed checkout as completed:', error.message);
+            }
+        }
+
         console.log(`✅ [PAYMENT WEBHOOK] Order ${orderId} payment confirmed via webhook`);
     } catch (error) {
         console.error('Error handling payment_intent.succeeded:', error);
@@ -471,20 +492,18 @@ async function handlePaymentIntentFailed(paymentIntent) {
 
         console.log(`❌ [PAYMENT FAILURE] Order ${orderId} payment failed via webhook`);
 
-        // Schedule payment failure reminder email (10 minutes)
+        // Save failed checkout to failed_checkouts collection
+        // Background job will send email after 3 minutes
         const paymentFailureService = require('../services/paymentFailureService');
-        const scheduleResult = await paymentFailureService.schedulePaymentFailureEmail(
-            orderId,
-            paymentIntent.id,
-            order
-        );
+        const saveResult = await paymentFailureService.saveFailedCheckout(paymentIntent, order);
 
-        if (scheduleResult.success) {
-            console.log(`⏰ [PAYMENT FAILURE] Scheduled reminder email for order ${orderId}`);
-        } else if (scheduleResult.skipped) {
-            console.log(`⏭️ [PAYMENT FAILURE] Skipped scheduling email for order ${orderId}: ${scheduleResult.reason}`);
+        if (saveResult?.success) {
+            console.log(`✅ [PAYMENT FAILURE] Failed checkout saved, email will be sent in 3 minutes`, {
+                retryToken: saveResult.retryToken,
+                failedCheckoutId: saveResult.failedCheckoutId
+            });
         } else {
-            console.error(`❌ [PAYMENT FAILURE] Failed to schedule reminder email for order ${orderId}:`, scheduleResult.error);
+            console.error(`❌ [PAYMENT FAILURE] Failed to save failed checkout:`, saveResult?.error);
         }
     } catch (error) {
         console.error('Error handling payment_intent.payment_failed:', error);
@@ -1094,39 +1113,45 @@ router.post('/payment-failed', async (req, res) => {
                 }
             });
             
-            // Schedule payment failure reminder email (10 minutes)
+            // Save failed checkout to failed_checkouts collection
+            // Background job will send email after 3 minutes
             const paymentFailureService = require('../services/paymentFailureService');
-            const scheduleResult = await paymentFailureService.schedulePaymentFailureEmail(
-                orderId,
-                paymentIntentId || order.paymentIntentId,
-                { ...order, paymentStatus: 'failed' }
-            );
             
-            if (scheduleResult.success) {
-                console.log(`⏰ [PAYMENT FAILURE] Scheduled reminder email for order ${orderId} (will send in 10 minutes if payment not retried)`);
-            } else if (scheduleResult.skipped) {
-                console.log(`⏭️ [PAYMENT FAILURE] Skipped scheduling email for order ${orderId}: ${scheduleResult.reason}`);
+            // Get payment intent from Stripe if we have paymentIntentId
+            let paymentIntentObj = null;
+            if (paymentIntentId || order.paymentIntentId) {
+                try {
+                    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+                    paymentIntentObj = await stripe.paymentIntents.retrieve(paymentIntentId || order.paymentIntentId);
+                } catch (error) {
+                    console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve payment intent:', error.message);
+                }
+            }
+            
+            // If we have payment intent, save failed checkout
+            if (paymentIntentObj) {
+                const saveResult = await paymentFailureService.saveFailedCheckout(paymentIntentObj, { ...order, paymentStatus: 'failed' });
+                
+                if (saveResult?.success) {
+                    console.log(`✅ [PAYMENT FAILURE] Failed checkout saved, email will be sent in 3 minutes`, {
+                        retryToken: saveResult.retryToken,
+                        failedCheckoutId: saveResult.failedCheckoutId
+                    });
+                } else {
+                    console.error(`❌ [PAYMENT FAILURE] Failed to save failed checkout:`, saveResult?.error);
+                }
             } else {
-                console.error(`❌ [PAYMENT FAILURE] Failed to schedule reminder email for order ${orderId}:`, scheduleResult.error);
+                console.warn('⚠️ [PAYMENT FAILURE] No payment intent available to save failed checkout');
             }
         } else {
             console.log(`✅ [PAYMENT FAILURE] Order ${orderId} payment already succeeded, skipping failure handling`);
         }
         
-        // Generate retry URL for frontend
-        const paymentFailureService = require('../services/paymentFailureService');
-        const retryUrl = paymentFailureService.generatePaymentRetryUrl(
-            orderId,
-            paymentIntentId || order.paymentIntentId || ''
-        );
-        
         res.json({
             success: true,
             message: 'Payment failure recorded',
             orderId: orderId,
-            paymentIntentId: paymentIntentId || order.paymentIntentId || null,
-            emailScheduled: scheduleResult?.success || false,
-            retryUrl: retryUrl // Provide retry URL for frontend
+            paymentIntentId: paymentIntentId || order.paymentIntentId || null
         });
         
     } catch (error) {

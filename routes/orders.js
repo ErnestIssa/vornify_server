@@ -398,10 +398,16 @@ router.post('/create', async (req, res) => {
         ]);
         console.log('📦 [ORDER CREATE] Order ID generated:', orderId);
         
+        // Check if this is a retry payment (failed checkout retry)
+        const isRetry = orderData.isRetry === true;
+        const retryToken = orderData.retryToken || null;
+
         // Prepare order with enhanced customer data structure
         const order = {
             ...orderData,
             orderId,
+            isRetry: isRetry, // Include retry flag
+            retryToken: retryToken, // Include retry token
             status: orderData.status || 'processing',
             paymentStatus: orderData.paymentStatus || 'pending',
             emailSent: false, // Flag to track if confirmation email has been sent

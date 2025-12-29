@@ -637,7 +637,7 @@ class EmailService {
      * @param {string} paymentRetryUrl - URL to retry payment
      * @returns {Promise<object>} Result object
      */
-    async sendPaymentFailedEmail(to, name, orderNumber, paymentRetryUrl) {
+    async sendPaymentFailedEmail(to, name, orderNumber, paymentRetryUrl, supportEmail, websiteUrl) {
         try {
             const templateId = process.env.SENDGRID_PAYMENT_FAILED_TEMPLATE_ID || 'd-b57316a019694027b0a303c1d056bc1c';
             

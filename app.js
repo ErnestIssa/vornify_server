@@ -295,16 +295,24 @@ if (process.env.NODE_ENV !== 'test') {
             console.log('🛒 [ABANDONED CART] Service disabled (ENABLE_ABANDONED_CART=false)');
         }
         
-        // Process pending payment failure emails on startup (for recovery after restart)
+        // Process pending payment failure emails (runs every minute)
         if (process.env.ENABLE_PAYMENT_FAILURE_EMAIL !== 'false') {
-            console.log('💳 [PAYMENT FAILURE] Service enabled');
+            console.log('💳 [PAYMENT FAILURE] Service enabled - checking every 1 minute');
+            console.log('💳 [PAYMENT FAILURE] Email delay: 3 minutes after payment failure');
             
-            // Process pending emails after 2 minutes (let server stabilize)
+            // Run immediately on startup (after 1 minute delay to let server stabilize)
             setTimeout(() => {
                 paymentFailureService.processPendingPaymentFailures().catch(err => {
                     console.error('❌ [PAYMENT FAILURE] Initial processing error:', err);
                 });
-            }, 120000); // 2 minute delay
+            }, 60000); // 1 minute delay
+            
+            // Then run every 1 minute (to catch 3-minute windows accurately)
+            setInterval(() => {
+                paymentFailureService.processPendingPaymentFailures().catch(err => {
+                    console.error('❌ [PAYMENT FAILURE] Scheduled processing error:', err);
+                });
+            }, 60 * 1000); // 1 minute
         } else {
             console.log('💳 [PAYMENT FAILURE] Service disabled (ENABLE_PAYMENT_FAILURE_EMAIL=false)');
         }
