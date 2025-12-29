@@ -125,13 +125,15 @@ async function processAbandonedCheckout(checkout, timeoutMinutes) {
             cartUrl: cartUrl
         });
 
-        // Send email
+        // Send email (specify email type: 'first' or 'second')
+        const emailType = isFirstEmail ? 'first' : 'second';
         const emailResult = await emailService.sendAbandonedCartEmail(
             customerEmail,
             customerName,
             formattedItems,
             cartTotal,
-            cartUrl
+            cartUrl,
+            emailType
         );
 
         if (emailResult.success) {
@@ -210,42 +212,14 @@ async function processAbandonedCheckouts() {
         const cutoffTime1 = new Date(now - ABANDONED_CHECKOUT_TIMEOUT_1); // 10 minutes ago
         const cutoffTime2 = new Date(now - ABANDONED_CHECKOUT_TIMEOUT_2); // 20 minutes ago
 
-        // Find all checkouts that:
-        // 1. Status is 'pending' (not completed)
-        // 2. Last activity more than 10 minutes ago (for first email) OR 20 minutes ago (for second email)
-        // 3. First email not sent OR second email not sent
-        // Note: We use lastActivityAt (not createdAt) to track actual user inactivity
+        // Find all pending checkouts (VornifyDB doesn't support complex $or queries)
+        // We'll filter in memory for first/second email eligibility
         const checkoutsResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'abandoned_checkouts',
             command: '--read',
             data: {
-                status: 'pending',
-                $or: [
-                    // First email: last activity > 10 mins ago, emailSent = false
-                    {
-                        $or: [
-                            { lastActivityAt: { $lt: cutoffTime1.toISOString() } },
-                            { lastActivityAt: { $exists: false } } // Fallback to createdAt if lastActivityAt doesn't exist
-                        ],
-                        $or: [
-                            { emailSent: { $exists: false } },
-                            { emailSent: false }
-                        ]
-                    },
-                    // Second email: last activity > 20 mins ago, emailSent = true, secondEmailSent = false
-                    {
-                        $or: [
-                            { lastActivityAt: { $lt: cutoffTime2.toISOString() } },
-                            { lastActivityAt: { $exists: false } } // Fallback to createdAt if lastActivityAt doesn't exist
-                        ],
-                        emailSent: true,
-                        $or: [
-                            { secondEmailSent: { $exists: false } },
-                            { secondEmailSent: false }
-                        ]
-                    }
-                ]
+                status: 'pending'
             }
         });
 
@@ -258,10 +232,35 @@ async function processAbandonedCheckouts() {
         }
 
         const checkouts = checkoutsResult.data || [];
-        const checkoutsArray = Array.isArray(checkouts) ? checkouts : [checkouts];
+        const checkoutsArray = Array.isArray(checkouts) ? checkouts : (checkouts ? [checkouts] : []);
+
+        // Filter checkouts in memory for first/second email eligibility
+        const eligibleCheckouts = checkoutsArray.filter(checkout => {
+            // Use lastActivityAt if available, otherwise fallback to createdAt
+            const activityTime = checkout.lastActivityAt || checkout.createdAt;
+            const lastActivity = new Date(activityTime);
+            const minutesElapsed = Math.floor((now - lastActivity) / (60 * 1000));
+            
+            const isFirstEmail = !checkout.emailSent || checkout.emailSent === false;
+            const isSecondEmail = checkout.emailSent === true && (!checkout.secondEmailSent || checkout.secondEmailSent === false);
+            
+            // First email: inactive for 10+ minutes, not sent yet
+            if (isFirstEmail && minutesElapsed >= 10) {
+                return true;
+            }
+            
+            // Second email: inactive for 20+ minutes, first sent, second not sent
+            if (isSecondEmail && minutesElapsed >= 20) {
+                return true;
+            }
+            
+            return false;
+        });
+
+        console.log(`🛒 [ABANDONED CHECKOUT] Found ${checkoutsArray.length} pending checkouts, ${eligibleCheckouts.length} eligible for emails`);
 
         const results = {
-            total: checkoutsArray.length,
+            total: eligibleCheckouts.length,
             processed: 0,
             sent: 0,
             skipped: 0,
@@ -269,7 +268,7 @@ async function processAbandonedCheckouts() {
             details: []
         };
         
-        for (const checkout of checkoutsArray) {
+        for (const checkout of eligibleCheckouts) {
             // Calculate minutes since last activity (not creation time)
             // Use lastActivityAt if available, otherwise fallback to createdAt for backward compatibility
             const activityTime = checkout.lastActivityAt || checkout.createdAt;

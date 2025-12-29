@@ -33,12 +33,35 @@ function generatePaymentRetryUrl(retryToken) {
  */
 async function saveFailedCheckout(paymentIntent, order) {
     try {
-        const customerEmail = order.customer?.email || order.customerEmail;
+        // Try multiple ways to get customer email
+        let customerEmail = order.customer?.email || 
+                           order.customerEmail || 
+                           paymentIntent.receipt_email ||
+                           paymentIntent.metadata?.customerEmail ||
+                           null;
+        
+        // If still no email, try to get from payment intent customer
+        if (!customerEmail && paymentIntent.customer) {
+            try {
+                const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+                const customer = await stripe.customers.retrieve(paymentIntent.customer);
+                customerEmail = customer.email || null;
+            } catch (error) {
+                console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve customer email from Stripe:', error.message);
+            }
+        }
+        
         if (!customerEmail) {
-            console.warn('⚠️ [PAYMENT FAILURE] No customer email in order, cannot save failed checkout');
+            console.warn('⚠️ [PAYMENT FAILURE] No customer email found in order or payment intent, cannot save failed checkout', {
+                hasOrderCustomer: !!order.customer,
+                hasOrderCustomerEmail: !!order.customerEmail,
+                hasReceiptEmail: !!paymentIntent.receipt_email,
+                hasMetadataEmail: !!paymentIntent.metadata?.customerEmail,
+                hasStripeCustomer: !!paymentIntent.customer
+            });
             return {
                 success: false,
-                error: 'No customer email found'
+                error: 'No customer email found in order or payment intent'
             };
         }
 
@@ -173,21 +196,14 @@ async function processPendingPaymentFailures() {
         const now = new Date();
         const cutoffTime = new Date(now - PAYMENT_FAILURE_EMAIL_DELAY); // 3 minutes ago
 
-        // Find failed checkouts that:
-        // 1. Status is 'failed'
-        // 2. Created more than 3 minutes ago
-        // 3. Email not sent yet
+        // Find all failed checkouts (VornifyDB doesn't support complex queries)
+        // We'll filter in memory for eligibility
         const checkoutsResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'failed_checkouts',
             command: '--read',
             data: {
-                status: 'failed',
-                createdAt: { $lt: cutoffTime.toISOString() },
-                $or: [
-                    { emailSent: { $exists: false } },
-                    { emailSent: false }
-                ]
+                status: 'failed'
             }
         });
 
@@ -200,28 +216,38 @@ async function processPendingPaymentFailures() {
         }
 
         const checkouts = checkoutsResult.data || [];
-        const checkoutsArray = Array.isArray(checkouts) ? checkouts : [checkouts];
+        const checkoutsArray = Array.isArray(checkouts) ? checkouts : (checkouts ? [checkouts] : []);
+
+        // Filter checkouts in memory for eligibility
+        const eligibleCheckouts = checkoutsArray.filter(checkout => {
+            // Must be failed status
+            if (checkout.status !== 'failed') return false;
+            
+            // Email must not be sent
+            if (checkout.emailSent === true) return false;
+            
+            // Must have email
+            if (!checkout.email) return false;
+            
+            // Must be created more than 3 minutes ago
+            const createdAt = new Date(checkout.createdAt);
+            const minutesElapsed = Math.floor((now - createdAt) / (60 * 1000));
+            if (minutesElapsed < 3) return false;
+            
+            return true;
+        });
+
+        console.log(`💳 [PAYMENT FAILURE] Found ${checkoutsArray.length} failed checkouts, ${eligibleCheckouts.length} eligible for emails`);
 
         const results = {
-            total: checkoutsArray.length,
+            total: eligibleCheckouts.length,
             processed: 0,
             sent: 0,
             skipped: 0,
             errors: 0
         };
 
-        for (const checkout of checkoutsArray) {
-            // Double-check status (might have been completed)
-            if (checkout.status !== 'failed') {
-                results.skipped++;
-                continue;
-            }
-
-            // Check if email was already sent
-            if (checkout.emailSent === true) {
-                results.skipped++;
-                continue;
-            }
+        for (const checkout of eligibleCheckouts) {
 
             const customerEmail = checkout.email;
             if (!customerEmail) {

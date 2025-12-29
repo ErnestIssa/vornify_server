@@ -592,7 +592,7 @@ class EmailService {
      * @param {string} cartUrl - URL to recover cart
      * @returns {Promise<object>} Result object
      */
-    async sendAbandonedCartEmail(to, name, cartItems, cartTotal, cartUrl) {
+    async sendAbandonedCartEmail(to, name, cartItems, cartTotal, cartUrl, emailType = 'first') {
         try {
             const templateId = process.env.SENDGRID_ABANDONED_CART_TEMPLATE_ID || 'd-89a7f48daa654d1b8b04da1d1a7eda58';
             

@@ -221,7 +221,7 @@ app.use('/api/storage', storageRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/orders', ordersRoutes);
-app.use('/api/email-test', emailTestRoutes);
+app.use('/api/email-test', emailTestRoutes); // Email testing endpoints
 app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
