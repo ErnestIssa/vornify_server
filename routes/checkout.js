@@ -63,31 +63,60 @@ router.post('/email-capture', async (req, res) => {
                 : existingCheckoutResult.data;
             checkoutId = existingCheckout.id;
             
-            // Update existing checkout with new data and activity
-            const updatedCheckout = {
-                ...existingCheckout,
+            // Build update object - DO NOT include _id (it's immutable)
+            // Only include fields we want to update
+            const updateData = {
                 email: normalizedEmail,
-                cart: cartItems || existingCheckout.cart || [],
-                total: total || existingCheckout.total || 0,
+                cart: Array.isArray(cartItems) ? cartItems : (existingCheckout.cart || []),
+                total: typeof total === 'number' ? total : (existingCheckout.total || 0),
                 lastActivityAt: now, // Update activity time (user is active)
-                updatedAt: now,
-                userId: userId || existingCheckout.userId || null,
-                // Update customer information if provided
-                customer: customer || existingCheckout.customer || null,
-                // Update shipping address if provided
-                shippingAddress: shippingAddress || existingCheckout.shippingAddress || null,
-                // Update shipping method if provided
-                shippingMethod: shippingMethod || existingCheckout.shippingMethod || null
+                updatedAt: now
             };
-            
+
+            // Only add optional fields if they have values
+            if (userId) updateData.userId = userId;
+            if (customer && typeof customer === 'object' && Object.keys(customer).length > 0) {
+                updateData.customer = customer;
+            } else if (existingCheckout.customer) {
+                updateData.customer = existingCheckout.customer;
+            }
+            if (shippingAddress && typeof shippingAddress === 'object' && Object.keys(shippingAddress).length > 0) {
+                updateData.shippingAddress = shippingAddress;
+            } else if (existingCheckout.shippingAddress) {
+                updateData.shippingAddress = existingCheckout.shippingAddress;
+            }
+            if (shippingMethod && typeof shippingMethod === 'object' && Object.keys(shippingMethod).length > 0) {
+                updateData.shippingMethod = shippingMethod;
+            } else if (existingCheckout.shippingMethod) {
+                updateData.shippingMethod = existingCheckout.shippingMethod;
+            }
+
+            // Log before update for debugging
+            console.log('💾 [CHECKOUT] Attempting to update abandoned checkout:', {
+                checkoutId: checkoutId,
+                email: normalizedEmail,
+                hasCartItems: !!cartItems && cartItems.length > 0,
+                cartItemsCount: cartItems?.length || 0,
+                total: total
+            });
+
             saveResult = await db.executeOperation({
                 database_name: 'peakmode',
                 collection_name: 'abandoned_checkouts',
                 command: '--update',
                 data: {
                     filter: { id: checkoutId },
-                    update: updatedCheckout
+                    update: updateData  // Only update fields, don't include _id
                 }
+            });
+
+            // Log result for debugging
+            console.log('💾 [CHECKOUT] Database update result:', {
+                success: saveResult.success,
+                status: saveResult.status,
+                message: saveResult.message,
+                error: saveResult.error,
+                data: saveResult.data ? 'present' : 'missing'
             });
         } else {
             // Create new checkout record
