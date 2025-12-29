@@ -10,6 +10,7 @@ const uploadRoutes = require('./routes/upload');
 const ordersRoutes = require('./routes/orders');
 const emailTestRoutes = require('./routes/emailTest');
 const newsletterRoutes = require('./routes/newsletter');
+const subscriberRoutes = require('./routes/subscribers');
 const authRoutes = require('./routes/auth');
 const emailStatsRoutes = require('./routes/emailStats');
 const emailVerificationRoutes = require('./routes/emailVerification');
@@ -222,7 +223,8 @@ app.use('/api/email', emailRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/email-test', emailTestRoutes); // Email testing endpoints
-app.use('/api/newsletter', newsletterRoutes);
+app.use('/api/newsletter', newsletterRoutes); // Legacy newsletter endpoints (kept for backward compatibility)
+app.use('/api/subscribers', subscriberRoutes); // New unified subscriber system
 app.use('/api/auth', authRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
 app.use('/api/email/verify', emailVerificationRoutes); // Email verification and testing
