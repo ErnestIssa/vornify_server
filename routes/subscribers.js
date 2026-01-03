@@ -29,6 +29,9 @@ function generateDiscountCode() {
  */
 router.post('/subscribe', async (req, res) => {
     try {
+        console.log('📥 [SUBSCRIBERS] Subscribe endpoint called');
+        console.log('📥 [SUBSCRIBERS] Request body:', JSON.stringify(req.body, null, 2));
+        
         const { email, name, source, wantsNewsletter, wantsMarketing, wantsDrops } = req.body;
 
         if (!email) {
@@ -51,12 +54,14 @@ router.post('/subscribe', async (req, res) => {
         const now = new Date().toISOString();
 
         // Check if subscriber already exists
+        console.log('🔍 [SUBSCRIBERS] Checking if subscriber exists:', normalizedEmail);
         const existingResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'subscribers',
             command: '--read',
             data: { email: normalizedEmail }
         });
+        console.log('🔍 [SUBSCRIBERS] Database query result:', { success: existingResult.success, hasData: !!existingResult.data });
 
         let subscriber;
         let isNewSubscriber = false;
