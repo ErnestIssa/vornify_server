@@ -68,8 +68,24 @@ router.post('/subscribe', async (req, res) => {
 
         if (existingResult.success && existingResult.data) {
             // EXISTING SUBSCRIBER - Update preferences
-            subscriber = Array.isArray(existingResult.data) ? existingResult.data[0] : existingResult.data;
+            const dataArray = Array.isArray(existingResult.data) ? existingResult.data : [existingResult.data];
+            subscriber = dataArray.length > 0 ? dataArray[0] : null;
+            
+            if (!subscriber) {
+                console.error('❌ [SUBSCRIBERS] Existing subscriber data is empty or invalid');
+                return res.status(500).json({
+                    success: false,
+                    error: 'Subscriber data is invalid'
+                });
+            }
+            
             console.log(`✅ [SUBSCRIBERS] Updating existing subscriber: ${normalizedEmail} from source: ${source}`);
+            console.log(`🔍 [SUBSCRIBERS] Subscriber data:`, { 
+                email: subscriber.email, 
+                wantsNewsletter: subscriber.wantsNewsletter,
+                wantsMarketing: subscriber.wantsMarketing,
+                wantsDrops: subscriber.wantsDrops 
+            });
 
             // Store original preferences to detect changes
             const originalPreferences = {
