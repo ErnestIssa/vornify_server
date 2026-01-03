@@ -339,9 +339,9 @@ router.post('/subscribe', async (req, res) => {
             // ============================================
 
             // Only send emails if preferences actually changed
-            if (isNewSubscriber || subscriber.preferencesChanged) {
-                // Send newsletter confirmation if wantsNewsletter is true AND it changed
-                if (subscriber.wantsNewsletter && (isNewSubscriber || subscriber.preferencesChanged.wantsNewsletter)) {
+            if (isNewSubscriber || (subscriber.preferencesChanged && (subscriber.preferencesChanged.wantsNewsletter || subscriber.preferencesChanged.wantsMarketing || subscriber.preferencesChanged.wantsDrops))) {
+                // Send newsletter confirmation if wantsNewsletter is true AND (new subscriber OR preference changed)
+                if (subscriber.wantsNewsletter && (isNewSubscriber || (subscriber.preferencesChanged && subscriber.preferencesChanged.wantsNewsletter))) {
                     try {
                         const emailResult = await emailService.sendNewsletterConfirmationEmail(
                             normalizedEmail,
@@ -359,8 +359,8 @@ router.post('/subscribe', async (req, res) => {
                     }
                 }
 
-                // Send marketing confirmation if wantsMarketing is true AND it changed
-                if (subscriber.wantsMarketing && (isNewSubscriber || subscriber.preferencesChanged.wantsMarketing)) {
+                // Send marketing confirmation if wantsMarketing is true AND (new subscriber OR preference changed)
+                if (subscriber.wantsMarketing && (isNewSubscriber || (subscriber.preferencesChanged && subscriber.preferencesChanged.wantsMarketing))) {
                     try {
                         const emailResult = await emailService.sendMarketingConfirmationEmail(
                             normalizedEmail,
@@ -430,10 +430,12 @@ router.post('/subscribe', async (req, res) => {
 
     } catch (error) {
         console.error('❌ [SUBSCRIBERS] Subscription error:', error);
+        console.error('❌ [SUBSCRIBERS] Error stack:', error.stack);
+        console.error('❌ [SUBSCRIBERS] Request body:', JSON.stringify(req.body, null, 2));
         res.status(500).json({
             success: false,
             error: 'Failed to process subscription',
-            details: error.message
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     }
 });

@@ -217,11 +217,13 @@ router.post('/subscribe', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Newsletter subscription error:', error);
+        console.error('❌ [NEWSLETTER] Subscription error:', error);
+        console.error('❌ [NEWSLETTER] Error stack:', error.stack);
+        console.error('❌ [NEWSLETTER] Request body:', req.body);
         res.status(500).json({
             success: false,
             error: 'Failed to process subscription',
-            details: error.message
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     }
 });
