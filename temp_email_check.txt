@@ -1,0 +1,350 @@
+﻿const sgMail = require('@sendgrid/mail');
+require('dotenv').config();
+
+/**
+ * Clean SendGrid Email Service
+ * Provides reusable email functions using SendGrid dynamic templates
+ */
+class EmailService {
+    constructor() {
+        // Initialize SendGrid with API key from environment variables
+        const apiKey = process.env.SENDGRID_API_KEY;
+        if (!apiKey) {
+            console.warn('âš ï¸ SENDGRID_API_KEY not found in environment variables');
+        } else {
+            sgMail.setApiKey(apiKey);
+            console.log('âœ… SendGrid API initialized');
+        }
+        
+        this.fromEmail = process.env.EMAIL_FROM || 'support@peakmode.se';
+        this.supportInboxEmail = process.env.SUPPORT_INBOX_EMAIL || 'support@peakmode.se';
+        this.supportSenderName = process.env.SUPPORT_INBOX_NAME || 'Peak Mode Support';
+        this.adminNotificationEmail = process.env.ADMIN_EMAIL || process.env.ADMIN_SUPPORT_EMAIL || null;
+    }
+
+    /**
+     * Send a generic email using SendGrid dynamic template
+     * @param {string} to - Recipient email address
+     * @param {string} templateId - SendGrid template ID
+     * @param {object} dynamicData - Dynamic template data
+     * @returns {Promise<object>} Result object with success status
+     */
+    async sendCustomEmail(to, subject, templateId, dynamicData) {
+        try {
+            // Check if SendGrid API key is configured
+            if (!process.env.SENDGRID_API_KEY) {
+                const errorMsg = 'SENDGRID_API_KEY is not configured in environment variables';
+                console.error('âŒ SendGrid Error:', errorMsg);
+                return {
+                    success: false,
+                    error: 'Email service not configured',
+                    details: errorMsg
+                };
+            }
+
+            if (!to) {
+                throw new Error('Recipient email address is required');
+            }
+
+            if (!templateId || templateId.startsWith('d-') && !templateId.includes(process.env.SENDGRID_API_KEY?.substring(0, 5))) {
+                // Warn if using placeholder template ID
+                if (templateId.startsWith('d-') && templateId.includes('template_id')) {
+                    console.warn(`âš ï¸ Warning: Using placeholder template ID: ${templateId}. Please set proper SendGrid template ID in environment variables.`);
+                }
+            }
+
+            const msg = {
+                to: to,
+                from: this.fromEmail,
+                templateId: templateId,
+                dynamicTemplateData: dynamicData || {}
+            };
+
+            // Add subject if provided (though templates usually have their own subject)
+            if (subject) {
+                msg.subject = subject;
+            }
+
+            console.log(`ðŸ“§ Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
+            
+            const response = await sgMail.send(msg);
+            
+            console.log(`âœ… Email sent successfully to ${to}`, {
+                messageId: response[0]?.headers?.['x-message-id'],
+                statusCode: response[0]?.statusCode
+            });
+            
+            return {
+                success: true,
+                message: 'Email sent successfully',
+                messageId: response[0]?.headers?.['x-message-id'],
+                timestamp: new Date().toISOString()
+            };
+
+        } catch (error) {
+            const errorDetails = error.response?.body || error.message;
+            console.error('âŒ SendGrid Error Details:', {
+                message: error.message,
+                code: error.code,
+                response: error.response?.body,
+                statusCode: error.response?.statusCode,
+                to: to,
+                templateId: templateId
+            });
+            
+            // Provide more helpful error messages
+            let userFriendlyError = 'Failed to send email';
+            if (error.response?.body?.errors) {
+                const firstError = error.response.body.errors[0];
+                userFriendlyError = firstError.message || userFriendlyError;
+                
+                // Handle specific SendGrid errors
+                if (firstError.field === 'template_id') {
+                    userFriendlyError = 'Invalid email template configuration. Please contact support.';
+                } else if (error.response.statusCode === 401) {
+                    userFriendlyError = 'Email service authentication failed. Please check API key configuration.';
+                } else if (error.response.statusCode === 403) {
+                    userFriendlyError = 'Email service authorization failed. Please check API permissions.';
+                }
+            }
+            
+            return {
+                success: false,
+                error: userFriendlyError,
+                details: errorDetails,
+                timestamp: new Date().toISOString()
+            };
+        }
+    }
+
+    /**
+     * Send welcome email to new user
+     * @param {string} to - Recipient email address
+     * @param {string} name - Recipient name
+     * @returns {Promise<object>} Result object
+     */
+    async sendWelcomeEmail(to, name) {
+        try {
+            // You should create this template in SendGrid dashboard
+            const templateId = process.env.SENDGRID_WELCOME_TEMPLATE_ID || 'd-welcome_template_id';
+            
+            const dynamicData = {
+                name: name || 'Valued Customer',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Welcome to Peak Mode',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('âŒ Welcome email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send welcome email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send order confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {object} orderDetails - Order details object
+     * @param {string} language - Language code (en or sv), defaults to 'en'
+     * @returns {Promise<object>} Result object
+     */
+    async sendOrderConfirmationEmail(to, name, orderDetails, language = 'en') {
+        try {
+            // Get language-specific template ID or fallback to default
+            const languageTemplates = {
+                'en': process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_EN || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id',
+                'sv': process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_SV || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id'
+            };
+            
+            const templateId = languageTemplates[language] || languageTemplates['en'];
+            
+            // Calculate correct total from multiple possible sources
+            const orderTotal = orderDetails.totals?.total || 
+                              orderDetails.total || 
+                              (orderDetails.items ? orderDetails.items.reduce((sum, item) => sum + (item.price * item.quantity), 0) : 0);
+            
+            // Get currency from order (CRITICAL: Use order's actual currency, not default)
+            // Check multiple possible currency fields
+            const currency = (orderDetails.currency || 
+                             orderDetails.baseCurrency || 
+                             'SEK').toUpperCase(); // Default to SEK (Peak Mode's base currency)
+            
+            // Currency symbols and display formats
+            const currencyFormats = {
+                'SEK': { symbol: 'SEK', display: 'SEK' }, // Use "SEK" not "kr" for clarity
+                'EUR': { symbol: 'â‚¬', display: 'EUR' },
+                'DKK': { symbol: 'kr', display: 'DKK' },
+                'NOK': { symbol: 'kr', display: 'NOK' },
+                'PLN': { symbol: 'zÅ‚', display: 'PLN' },
+                'CZK': { symbol: 'KÄ', display: 'CZK' },
+                'HUF': { symbol: 'Ft', display: 'HUF' },
+                'BGN': { symbol: 'Ð»Ð²', display: 'BGN' },
+                'RON': { symbol: 'lei', display: 'RON' },
+                'USD': { symbol: '$', display: 'USD' },
+                'GBP': { symbol: 'Â£', display: 'GBP' }
+            };
+            
+            const currencyFormat = currencyFormats[currency] || { symbol: currency, display: currency };
+            const currencySymbol = currencyFormat.display; // Use full currency code for clarity
+            
+            // Format order items as structured data (not HTML) - pass currency to ensure correct formatting
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], currency);
+            
+            // Format address as plain text (not HTML)
+            const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress);
+            
+            // Language-specific subject
+            const subjects = {
+                'en': `Order Confirmation - ${orderDetails.orderId}`,
+                'sv': `OrderbekrÃ¤ftelse - ${orderDetails.orderId}`
+            };
+            const subject = subjects[language] || subjects['en'];
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                order_number: orderDetails.orderId || 'N/A',
+                order_date: orderDetails.orderDate || orderDetails.createdAt || new Date().toISOString(),
+                order_total: `${orderTotal} ${currencySymbol}`, // e.g., "92 SEK" not "92 e"
+                order_currency: currency, // Include currency code separately for template use
+                order_currency_symbol: currencyFormat.symbol, // Include symbol separately if needed
+                order_items: formattedItems, // Array of objects - template should format
+                order_items_count: formattedItems.length,
+                shipping_address: formattedAddress, // Plain text - template should format
+                order_status_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/track-order?orderId=${orderDetails.orderId}`,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear(),
+                language: language // Include language in template data
+            };
+
+            const result = await this.sendCustomEmail(
+                to,
+                subject,
+                templateId,
+                dynamicData
+            );
+
+            // Log communication if email was sent successfully
+            if (result.success) {
+                await this.logCommunication(orderDetails.customer.email, {
+                    type: 'email',
+                    subject: `Order Confirmation - ${orderDetails.orderId}`,
+                    content: 'Order confirmation email sent',
+                    status: 'sent'
+                });
+            }
+
+            return result;
+
+        } catch (error) {
+            console.error('âŒ Order confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send order confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send password reset email
+     * @param {string} to - Recipient email address
+     * @param {string} resetLink - Password reset link
+     * @returns {Promise<object>} Result object
+     */
+    async sendPasswordResetEmail(to, resetLink) {
+        try {
+            // You should create this template in SendGrid dashboard
+            const templateId = process.env.SENDGRID_PASSWORD_RESET_TEMPLATE_ID || 'd-password_reset_template_id';
+            
+            const dynamicData = {
+                reset_link: resetLink,
+                expiry_hours: 24,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Password Reset Request',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('âŒ Password reset email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send password reset email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send newsletter welcome email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Subscriber name
+     * @param {string} discountCode - Discount code
+     * @returns {Promise<object>} Result object
+     */
+    async sendNewsletterWelcomeEmail(to, name, discountCode) {
+        try {
+            const templateId = process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 'd-newsletter_welcome_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                discount_code: discountCode,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Welcome to Peak Mode â€” Here\'s 10% OFF',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('âŒ Newsletter welcome email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send newsletter welcome email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send order processing email
+     * @param {string} to - Recipient email address
+     * @param {object} orderDetails - Order details
+     * @returns {Promise<object>} Result object
+     */
+    async sendOrderProcessingEmail(to, orderDetails) {
+        try {
+            const templateId = process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID || 'd-order_processing_template_id';
+            
+            // Format items and address as plain data (not HTML)
+            // Get currency from order
+            const orderCurrency = (orderDetails.currency || orderDetails.baseCurrency || 'SEK').toUpperCase();
+            const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], orderCurrency);
+            const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress);
+            
+            const dynamicData = {
+                customer_name: orderDetails.customer?.name || 'Valued Customer',
+                order_number: orderDetails.orderId,
+                order_items: formattedItems, // Structured data - template should format
+                order_items_count: formattedItems.length,
+                order_total: `${orderDetails.totals?.total || 0} ${orderCurrency}`,

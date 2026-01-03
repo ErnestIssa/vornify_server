@@ -327,6 +327,105 @@ class EmailService {
     }
 
     /**
+     * Send newsletter subscription confirmation email (no discount)
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @returns {Promise<object>} Result object
+     */
+    async sendNewsletterConfirmationEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_NEWSLETTER_CONFIRMATION_TEMPLATE_ID || 'd-caea7a5eefd744698fddd0921b27c211';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Thanks for subscribing to newsletter',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Newsletter confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send newsletter confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send marketing communications subscription confirmation email (no discount)
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @returns {Promise<object>} Result object
+     */
+    async sendMarketingConfirmationEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_MARKETING_CONFIRMATION_TEMPLATE_ID || 'd-09bb5babae734643a9b25cfe71ec98f0';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Thanks for subscribing to marketing communications',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Marketing confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send marketing confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send drops subscription confirmation email (no discount)
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @returns {Promise<object>} Result object
+     */
+    async sendDropsConfirmationEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_DROPS_CONFIRMATION_TEMPLATE_ID || 'd-b2fb112eda0840d8b0ad5de49b4926d7';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Thanks for subscribing to new drops',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Drops confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send drops confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
      * Send order processing email
      * @param {string} to - Recipient email address
      * @param {object} orderDetails - Order details
