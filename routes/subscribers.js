@@ -61,18 +61,30 @@ router.post('/subscribe', async (req, res) => {
             command: '--read',
             data: { email: normalizedEmail }
         });
-        console.log('🔍 [SUBSCRIBERS] Database query result:', { success: existingResult.success, hasData: !!existingResult.data });
+        // Check if we have actual data (not just an empty array)
+        const hasActualData = existingResult.success && 
+            existingResult.data && 
+            (Array.isArray(existingResult.data) ? existingResult.data.length > 0 : true);
+        
+        console.log('🔍 [SUBSCRIBERS] Database query result:', { 
+            success: existingResult.success, 
+            hasData: !!existingResult.data,
+            isArray: Array.isArray(existingResult.data),
+            arrayLength: Array.isArray(existingResult.data) ? existingResult.data.length : 'N/A',
+            hasActualData: hasActualData
+        });
 
         let subscriber;
         let isNewSubscriber = false;
 
-        if (existingResult.success && existingResult.data) {
+        if (hasActualData) {
             // EXISTING SUBSCRIBER - Update preferences
             const dataArray = Array.isArray(existingResult.data) ? existingResult.data : [existingResult.data];
             subscriber = dataArray.length > 0 ? dataArray[0] : null;
             
             if (!subscriber) {
                 console.error('❌ [SUBSCRIBERS] Existing subscriber data is empty or invalid');
+                console.error('❌ [SUBSCRIBERS] Data structure:', JSON.stringify(existingResult.data, null, 2));
                 return res.status(500).json({
                     success: false,
                     error: 'Subscriber data is invalid'
