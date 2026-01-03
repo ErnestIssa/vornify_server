@@ -66,6 +66,13 @@ router.post('/subscribe', async (req, res) => {
             subscriber = Array.isArray(existingResult.data) ? existingResult.data[0] : existingResult.data;
             console.log(`✅ [SUBSCRIBERS] Updating existing subscriber: ${normalizedEmail} from source: ${source}`);
 
+            // Store original preferences to detect changes
+            const originalPreferences = {
+                wantsNewsletter: subscriber.wantsNewsletter || false,
+                wantsMarketing: subscriber.wantsMarketing || false,
+                wantsDrops: subscriber.wantsDrops || false
+            };
+
             const updates = {
                 updatedAt: now
             };
@@ -75,19 +82,43 @@ router.post('/subscribe', async (req, res) => {
                 updates.name = name.trim();
             }
 
+            // Determine new preference values
+            let newWantsNewsletter = originalPreferences.wantsNewsletter;
+            let newWantsMarketing = originalPreferences.wantsMarketing;
+            let newWantsDrops = originalPreferences.wantsDrops;
+
             // Handle each source type
             if (source === 'welcome_popup') {
                 // Welcome popup: Set wantsMarketing = true
+                newWantsMarketing = true;
                 updates.wantsMarketing = true;
             } else if (source === 'checkout') {
                 // Checkout: Update flags based on what frontend sent
-                if (wantsNewsletter !== undefined) updates.wantsNewsletter = wantsNewsletter;
-                if (wantsMarketing !== undefined) updates.wantsMarketing = wantsMarketing;
-                if (wantsDrops !== undefined) updates.wantsDrops = wantsDrops;
+                if (wantsNewsletter !== undefined) {
+                    newWantsNewsletter = wantsNewsletter;
+                    updates.wantsNewsletter = wantsNewsletter;
+                }
+                if (wantsMarketing !== undefined) {
+                    newWantsMarketing = wantsMarketing;
+                    updates.wantsMarketing = wantsMarketing;
+                }
+                if (wantsDrops !== undefined) {
+                    newWantsDrops = wantsDrops;
+                    updates.wantsDrops = wantsDrops;
+                }
             } else if (source === 'footer_drops') {
                 // Footer drops: Set wantsDrops = true
+                newWantsDrops = true;
                 updates.wantsDrops = true;
             }
+
+            // Calculate preference changes for email logic
+            subscriber.preferencesChanged = {
+                wantsNewsletter: newWantsNewsletter !== originalPreferences.wantsNewsletter,
+                wantsMarketing: newWantsMarketing !== originalPreferences.wantsMarketing,
+                wantsDrops: newWantsDrops !== originalPreferences.wantsDrops
+            };
+            subscriber.isExistingSubscriber = true;
 
             // Update subscriber in database
             const updateResult = await db.executeOperation({
@@ -115,9 +146,17 @@ router.post('/subscribe', async (req, res) => {
                 data: { email: normalizedEmail }
             });
 
+            // Preserve preferencesChanged flag before overwriting subscriber
+            const savedPreferencesChanged = subscriber.preferencesChanged;
+            const savedIsExistingSubscriber = subscriber.isExistingSubscriber;
+
             subscriber = updatedResult.success && updatedResult.data
                 ? (Array.isArray(updatedResult.data) ? updatedResult.data[0] : updatedResult.data)
                 : subscriber;
+            
+            // Restore flags after database read
+            subscriber.isExistingSubscriber = savedIsExistingSubscriber;
+            subscriber.preferencesChanged = savedPreferencesChanged;
 
         } else {
             // NEW SUBSCRIBER - Create record
@@ -173,6 +212,10 @@ router.post('/subscribe', async (req, res) => {
             subscriber = createdResult.success && createdResult.data
                 ? (Array.isArray(createdResult.data) ? createdResult.data[0] : createdResult.data)
                 : subscriber;
+            
+            // Mark as new subscriber for email logic
+            subscriber.isExistingSubscriber = false;
+            subscriber.preferencesChanged = null;
         }
 
         // ============================================
@@ -185,31 +228,28 @@ router.post('/subscribe', async (req, res) => {
         if (source === 'welcome_popup') {
             // ============================================
             // WELCOME POPUP: Only source that sends discount email
+            // ALWAYS send welcome email when resubscribing (if they have a discount code)
             // ============================================
 
-            // Check if discount email should be sent
-            if (!subscriber.welcomeDiscountSent) {
-                // Generate discount code for new subscribers
-                let discountCode = subscriber.discountCode;
+            if (isNewSubscriber) {
+                // NEW SUBSCRIBER - Generate discount code and send welcome email
+                let discountCode = generateDiscountCode();
                 
-                if (!discountCode) {
-                    discountCode = generateDiscountCode();
-                    
-                    // Store discount code in database
-                    await db.executeOperation({
-                        database_name: 'peakmode',
-                        collection_name: 'subscribers',
-                        command: '--update',
-                        data: {
-                            filter: { email: normalizedEmail },
-                            update: {
-                                discountCode: discountCode,
-                                discountCodeExpiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days
-                                discountCodeUsed: false
-                            }
+                // Store discount code in database
+                await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'subscribers',
+                    command: '--update',
+                    data: {
+                        filter: { email: normalizedEmail },
+                        update: {
+                            discountCode: discountCode,
+                            discountCodeExpiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days
+                            discountCodeUsed: false,
+                            welcomeDiscountSent: true
                         }
-                    });
-                }
+                    }
+                });
 
                 // Send welcome email with discount code
                 try {
@@ -221,27 +261,20 @@ router.post('/subscribe', async (req, res) => {
 
                     if (emailResult.success) {
                         emailsSent.push('welcome_discount');
-                        
-                        // Mark welcomeDiscountSent = true
-                        await db.executeOperation({
-                            database_name: 'peakmode',
-                            collection_name: 'subscribers',
-                            command: '--update',
-                            data: {
-                                filter: { email: normalizedEmail },
-                                update: { welcomeDiscountSent: true }
-                            }
-                        });
-                        
-                        console.log(`✅ [SUBSCRIBERS] Welcome discount email sent to ${normalizedEmail} with code: ${discountCode}`);
+                        console.log(`✅ [SUBSCRIBERS] Welcome discount email sent to NEW subscriber ${normalizedEmail} with code: ${discountCode}`);
                     } else {
                         console.error(`❌ [SUBSCRIBERS] Failed to send welcome discount email to ${normalizedEmail}:`, emailResult.error);
                     }
                 } catch (emailError) {
                     console.error(`❌ [SUBSCRIBERS] Exception sending welcome discount email to ${normalizedEmail}:`, emailError);
                 }
+
+                // Update subscriber object with new discount code
+                subscriber.discountCode = discountCode;
+                subscriber.discountCodeExpiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+
             } else {
-                // Existing subscriber resubscribing via welcome popup - resend email with same code
+                // EXISTING SUBSCRIBER RESUBSCRIBING - ALWAYS resend welcome email with existing discount code
                 if (subscriber.discountCode) {
                     try {
                         const emailResult = await emailService.sendNewsletterWelcomeEmail(
@@ -252,78 +285,128 @@ router.post('/subscribe', async (req, res) => {
 
                         if (emailResult.success) {
                             emailsSent.push('welcome_discount_resent');
-                            console.log(`✅ [SUBSCRIBERS] Welcome discount email resent to ${normalizedEmail} with existing code: ${subscriber.discountCode}`);
+                            console.log(`✅ [SUBSCRIBERS] Welcome discount email resent to EXISTING subscriber ${normalizedEmail} with existing code: ${subscriber.discountCode}`);
                         } else {
                             console.error(`❌ [SUBSCRIBERS] Failed to resend welcome discount email to ${normalizedEmail}:`, emailResult.error);
                         }
                     } catch (emailError) {
                         console.error(`❌ [SUBSCRIBERS] Exception resending welcome discount email to ${normalizedEmail}:`, emailError);
                     }
+                } else {
+                    // Existing subscriber but no discount code - generate one
+                    const discountCode = generateDiscountCode();
+                    
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'subscribers',
+                        command: '--update',
+                        data: {
+                            filter: { email: normalizedEmail },
+                            update: {
+                                discountCode: discountCode,
+                                discountCodeExpiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+                                discountCodeUsed: false,
+                                welcomeDiscountSent: true
+                            }
+                        }
+                    });
+
+                    try {
+                        const emailResult = await emailService.sendNewsletterWelcomeEmail(
+                            normalizedEmail,
+                            subscriberName,
+                            discountCode
+                        );
+
+                        if (emailResult.success) {
+                            emailsSent.push('welcome_discount');
+                            console.log(`✅ [SUBSCRIBERS] Welcome discount email sent to ${normalizedEmail} with new code: ${discountCode}`);
+                        } else {
+                            console.error(`❌ [SUBSCRIBERS] Failed to send welcome discount email to ${normalizedEmail}:`, emailResult.error);
+                        }
+                    } catch (emailError) {
+                        console.error(`❌ [SUBSCRIBERS] Exception sending welcome discount email to ${normalizedEmail}:`, emailError);
+                    }
+
+                    subscriber.discountCode = discountCode;
+                    subscriber.discountCodeExpiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
                 }
             }
 
         } else if (source === 'checkout') {
             // ============================================
-            // CHECKOUT: Send confirmation emails based on flags (NO DISCOUNT)
+            // CHECKOUT: Send confirmation emails ONLY if preferences changed (NO DISCOUNT)
             // ============================================
 
-            // Send newsletter confirmation if wantsNewsletter is true
-            if (subscriber.wantsNewsletter) {
-                try {
-                    const emailResult = await emailService.sendNewsletterConfirmationEmail(
-                        normalizedEmail,
-                        subscriberName
-                    );
+            // Only send emails if preferences actually changed
+            if (isNewSubscriber || subscriber.preferencesChanged) {
+                // Send newsletter confirmation if wantsNewsletter is true AND it changed
+                if (subscriber.wantsNewsletter && (isNewSubscriber || subscriber.preferencesChanged.wantsNewsletter)) {
+                    try {
+                        const emailResult = await emailService.sendNewsletterConfirmationEmail(
+                            normalizedEmail,
+                            subscriberName
+                        );
 
-                    if (emailResult.success) {
-                        emailsSent.push('newsletter_confirmation');
-                        console.log(`✅ [SUBSCRIBERS] Newsletter confirmation email sent to ${normalizedEmail}`);
-                    } else {
-                        console.error(`❌ [SUBSCRIBERS] Failed to send newsletter confirmation email to ${normalizedEmail}:`, emailResult.error);
+                        if (emailResult.success) {
+                            emailsSent.push('newsletter_confirmation');
+                            console.log(`✅ [SUBSCRIBERS] Newsletter confirmation email sent to ${normalizedEmail} (preference changed)`);
+                        } else {
+                            console.error(`❌ [SUBSCRIBERS] Failed to send newsletter confirmation email to ${normalizedEmail}:`, emailResult.error);
+                        }
+                    } catch (emailError) {
+                        console.error(`❌ [SUBSCRIBERS] Exception sending newsletter confirmation email to ${normalizedEmail}:`, emailError);
                     }
-                } catch (emailError) {
-                    console.error(`❌ [SUBSCRIBERS] Exception sending newsletter confirmation email to ${normalizedEmail}:`, emailError);
                 }
-            }
 
-            // Send marketing confirmation if wantsMarketing is true
-            if (subscriber.wantsMarketing) {
-                try {
-                    const emailResult = await emailService.sendMarketingConfirmationEmail(
-                        normalizedEmail,
-                        subscriberName
-                    );
+                // Send marketing confirmation if wantsMarketing is true AND it changed
+                if (subscriber.wantsMarketing && (isNewSubscriber || subscriber.preferencesChanged.wantsMarketing)) {
+                    try {
+                        const emailResult = await emailService.sendMarketingConfirmationEmail(
+                            normalizedEmail,
+                            subscriberName
+                        );
 
-                    if (emailResult.success) {
-                        emailsSent.push('marketing_confirmation');
-                        console.log(`✅ [SUBSCRIBERS] Marketing confirmation email sent to ${normalizedEmail}`);
-                    } else {
-                        console.error(`❌ [SUBSCRIBERS] Failed to send marketing confirmation email to ${normalizedEmail}:`, emailResult.error);
+                        if (emailResult.success) {
+                            emailsSent.push('marketing_confirmation');
+                            console.log(`✅ [SUBSCRIBERS] Marketing confirmation email sent to ${normalizedEmail} (preference changed)`);
+                        } else {
+                            console.error(`❌ [SUBSCRIBERS] Failed to send marketing confirmation email to ${normalizedEmail}:`, emailResult.error);
+                        }
+                    } catch (emailError) {
+                        console.error(`❌ [SUBSCRIBERS] Exception sending marketing confirmation email to ${normalizedEmail}:`, emailError);
                     }
-                } catch (emailError) {
-                    console.error(`❌ [SUBSCRIBERS] Exception sending marketing confirmation email to ${normalizedEmail}:`, emailError);
                 }
+            } else {
+                // No preferences changed - don't send any emails
+                console.log(`ℹ️  [SUBSCRIBERS] No preferences changed for ${normalizedEmail} - skipping confirmation emails`);
             }
 
         } else if (source === 'footer_drops') {
             // ============================================
-            // FOOTER DROPS: Send confirmation email (NO DISCOUNT)
+            // FOOTER DROPS: Send confirmation email ONLY if wantsDrops was not already true (NO DISCOUNT)
             // ============================================
 
-            try {
-                const emailResult = await emailService.sendDropsConfirmationEmail(
-                    normalizedEmail,
-                    subscriberName
-                );
+            // Only send email if this is a new subscriber OR wantsDrops preference changed
+            if (isNewSubscriber || subscriber.preferencesChanged?.wantsDrops) {
+                try {
+                    const emailResult = await emailService.sendDropsConfirmationEmail(
+                        normalizedEmail,
+                        subscriberName
+                    );
 
-                if (emailResult.success) {
-                    emailsSent.push('drops_confirmation');
-                    console.log(`✅ [SUBSCRIBERS] Drops confirmation email sent to ${normalizedEmail}`);
-                } else {
-                    console.error(`❌ [SUBSCRIBERS] Failed to send drops confirmation email to ${normalizedEmail}:`, emailResult.error);
+                    if (emailResult.success) {
+                        emailsSent.push('drops_confirmation');
+                        console.log(`✅ [SUBSCRIBERS] Drops confirmation email sent to ${normalizedEmail} (preference changed or new subscriber)`);
+                    } else {
+                        console.error(`❌ [SUBSCRIBERS] Failed to send drops confirmation email to ${normalizedEmail}:`, emailResult.error);
+                    }
+                } catch (emailError) {
+                    console.error(`❌ [SUBSCRIBERS] Exception sending drops confirmation email to ${normalizedEmail}:`, emailError);
                 }
-            } catch (emailError) {
-                console.error(`❌ [SUBSCRIBERS] Exception sending drops confirmation email to ${normalizedEmail}:`, emailError);
+            } else {
+                // Already subscribed to drops - don't send duplicate email
+                console.log(`ℹ️  [SUBSCRIBERS] ${normalizedEmail} already subscribed to drops - skipping confirmation email`);
             }
         }
 

@@ -26,6 +26,7 @@ const trackingRoutes = require('./routes/tracking');
 const customerRoutes = require('./routes/customers');
 const reviewRoutes = require('./routes/reviews');
 const currencyRoutes = require('./routes/currency');
+const adminRoutes = require('./routes/admin');
 const errorHandler = require('./middleware/errorHandler');
 const abandonedCartService = require('./services/abandonedCartService');
 const abandonedCheckoutService = require('./services/abandonedCheckoutService');
@@ -223,7 +224,7 @@ app.use('/api/email', emailRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/email-test', emailTestRoutes); // Email testing endpoints
-app.use('/api/newsletter', newsletterRoutes); // Legacy newsletter endpoints (kept for backward compatibility)
+app.use('/api/newsletter', newsletterRoutes); // Legacy newsletter endpoints (now uses new 'subscribers' collection)
 app.use('/api/subscribers', subscriberRoutes); // New unified subscriber system
 app.use('/api/auth', authRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
@@ -240,6 +241,7 @@ app.use('/api/tracking', trackingRoutes); // Package tracking
 app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
 app.use('/api', currencyRoutes); // Currency conversion and settings
+app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
