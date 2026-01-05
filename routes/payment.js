@@ -434,6 +434,27 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             }
         }
 
+        // CRITICAL: Mark discount code as used ONLY after successful payment
+        // This ensures codes remain valid if payment fails
+        if (order.appliedDiscount?.code) {
+            try {
+                const discountService = require('../services/discountService');
+                const markResult = await discountService.markDiscountCodeAsUsed(
+                    order.appliedDiscount.code,
+                    orderId
+                );
+                
+                if (markResult.success) {
+                    console.log(`✅ [PAYMENT WEBHOOK] Discount code ${order.appliedDiscount.code} marked as used for order ${orderId}`);
+                } else {
+                    console.error(`⚠️ [PAYMENT WEBHOOK] Failed to mark discount code ${order.appliedDiscount.code} as used:`, markResult.error);
+                }
+            } catch (error) {
+                // Don't fail payment processing if discount marking fails - log error but continue
+                console.error(`⚠️ [PAYMENT WEBHOOK] Exception marking discount code as used:`, error.message);
+            }
+        }
+
         console.log(`✅ [PAYMENT WEBHOOK] Order ${orderId} payment confirmed via webhook`);
     } catch (error) {
         console.error('Error handling payment_intent.succeeded:', error);

@@ -454,6 +454,12 @@ router.post('/create', async (req, res) => {
             tax: orderData.totals?.tax || orderData.tax || 0,
             subtotal: orderData.totals?.subtotal || orderData.subtotal || 0,
             
+            // Discount information - CRITICAL: Store discount details in order
+            discount: orderData.totals?.discount || orderData.discount || 0,
+            discountedSubtotal: orderData.totals?.discountedSubtotal || orderData.discountedSubtotal || (orderData.totals?.subtotal || orderData.subtotal || 0),
+            appliedDiscount: orderData.appliedDiscount || null, // Store full discount info including code
+            discountCode: orderData.appliedDiscount?.code || orderData.discountCode || null,
+            
             // Multi-currency support
             currency: orderData.currency || currencyService.BASE_CURRENCY,
             baseTotal: orderData.baseTotal || orderData.totals?.total || orderData.total || 0,

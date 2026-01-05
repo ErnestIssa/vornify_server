@@ -612,6 +612,7 @@ router.post('/unsubscribe', async (req, res) => {
 /**
  * POST /api/subscribers/validate-discount
  * Validate a discount code
+ * IMPORTANT: Use discount service for validation
  */
 router.post('/validate-discount', async (req, res) => {
     try {
@@ -624,48 +625,33 @@ router.post('/validate-discount', async (req, res) => {
             });
         }
 
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'subscribers',
-            command: '--read',
-            data: { discountCode: discountCode }
-        });
+        // Use discount service for validation
+        const discountService = require('../services/discountService');
+        const validation = await discountService.validateDiscountCode(discountCode);
 
-        if (!result.success || !result.data) {
-            return res.json({
-                success: true,
-                valid: false,
-                message: 'Invalid discount code'
+        if (!validation.success) {
+            return res.status(500).json({
+                success: false,
+                error: validation.error || 'Failed to validate discount code',
+                details: validation.details
             });
         }
 
-        const subscriber = Array.isArray(result.data) ? result.data[0] : result.data;
-
-        // Check if code is used
-        if (subscriber.discountCodeUsed) {
+        if (!validation.valid) {
             return res.json({
                 success: true,
                 valid: false,
-                message: 'Discount code has already been used'
+                message: validation.error || 'Invalid discount code'
             });
-        }
-
-        // Check if code is expired
-        if (subscriber.discountCodeExpiresAt) {
-            const expiresAt = new Date(subscriber.discountCodeExpiresAt);
-            if (expiresAt < new Date()) {
-                return res.json({
-                    success: true,
-                    valid: false,
-                    message: 'Discount code has expired'
-                });
-            }
         }
 
         res.json({
             success: true,
             valid: true,
-            message: 'Discount code is valid'
+            discountCode: validation.discountCode,
+            discountPercentage: validation.discountPercentage,
+            expiresAt: validation.expiresAt,
+            message: validation.message || 'Discount code is valid'
         });
 
     } catch (error) {

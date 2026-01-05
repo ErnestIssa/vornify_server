@@ -54,11 +54,41 @@ router.get('/:userId', async (req, res) => {
                     tax: 0,
                     shipping: 0,
                     discount: 0,
+                    discountedSubtotal: 0,
                     total: 0
                 },
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString()
             };
+            
+            // CRITICAL: Ensure all discount fields are properly initialized to prevent NaN values
+            // This fixes the issue where discount values show as NaN when returning from checkout
+            if (!cart.totals) {
+                cart.totals = {};
+            }
+            
+            // Ensure all numeric values are valid numbers (not NaN or undefined)
+            cart.totals.subtotal = typeof cart.totals.subtotal === 'number' && !isNaN(cart.totals.subtotal) ? cart.totals.subtotal : 0;
+            cart.totals.tax = typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0;
+            cart.totals.shipping = typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0;
+            cart.totals.discount = typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount) ? cart.totals.discount : 0;
+            
+            // Ensure discountedSubtotal is properly set
+            if (typeof cart.totals.discountedSubtotal !== 'number' || isNaN(cart.totals.discountedSubtotal)) {
+                cart.totals.discountedSubtotal = cart.totals.subtotal - cart.totals.discount;
+            }
+            
+            // Recalculate total if needed (ensures consistency)
+            const calculatedTotal = cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax;
+            cart.totals.total = typeof cart.totals.total === 'number' && !isNaN(cart.totals.total) ? cart.totals.total : calculatedTotal;
+            
+            // If there's an applied discount, ensure it's properly formatted
+            if (cart.appliedDiscount) {
+                // Ensure discount amount is a valid number
+                if (typeof cart.appliedDiscount.amount !== 'number' || isNaN(cart.appliedDiscount.amount)) {
+                    cart.appliedDiscount.amount = cart.totals.discount;
+                }
+            }
             
             res.json({
                 success: true,
@@ -495,16 +525,51 @@ router.post('/:userId/apply-discount', async (req, res) => {
         
         const cart = cartResult.data;
         
-        // Validate discount code (this would integrate with your existing discount system)
-        // For now, we'll add a placeholder discount
-        const discountValue = 10; // This should come from discount validation
-        cart.totals.discount = Math.min(cart.totals.subtotal * (discountValue / 100), cart.totals.subtotal);
-        cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
-        cart.appliedDiscount = {
-            code: discountCode,
-            value: discountValue,
-            appliedAt: new Date().toISOString()
-        };
+        // IMPORTANT: All discount calculations MUST be done on the backend
+        // Discount is calculated on product price (subtotal) BEFORE tax
+        const discountService = require('../services/discountService');
+        
+        // Calculate totals with discount using backend service
+        const calculationResult = await discountService.calculateOrderTotals(
+            cart.totals.subtotal || 0,
+            cart.totals.shipping || 0,
+            cart.totals.tax || 0,
+            discountCode
+        );
+        
+        if (!calculationResult.success) {
+            return res.status(400).json({
+                success: false,
+                error: calculationResult.error || 'Invalid discount code'
+            });
+        }
+        
+        // Update cart totals with calculated values
+        // CRITICAL: Ensure all values are valid numbers (not NaN)
+        cart.totals.discount = typeof calculationResult.totals.discount === 'number' && !isNaN(calculationResult.totals.discount) 
+            ? calculationResult.totals.discount 
+            : 0;
+        cart.totals.discountedSubtotal = typeof calculationResult.totals.discountedSubtotal === 'number' && !isNaN(calculationResult.totals.discountedSubtotal)
+            ? calculationResult.totals.discountedSubtotal
+            : (cart.totals.subtotal || 0) - (cart.totals.discount || 0);
+        cart.totals.total = typeof calculationResult.totals.total === 'number' && !isNaN(calculationResult.totals.total)
+            ? calculationResult.totals.total
+            : cart.totals.discountedSubtotal + (cart.totals.shipping || 0) + (cart.totals.tax || 0);
+        
+        // Store applied discount information
+        if (calculationResult.appliedDiscount) {
+            cart.appliedDiscount = {
+                code: calculationResult.appliedDiscount.code || discountCode,
+                percentage: typeof calculationResult.appliedDiscount.percentage === 'number' && !isNaN(calculationResult.appliedDiscount.percentage)
+                    ? calculationResult.appliedDiscount.percentage
+                    : 10,
+                amount: typeof calculationResult.appliedDiscount.amount === 'number' && !isNaN(calculationResult.appliedDiscount.amount)
+                    ? calculationResult.appliedDiscount.amount
+                    : cart.totals.discount,
+                appliedAt: calculationResult.appliedDiscount.appliedAt || new Date().toISOString()
+            };
+        }
+        
         cart.updatedAt = new Date().toISOString();
         
         // Save updated cart
@@ -535,6 +600,83 @@ router.post('/:userId/apply-discount', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to apply discount'
+        });
+    }
+});
+
+// POST /api/cart/:userId/remove-discount - Remove discount code from cart
+router.post('/:userId/remove-discount', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        // Get existing cart
+        const cartResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--read',
+            data: { userId }
+        });
+        
+        if (!cartResult.success || !cartResult.data) {
+            return res.status(404).json({
+                success: false,
+                error: 'Cart not found'
+            });
+        }
+        
+        const cart = cartResult.data;
+        
+        // Remove discount - recalculate totals without discount
+        const discountService = require('../services/discountService');
+        const calculationResult = await discountService.calculateOrderTotals(
+            cart.totals.subtotal || 0,
+            cart.totals.shipping || 0,
+            cart.totals.tax || 0,
+            null // No discount code
+        );
+        
+        if (!calculationResult.success) {
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to recalculate cart totals'
+            });
+        }
+        
+        // Update cart totals without discount
+        cart.totals.discount = 0;
+        cart.totals.discountedSubtotal = cart.totals.subtotal || 0;
+        cart.totals.total = calculationResult.totals.total;
+        cart.appliedDiscount = null; // Remove discount info
+        cart.updatedAt = new Date().toISOString();
+        
+        // Save updated cart
+        const saveResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--upsert',
+            data: {
+                filter: { userId },
+                update: cart
+            }
+        });
+        
+        if (saveResult.success) {
+            res.json({
+                success: true,
+                message: 'Discount removed successfully',
+                data: cart
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to remove discount'
+            });
+        }
+    } catch (error) {
+        console.error('Remove discount error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to remove discount'
         });
     }
 });
