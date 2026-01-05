@@ -169,19 +169,28 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
             }
         }
 
-        // Calculate totals
-        // IMPORTANT: Discount is applied to subtotal BEFORE tax calculation
-        // Total = subtotal - discount + shipping + tax
+        // CRITICAL SWEDISH VAT COMPLIANCE: VAT must be calculated on the DISCOUNTED amount
+        // Calculation order: Subtotal → Apply Discount → Calculate VAT on discounted amount → Add Shipping → Total
         const discountedSubtotal = roundToCurrency(subtotal - discountAmount);
-        const total = roundToCurrency(discountedSubtotal + shipping + tax);
+        
+        // CRITICAL: VAT must be calculated on discounted subtotal, NOT original subtotal
+        // Formula: VAT = (Subtotal - Discount) × VAT_RATE
+        // This is legally required in Sweden - VAT is charged on the amount actually paid
+        const calculatedTax = roundToCurrency(discountedSubtotal * 0.25); // 25% VAT on discounted amount
+        
+        // If tax was provided (from cart), we should use the calculated tax instead
+        // The provided tax parameter is ignored when discount is applied, as we must recalculate
+        const finalTax = discountAmount > 0 ? calculatedTax : roundToCurrency(tax);
+        
+        const total = roundToCurrency(discountedSubtotal + finalTax + shipping);
 
         const totals = {
             subtotal: roundToCurrency(subtotal),              // Original product prices (before discount)
             discount: discountAmount,                         // Discount amount (already rounded, calculated on subtotal)
-            discountedSubtotal: discountedSubtotal,           // Subtotal after discount (rounded)
+            discountedSubtotal: discountedSubtotal,           // Subtotal after discount (rounded) - this is the taxable amount
             shipping: roundToCurrency(shipping),              // Shipping cost (rounded)
-            tax: roundToCurrency(tax),                        // Tax amount (rounded)
-            total: total                                      // Final total (rounded)
+            tax: finalTax,                                    // VAT calculated on DISCOUNTED amount (legally correct)
+            total: total                                      // Final total: (subtotal - discount) + VAT + shipping
         };
 
         return {
