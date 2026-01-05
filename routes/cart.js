@@ -581,13 +581,21 @@ router.put('/:userId/save-email', async (req, res) => {
     }
 });
 
+// IMPORTANT: More specific routes must come BEFORE generic routes
+// POST /api/cart/:userId/apply-discount - Apply discount code to cart (must come before generic POST /:userId)
+// POST /api/cart/:userId/remove-discount - Remove discount from cart (must come before generic POST /:userId)
+
 // POST /api/cart/:userId - Create or update cart with items (sync cart to backend)
+// NOTE: This comes after more specific routes to avoid route conflicts
 router.post('/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         const { items } = req.body;
         
+        console.log(`🛒 [CART SYNC] Syncing cart for userId: ${userId}, items count: ${items?.length || 0}`);
+        
         if (!items || !Array.isArray(items)) {
+            console.error(`❌ [CART SYNC] Invalid items array for userId: ${userId}`);
             return res.status(400).json({
                 success: false,
                 error: 'Items array is required'
@@ -617,33 +625,61 @@ router.post('/:userId', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
         
-        // Update cart items (replace existing items with new items)
-        cart.items = items.map(item => ({
-            cartItemId: item.cartItemId || generateCartItemId(),
-            id: item.id || item.productId,
-            name: item.name,
-            price: typeof item.price === 'number' ? item.price : 0,
-            image: item.image || '',
-            size: item.size || null,
-            color: item.color || null,
-            sizeId: item.sizeId || null,
-            colorId: item.colorId || null,
-            variantId: item.variantId || null,
-            quantity: typeof item.quantity === 'number' ? item.quantity : 0,
-            currency: item.currency || 'SEK',
-            source: item.source || null,
-            addedAt: item.addedAt || new Date().toISOString()
-        }));
+        // Validate and map items
+        try {
+            cart.items = items.map((item, index) => {
+                // Ensure required fields exist
+                if (!item.id && !item.productId) {
+                    console.warn(`⚠️ [CART SYNC] Item at index ${index} missing id/productId`);
+                }
+                if (!item.name) {
+                    console.warn(`⚠️ [CART SYNC] Item at index ${index} missing name`);
+                }
+                
+                return {
+                    cartItemId: item.cartItemId || generateCartItemId(),
+                    id: item.id || item.productId || `item_${index}`,
+                    name: item.name || 'Unknown Product',
+                    price: typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0,
+                    image: item.image || '',
+                    size: item.size || null,
+                    color: item.color || null,
+                    sizeId: item.sizeId || null,
+                    colorId: item.colorId || null,
+                    variantId: item.variantId || null,
+                    quantity: typeof item.quantity === 'number' && !isNaN(item.quantity) && item.quantity > 0 ? item.quantity : 1,
+                    currency: item.currency || 'SEK',
+                    source: item.source || null,
+                    addedAt: item.addedAt || new Date().toISOString()
+                };
+            });
+        } catch (mapError) {
+            console.error(`❌ [CART SYNC] Error mapping items:`, mapError);
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid cart items format',
+                details: mapError.message
+            });
+        }
         
         // Calculate totals from items
         // CRITICAL: Preserve existing discount if any
-        const existingDiscount = cart.totals?.discount || 0;
-        const existingShipping = cart.totals?.shipping || 0;
-        const existingTax = cart.totals?.tax || 0;
+        const existingDiscount = (cart.totals && typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount)) ? cart.totals.discount : 0;
+        const existingShipping = (cart.totals && typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping)) ? cart.totals.shipping : 0;
+        const existingTax = (cart.totals && typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax)) ? cart.totals.tax : 0;
         const existingAppliedDiscount = cart.appliedDiscount || null;
         
         // Calculate new totals
-        cart.totals = calculateCartTotals(cart);
+        try {
+            cart.totals = calculateCartTotals(cart);
+        } catch (calcError) {
+            console.error(`❌ [CART SYNC] Error calculating totals:`, calcError);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to calculate cart totals',
+                details: calcError.message
+            });
+        }
         
         // Preserve existing shipping and tax if they were set
         if (existingShipping > 0) {
@@ -654,23 +690,33 @@ router.post('/:userId', async (req, res) => {
         }
         
         // If there was an existing discount, reapply it
-        if (existingAppliedDiscount && existingDiscount > 0) {
-            // Recalculate totals with existing discount
-            const discountService = require('../services/discountService');
-            const recalculationResult = await discountService.calculateOrderTotals(
-                cart.totals.subtotal,
-                cart.totals.shipping,
-                cart.totals.tax,
-                existingAppliedDiscount.code
-            );
-            
-            if (recalculationResult.success) {
-                cart.totals.discount = recalculationResult.totals.discount;
-                cart.totals.discountedSubtotal = recalculationResult.totals.discountedSubtotal;
-                cart.totals.total = recalculationResult.totals.total;
-                cart.appliedDiscount = existingAppliedDiscount;
-            } else {
-                // Discount became invalid, remove it
+        if (existingAppliedDiscount && existingAppliedDiscount.code && existingDiscount > 0) {
+            try {
+                // Recalculate totals with existing discount
+                const discountService = require('../services/discountService');
+                const recalculationResult = await discountService.calculateOrderTotals(
+                    cart.totals.subtotal,
+                    cart.totals.shipping,
+                    cart.totals.tax,
+                    existingAppliedDiscount.code
+                );
+                
+                if (recalculationResult.success) {
+                    cart.totals.discount = recalculationResult.totals.discount;
+                    cart.totals.discountedSubtotal = recalculationResult.totals.discountedSubtotal;
+                    cart.totals.total = recalculationResult.totals.total;
+                    cart.appliedDiscount = existingAppliedDiscount;
+                } else {
+                    // Discount became invalid, remove it
+                    console.log(`⚠️ [CART SYNC] Existing discount ${existingAppliedDiscount.code} is no longer valid, removing`);
+                    cart.totals.discount = 0;
+                    cart.totals.discountedSubtotal = cart.totals.subtotal;
+                    cart.totals.total = cart.totals.subtotal + cart.totals.shipping + cart.totals.tax;
+                    cart.appliedDiscount = null;
+                }
+            } catch (discountError) {
+                console.error(`❌ [CART SYNC] Error reapplying discount:`, discountError);
+                // Continue without discount if there's an error
                 cart.totals.discount = 0;
                 cart.totals.discountedSubtotal = cart.totals.subtotal;
                 cart.totals.total = cart.totals.subtotal + cart.totals.shipping + cart.totals.tax;
@@ -684,7 +730,16 @@ router.post('/:userId', async (req, res) => {
         }
         
         // Ensure all values are valid numbers
-        ensureCartTotals(cart);
+        try {
+            ensureCartTotals(cart);
+        } catch (ensureError) {
+            console.error(`❌ [CART SYNC] Error ensuring totals:`, ensureError);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to validate cart totals',
+                details: ensureError.message
+            });
+        }
         
         cart.updatedAt = new Date().toISOString();
         if (!cart.createdAt) {
@@ -703,23 +758,28 @@ router.post('/:userId', async (req, res) => {
         });
         
         if (saveResult.success) {
+            console.log(`✅ [CART SYNC] Cart synced successfully for userId: ${userId}, items: ${cart.items.length}, total: ${cart.totals.total}`);
             res.json({
                 success: true,
                 message: 'Cart synced successfully',
                 data: cart
             });
         } else {
+            console.error(`❌ [CART SYNC] Database save failed for userId: ${userId}:`, saveResult);
             res.status(500).json({
                 success: false,
-                error: 'Failed to sync cart'
+                error: 'Failed to save cart to database',
+                details: saveResult.error || 'Database operation failed'
             });
         }
     } catch (error) {
-        console.error('Sync cart error:', error);
+        console.error(`❌ [CART SYNC] Exception for userId ${req.params.userId}:`, error);
+        console.error(`❌ [CART SYNC] Error stack:`, error.stack);
         res.status(500).json({
             success: false,
             error: 'Failed to sync cart',
-            details: error.message
+            details: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
     }
 });
