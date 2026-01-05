@@ -746,15 +746,21 @@ router.post('/:userId', async (req, res) => {
             cart.createdAt = new Date().toISOString();
         }
         
-        // Save cart to database
+        // Determine if cart exists (we already fetched it earlier)
+        const cartExists = cartResult.success && cartResult.data;
+        
+        // Save cart to database using appropriate command
+        // Use --create if cart doesn't exist, --update if it does
         const saveResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
-            command: '--upsert',
-            data: {
-                filter: { userId },
-                update: cart
-            }
+            command: cartExists ? '--update' : '--create',
+            data: cartExists 
+                ? {
+                    filter: { userId },
+                    update: cart
+                }
+                : cart  // For --create, pass the cart object directly
         });
         
         if (saveResult.success) {
