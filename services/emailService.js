@@ -719,6 +719,392 @@ class EmailService {
     }
 
     /**
+     * Send drops confirmation email (for new drops subscriptions)
+     * @param {string} to - Recipient email address
+     * @param {string} name - Subscriber name
+     * @returns {Promise<object>} Result object
+     */
+    async sendDropsConfirmationEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_DROPS_CONFIRMATION_TEMPLATE_ID || 'd-drops_confirmation_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'You\'re Subscribed to New Drops!',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Drops confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send drops confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send discount code update email (for existing subscribers)
+     * @param {string} to - Recipient email address
+     * @param {string} name - Subscriber name
+     * @param {string} discountCode - Discount code
+     * @returns {Promise<object>} Result object
+     */
+    async sendDiscountCodeUpdateEmail(to, name, discountCode) {
+        try {
+            const templateId = process.env.SENDGRID_DISCOUNT_CODE_UPDATE_TEMPLATE_ID || 
+                             process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 
+                             'd-discount_code_update_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                discount_code: discountCode,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Your Discount Code Awaits',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Discount code update email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send discount code update email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send used/expired discount notification email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Subscriber name
+     * @returns {Promise<object>} Result object
+     */
+    async sendUsedExpiredDiscountNotificationEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_USED_EXPIRED_DISCOUNT_TEMPLATE_ID || 
+                             process.env.SENDGRID_DISCOUNT_REMINDER_TEMPLATE_ID || 
+                             'd-used_expired_discount_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Your Discount Code Has Expired',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Used/expired discount notification email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send used/expired discount notification email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send newsletter confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Subscriber name
+     * @returns {Promise<object>} Result object
+     */
+    async sendNewsletterConfirmationEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_NEWSLETTER_CONFIRMATION_TEMPLATE_ID || 
+                             process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 
+                             'd-newsletter_confirmation_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'You\'re Subscribed to Our Newsletter!',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Newsletter confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send newsletter confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send marketing confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Subscriber name
+     * @returns {Promise<object>} Result object
+     */
+    async sendMarketingConfirmationEmail(to, name) {
+        try {
+            const templateId = process.env.SENDGRID_MARKETING_CONFIRMATION_TEMPLATE_ID || 
+                             process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 
+                             'd-marketing_confirmation_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Peak Mode Member',
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Marketing Preferences Updated',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Marketing confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send marketing confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send payment failed email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {string} orderNumber - Order number
+     * @param {string} retryUrl - Payment retry URL
+     * @returns {Promise<object>} Result object
+     */
+    async sendPaymentFailedEmail(to, name, orderNumber, retryUrl) {
+        try {
+            const templateId = process.env.SENDGRID_PAYMENT_FAILED_TEMPLATE_ID || 'd-payment_failed_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                order_number: orderNumber || 'N/A',
+                retry_url: retryUrl || `${process.env.FRONTEND_URL || 'https://peakmode.se'}/checkout`,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                `Payment Failed for Order ${orderNumber}`,
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Payment failed email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send payment failed email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send abandoned cart email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {Array} items - Cart items array
+     * @param {number} total - Cart total
+     * @param {string} cartUrl - Cart URL
+     * @param {string} emailType - Email type: 'first' or 'second' (optional)
+     * @returns {Promise<object>} Result object
+     */
+    async sendAbandonedCartEmail(to, name, items, total, cartUrl, emailType = 'first') {
+        try {
+            const templateId = emailType === 'second' 
+                ? (process.env.SENDGRID_ABANDONED_CART_SECOND_TEMPLATE_ID || process.env.SENDGRID_ABANDONED_CART_TEMPLATE_ID || 'd-abandoned_cart_second_template_id')
+                : (process.env.SENDGRID_ABANDONED_CART_TEMPLATE_ID || 'd-abandoned_cart_template_id');
+            
+            // Format items for email
+            const formattedItems = this.formatOrderItemsForEmail(items || [], 'SEK');
+            const currency = 'SEK';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                cart_items: formattedItems,
+                cart_items_count: formattedItems.length,
+                cart_total: `${total || 0} ${currency}`,
+                cart_url: cartUrl || `${process.env.FRONTEND_URL || 'https://peakmode.se'}/cart`,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            const subject = emailType === 'second' 
+                ? 'Complete Your Purchase - Final Reminder'
+                : 'You Left Items in Your Cart';
+
+            return await this.sendCustomEmail(
+                to,
+                subject,
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Abandoned cart email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send abandoned cart email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send review confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {object} reviewDetails - Review details
+     * @returns {Promise<object>} Result object
+     */
+    async sendReviewConfirmationEmail(to, name, reviewDetails) {
+        try {
+            const templateId = process.env.SENDGRID_REVIEW_CONFIRMATION_TEMPLATE_ID || 'd-review_confirmation_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                product_name: reviewDetails.productName || 'Your Purchase',
+                rating: reviewDetails.rating || 5,
+                review_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/products/${reviewDetails.productId}`,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Thank You for Your Review!',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Review confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send review confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send support message to inbox (forward to admin)
+     * @param {object} params - Parameters object
+     * @param {string} params.fromEmail - Sender email
+     * @param {string} params.fromName - Sender name
+     * @param {string} params.subject - Email subject
+     * @param {string} params.message - Message content
+     * @param {string} params.ticketId - Ticket ID
+     * @returns {Promise<object>} Result object
+     */
+    async sendSupportInboxEmail({ fromEmail, fromName, subject, message, ticketId }) {
+        try {
+            const templateId = process.env.SENDGRID_SUPPORT_INBOX_TEMPLATE_ID || 'd-support_inbox_template_id';
+            
+            const dynamicData = {
+                customer_name: fromName || 'Customer',
+                customer_email: fromEmail,
+                subject: subject,
+                message: message,
+                ticket_id: ticketId || 'N/A',
+                support_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/support`,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            // Send to support inbox
+            const toEmail = this.supportInboxEmail || this.adminNotificationEmail || 'support@peakmode.se';
+
+            return await this.sendCustomEmail(
+                toEmail,
+                `Support Request: ${subject} [${ticketId}]`,
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Support inbox email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send support inbox email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send support reply email to customer
+     * @param {object} params - Parameters object
+     * @param {string} params.to - Recipient email
+     * @param {string} params.name - Customer name
+     * @param {string} params.replyMessage - Reply message
+     * @param {string} params.subject - Original subject
+     * @param {string} params.ticketId - Ticket ID
+     * @returns {Promise<object>} Result object
+     */
+    async sendSupportReplyEmail({ to, name, replyMessage, subject, ticketId }) {
+        try {
+            const templateId = process.env.SENDGRID_SUPPORT_REPLY_TEMPLATE_ID || 'd-support_reply_template_id';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                reply_message: replyMessage,
+                original_subject: subject,
+                ticket_id: ticketId || 'N/A',
+                support_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/support`,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                `Re: ${subject} [${ticketId}]`,
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Support reply email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send support reply email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
      * Log communication to database (if needed)
      * @param {string} email - Email address
      * @param {object} communication - Communication details
