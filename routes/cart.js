@@ -309,7 +309,17 @@ router.post('/:userId/add', async (req, res) => {
             data: { userId }
         });
         
-        let cart = cartResult.success && cartResult.data ? cartResult.data : {
+        // CRITICAL: Ensure we get a single object, not an array
+        let existingCartData = null;
+        if (cartResult.success && cartResult.data) {
+            if (Array.isArray(cartResult.data)) {
+                existingCartData = cartResult.data.length > 0 ? cartResult.data[0] : null;
+            } else if (typeof cartResult.data === 'object') {
+                existingCartData = cartResult.data;
+            }
+        }
+        
+        let cart = existingCartData || {
             userId,
             items: [],
             totals: {
@@ -322,6 +332,9 @@ router.post('/:userId/add', async (req, res) => {
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
+        
+        // Store original cart BEFORE modifications
+        const originalCart = existingCartData ? { ...existingCartData } : null;
         
         // Check if item with same product ID and variant already exists
         const existingItemIndex = cart.items.findIndex(item => 
@@ -359,8 +372,7 @@ router.post('/:userId/add', async (req, res) => {
         cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
         cart.updatedAt = new Date().toISOString();
         
-        // Save cart to database using helper function
-        const originalCart = cartResult.success && cartResult.data ? cartResult.data : null;
+        // Save cart to database using helper function (originalCart was set before modifications)
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
@@ -442,8 +454,8 @@ router.put('/:userId/update', async (req, res) => {
         cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart using helper function
-        const saveResult = await saveCartToDatabase(userId, cart, cart);
+        // Save updated cart using helper function (originalCart was set before modifications)
+        const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
             res.json({
@@ -486,7 +498,21 @@ router.delete('/:userId/remove/:cartItemId', async (req, res) => {
             });
         }
         
-        const cart = cartResult.data;
+        // CRITICAL: Ensure we get a single object, not an array
+        let cart = cartResult.data;
+        if (Array.isArray(cart)) {
+            cart = cart.length > 0 ? cart[0] : null;
+        }
+        
+        if (!cart || typeof cart !== 'object') {
+            return res.status(404).json({
+                success: false,
+                error: 'Cart not found'
+            });
+        }
+        
+        // Store original cart BEFORE modifications
+        const originalCart = { ...cart };
         const itemIndex = cart.items.findIndex(item => item.cartItemId === cartItemId);
         
         if (itemIndex === -1) {
@@ -504,8 +530,8 @@ router.delete('/:userId/remove/:cartItemId', async (req, res) => {
         cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart using helper function
-        const saveResult = await saveCartToDatabase(userId, cart, cart);
+        // Save updated cart using helper function (originalCart was set before modifications)
+        const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
             res.json({
@@ -583,8 +609,18 @@ router.put('/:userId/save-email', async (req, res) => {
             data: { userId }
         });
         
+        // CRITICAL: Ensure we get a single object, not an array
+        let existingCartData = null;
+        if (cartResult.success && cartResult.data) {
+            if (Array.isArray(cartResult.data)) {
+                existingCartData = cartResult.data.length > 0 ? cartResult.data[0] : null;
+            } else if (typeof cartResult.data === 'object') {
+                existingCartData = cartResult.data;
+            }
+        }
+        
         // Create cart if it doesn't exist (for cases where user enters email before adding items)
-        let cart = cartResult.success && cartResult.data ? cartResult.data : {
+        let cart = existingCartData || {
             userId,
             items: [],
             totals: {
@@ -598,6 +634,9 @@ router.put('/:userId/save-email', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
         
+        // Store original cart BEFORE modifications
+        const originalCart = existingCartData ? { ...existingCartData } : null;
+        
         // Update email fields
         const normalizedEmail = email.trim().toLowerCase();
         cart.email = normalizedEmail;
@@ -605,9 +644,8 @@ router.put('/:userId/save-email', async (req, res) => {
         cart.emailUpdatedAt = new Date().toISOString(); // Track when email was saved
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart
-        // Save updated cart using helper function
-        const saveResult = await saveCartToDatabase(userId, cart, cart);
+        // Save updated cart using helper function (originalCart was set before modifications)
+        const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
             console.log(`📧 [CART] Email saved to cart for user ${userId}:`, {
@@ -672,7 +710,19 @@ router.post('/:userId', async (req, res) => {
             data: { userId }
         });
         
-        let cart = cartResult.success && cartResult.data ? cartResult.data : {
+        // CRITICAL: Ensure we get a single object, not an array
+        let existingCartData = null;
+        if (cartResult.success && cartResult.data) {
+            if (Array.isArray(cartResult.data)) {
+                // If data is an array, take the first element
+                existingCartData = cartResult.data.length > 0 ? cartResult.data[0] : null;
+            } else if (typeof cartResult.data === 'object') {
+                // If data is an object, use it directly
+                existingCartData = cartResult.data;
+            }
+        }
+        
+        let cart = existingCartData || {
             userId,
             items: [],
             totals: {
@@ -686,6 +736,25 @@ router.post('/:userId', async (req, res) => {
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
+        
+        // CRITICAL: Ensure cart is an object, not an array
+        if (Array.isArray(cart)) {
+            console.error(`❌ [CART SYNC] Cart is an array after initialization for userId: ${userId}`);
+            cart = {
+                userId,
+                items: [],
+                totals: {
+                    subtotal: 0,
+                    tax: 0,
+                    shipping: 0,
+                    discount: 0,
+                    discountedSubtotal: 0,
+                    total: 0
+                },
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+        }
         
         // Validate and map items
         try {
@@ -809,7 +878,22 @@ router.post('/:userId', async (req, res) => {
         }
         
         // Use helper function to save cart (handles delete+create for updates)
-        const originalCart = cartResult.success && cartResult.data ? cartResult.data : null;
+        // Ensure originalCart is an object, not an array
+        let originalCart = existingCartData;
+        if (Array.isArray(originalCart)) {
+            originalCart = originalCart.length > 0 ? originalCart[0] : null;
+        }
+        
+        // Final validation before saving
+        if (Array.isArray(cart)) {
+            console.error(`❌ [CART SYNC] Cart is still an array before save for userId: ${userId}`);
+            return res.status(500).json({
+                success: false,
+                error: 'Invalid cart data: cart is an array',
+                details: 'Cart must be an object, not an array'
+            });
+        }
+        
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
@@ -867,7 +951,21 @@ router.post('/:userId/apply-discount', async (req, res) => {
             });
         }
         
-        const cart = cartResult.data;
+        // CRITICAL: Ensure we get a single object, not an array
+        let cart = cartResult.data;
+        if (Array.isArray(cart)) {
+            cart = cart.length > 0 ? cart[0] : null;
+        }
+        
+        if (!cart || typeof cart !== 'object') {
+            return res.status(404).json({
+                success: false,
+                error: 'Cart not found'
+            });
+        }
+        
+        // Store original cart BEFORE modifications
+        const originalCart = { ...cart };
         
         // CRITICAL: Ensure cart has items before applying discount
         if (!cart.items || cart.items.length === 0) {
@@ -936,8 +1034,8 @@ router.post('/:userId/apply-discount', async (req, res) => {
         
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart using helper function
-        const saveResult = await saveCartToDatabase(userId, cart, cart);
+        // Save updated cart using helper function (originalCart was set before modifications)
+        const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
             res.json({
@@ -980,7 +1078,21 @@ router.post('/:userId/remove-discount', async (req, res) => {
             });
         }
         
-        const cart = cartResult.data;
+        // CRITICAL: Ensure we get a single object, not an array
+        let cart = cartResult.data;
+        if (Array.isArray(cart)) {
+            cart = cart.length > 0 ? cart[0] : null;
+        }
+        
+        if (!cart || typeof cart !== 'object') {
+            return res.status(404).json({
+                success: false,
+                error: 'Cart not found'
+            });
+        }
+        
+        // Store original cart BEFORE modifications
+        const originalCart = { ...cart };
         
         // CRITICAL: Ensure cart has totals calculated before removing discount
         // If totals are missing or invalid, calculate them from items
@@ -1009,8 +1121,8 @@ router.post('/:userId/remove-discount', async (req, res) => {
         cart.appliedDiscount = null; // Remove discount info
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart using helper function
-        const saveResult = await saveCartToDatabase(userId, cart, cart);
+        // Save updated cart using helper function (originalCart was set before modifications)
+        const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
             res.json({
