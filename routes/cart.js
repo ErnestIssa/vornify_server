@@ -78,6 +78,46 @@ function calculateCartTotals(cart) {
 async function saveCartToDatabase(userId, cart, originalCart = null) {
     const cartExists = originalCart !== null;
     
+    // CRITICAL: Ensure cart is a plain object, not an array
+    if (Array.isArray(cart)) {
+        console.error(`❌ [CART SAVE] Cart is an array, expected object for userId: ${userId}`);
+        return {
+            success: false,
+            error: 'Invalid cart data: expected object, received array'
+        };
+    }
+    
+    // Ensure cart is a valid object with required fields
+    if (!cart || typeof cart !== 'object') {
+        console.error(`❌ [CART SAVE] Invalid cart data type for userId: ${userId}`, typeof cart);
+        return {
+            success: false,
+            error: 'Invalid cart data: expected object'
+        };
+    }
+    
+    // Ensure cart has required structure
+    if (!cart.userId) {
+        cart.userId = userId;
+    }
+    
+    // Ensure items is an array (not undefined)
+    if (!Array.isArray(cart.items)) {
+        cart.items = [];
+    }
+    
+    // Ensure totals object exists
+    if (!cart.totals || typeof cart.totals !== 'object') {
+        cart.totals = {
+            subtotal: 0,
+            tax: 0,
+            shipping: 0,
+            discount: 0,
+            discountedSubtotal: 0,
+            total: 0
+        };
+    }
+    
     if (cartExists) {
         // Cart exists - use delete + create for full replacement
         // This avoids MongoDB $set issues with arrays/nested objects
@@ -104,22 +144,24 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
             cart._id = originalId;
         }
         
-        // Create new cart with updated data
+        // Create new cart with updated data - ensure we pass a plain object
+        const cartToSave = { ...cart }; // Create a shallow copy to ensure it's a plain object
         const createResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
             command: '--create',
-            data: cart
+            data: cartToSave
         });
         
         return createResult;
     } else {
-        // Cart doesn't exist - create new one
+        // Cart doesn't exist - create new one - ensure we pass a plain object
+        const cartToSave = { ...cart }; // Create a shallow copy to ensure it's a plain object
         return await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
             command: '--create',
-            data: cart
+            data: cartToSave
         });
     }
 }
@@ -766,57 +808,9 @@ router.post('/:userId', async (req, res) => {
             cart.createdAt = new Date().toISOString();
         }
         
-        // Determine if cart exists (we already fetched it earlier)
-        const cartExists = cartResult.success && cartResult.data;
-        
-        // CRITICAL: MongoDB's $set operator (used by --update) doesn't work well 
-        // for full document replacements with arrays. We need to use delete + create
-        // for full replacements to avoid "Modifiers operate on fields but we found type array" error
-        
-        let saveResult;
-        
-        if (cartExists) {
-            // Cart exists - use delete + create for full replacement
-            const originalId = cartResult.data._id;
-            
-            // Delete existing cart first
-            const deleteResult = await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'carts',
-                command: '--delete',
-                data: { userId }
-            });
-            
-            if (!deleteResult.success) {
-                console.error(`❌ [CART SYNC] Failed to delete existing cart:`, deleteResult);
-                return res.status(500).json({
-                    success: false,
-                    error: 'Failed to update cart (delete failed)',
-                    details: deleteResult.error || deleteResult.message || 'Database operation failed'
-                });
-            }
-            
-            // Preserve original _id if it exists
-            if (originalId) {
-                cart._id = originalId;
-            }
-            
-            // Create new cart with updated data
-            saveResult = await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'carts',
-                command: '--create',
-                data: cart
-            });
-        } else {
-            // Cart doesn't exist - create new one
-            saveResult = await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'carts',
-                command: '--create',
-                data: cart
-            });
-        }
+        // Use helper function to save cart (handles delete+create for updates)
+        const originalCart = cartResult.success && cartResult.data ? cartResult.data : null;
+        const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
             console.log(`✅ [CART SYNC] Cart synced successfully for userId: ${userId}, items: ${cart.items.length}, total: ${cart.totals.total}`);
