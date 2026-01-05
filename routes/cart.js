@@ -32,6 +32,92 @@ function generateCartItemId() {
     return 'cart_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
+// Helper function to calculate cart totals from items
+// IMPORTANT: Items prices may include tax - subtotal should exclude tax
+function calculateCartTotals(cart) {
+    const items = cart.items || [];
+    
+    // Calculate subtotal from items (product prices before tax)
+    // If items prices include tax, we need to extract the subtotal
+    // For now, assume items prices are the subtotal (excluding tax)
+    const subtotal = items.reduce((sum, item) => {
+        const itemPrice = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+        const itemQuantity = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+        return sum + (itemPrice * itemQuantity);
+    }, 0);
+    
+    // Ensure existing totals are preserved or initialized
+    const existingTotals = cart.totals || {};
+    const shipping = typeof existingTotals.shipping === 'number' && !isNaN(existingTotals.shipping) 
+        ? existingTotals.shipping 
+        : 0;
+    const tax = typeof existingTotals.tax === 'number' && !isNaN(existingTotals.tax) 
+        ? existingTotals.tax 
+        : 0;
+    const discount = typeof existingTotals.discount === 'number' && !isNaN(existingTotals.discount) 
+        ? existingTotals.discount 
+        : 0;
+    
+    // Calculate discounted subtotal
+    const discountedSubtotal = Math.max(0, subtotal - discount);
+    
+    // Calculate total
+    const total = discountedSubtotal + shipping + tax;
+    
+    return {
+        subtotal: subtotal,
+        discount: discount,
+        discountedSubtotal: discountedSubtotal,
+        shipping: shipping,
+        tax: tax,
+        total: total
+    };
+}
+
+// Helper function to ensure cart has totals calculated
+function ensureCartTotals(cart) {
+    if (!cart.totals) {
+        cart.totals = {};
+    }
+    
+    // If subtotal is missing or invalid, recalculate from items
+    if (!cart.totals.subtotal || isNaN(cart.totals.subtotal) || cart.totals.subtotal === undefined) {
+        const calculatedTotals = calculateCartTotals(cart);
+        cart.totals.subtotal = calculatedTotals.subtotal;
+        
+        // Only update other fields if they're also missing/invalid
+        if (!cart.totals.shipping || isNaN(cart.totals.shipping)) {
+            cart.totals.shipping = calculatedTotals.shipping;
+        }
+        if (!cart.totals.tax || isNaN(cart.totals.tax)) {
+            cart.totals.tax = calculatedTotals.tax;
+        }
+        if (!cart.totals.discount || isNaN(cart.totals.discount)) {
+            cart.totals.discount = calculatedTotals.discount;
+        }
+        if (!cart.totals.discountedSubtotal || isNaN(cart.totals.discountedSubtotal)) {
+            cart.totals.discountedSubtotal = calculatedTotals.discountedSubtotal;
+        }
+        if (!cart.totals.total || isNaN(cart.totals.total)) {
+            cart.totals.total = calculatedTotals.total;
+        }
+    }
+    
+    // Ensure all totals fields are valid numbers
+    cart.totals.subtotal = typeof cart.totals.subtotal === 'number' && !isNaN(cart.totals.subtotal) ? cart.totals.subtotal : 0;
+    cart.totals.shipping = typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0;
+    cart.totals.tax = typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0;
+    cart.totals.discount = typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount) ? cart.totals.discount : 0;
+    cart.totals.discountedSubtotal = typeof cart.totals.discountedSubtotal === 'number' && !isNaN(cart.totals.discountedSubtotal) 
+        ? cart.totals.discountedSubtotal 
+        : (cart.totals.subtotal - cart.totals.discount);
+    cart.totals.total = typeof cart.totals.total === 'number' && !isNaN(cart.totals.total) 
+        ? cart.totals.total 
+        : (cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax);
+    
+    return cart;
+}
+
 // GET /api/cart/:userId - Get user's cart
 router.get('/:userId', async (req, res) => {
     try {
@@ -495,6 +581,149 @@ router.put('/:userId/save-email', async (req, res) => {
     }
 });
 
+// POST /api/cart/:userId - Create or update cart with items (sync cart to backend)
+router.post('/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { items } = req.body;
+        
+        if (!items || !Array.isArray(items)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Items array is required'
+            });
+        }
+        
+        // Get existing cart or create new one
+        const cartResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--read',
+            data: { userId }
+        });
+        
+        let cart = cartResult.success && cartResult.data ? cartResult.data : {
+            userId,
+            items: [],
+            totals: {
+                subtotal: 0,
+                tax: 0,
+                shipping: 0,
+                discount: 0,
+                discountedSubtotal: 0,
+                total: 0
+            },
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        
+        // Update cart items (replace existing items with new items)
+        cart.items = items.map(item => ({
+            cartItemId: item.cartItemId || generateCartItemId(),
+            id: item.id || item.productId,
+            name: item.name,
+            price: typeof item.price === 'number' ? item.price : 0,
+            image: item.image || '',
+            size: item.size || null,
+            color: item.color || null,
+            sizeId: item.sizeId || null,
+            colorId: item.colorId || null,
+            variantId: item.variantId || null,
+            quantity: typeof item.quantity === 'number' ? item.quantity : 0,
+            currency: item.currency || 'SEK',
+            source: item.source || null,
+            addedAt: item.addedAt || new Date().toISOString()
+        }));
+        
+        // Calculate totals from items
+        // CRITICAL: Preserve existing discount if any
+        const existingDiscount = cart.totals?.discount || 0;
+        const existingShipping = cart.totals?.shipping || 0;
+        const existingTax = cart.totals?.tax || 0;
+        const existingAppliedDiscount = cart.appliedDiscount || null;
+        
+        // Calculate new totals
+        cart.totals = calculateCartTotals(cart);
+        
+        // Preserve existing shipping and tax if they were set
+        if (existingShipping > 0) {
+            cart.totals.shipping = existingShipping;
+        }
+        if (existingTax > 0) {
+            cart.totals.tax = existingTax;
+        }
+        
+        // If there was an existing discount, reapply it
+        if (existingAppliedDiscount && existingDiscount > 0) {
+            // Recalculate totals with existing discount
+            const discountService = require('../services/discountService');
+            const recalculationResult = await discountService.calculateOrderTotals(
+                cart.totals.subtotal,
+                cart.totals.shipping,
+                cart.totals.tax,
+                existingAppliedDiscount.code
+            );
+            
+            if (recalculationResult.success) {
+                cart.totals.discount = recalculationResult.totals.discount;
+                cart.totals.discountedSubtotal = recalculationResult.totals.discountedSubtotal;
+                cart.totals.total = recalculationResult.totals.total;
+                cart.appliedDiscount = existingAppliedDiscount;
+            } else {
+                // Discount became invalid, remove it
+                cart.totals.discount = 0;
+                cart.totals.discountedSubtotal = cart.totals.subtotal;
+                cart.totals.total = cart.totals.subtotal + cart.totals.shipping + cart.totals.tax;
+                cart.appliedDiscount = null;
+            }
+        } else {
+            cart.totals.discount = 0;
+            cart.totals.discountedSubtotal = cart.totals.subtotal;
+            cart.totals.total = cart.totals.subtotal + cart.totals.shipping + cart.totals.tax;
+            cart.appliedDiscount = null;
+        }
+        
+        // Ensure all values are valid numbers
+        ensureCartTotals(cart);
+        
+        cart.updatedAt = new Date().toISOString();
+        if (!cart.createdAt) {
+            cart.createdAt = new Date().toISOString();
+        }
+        
+        // Save cart to database
+        const saveResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--upsert',
+            data: {
+                filter: { userId },
+                update: cart
+            }
+        });
+        
+        if (saveResult.success) {
+            res.json({
+                success: true,
+                message: 'Cart synced successfully',
+                data: cart
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to sync cart'
+            });
+        }
+    } catch (error) {
+        console.error('Sync cart error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to sync cart',
+            details: error.message
+        });
+    }
+});
+
 // POST /api/cart/:userId/apply-discount - Apply discount code to cart
 router.post('/:userId/apply-discount', async (req, res) => {
     try {
@@ -519,11 +748,31 @@ router.post('/:userId/apply-discount', async (req, res) => {
         if (!cartResult.success || !cartResult.data) {
             return res.status(404).json({
                 success: false,
-                error: 'Cart not found'
+                error: 'Cart not found. Please add items to cart first.'
             });
         }
         
         const cart = cartResult.data;
+        
+        // CRITICAL: Ensure cart has items before applying discount
+        if (!cart.items || cart.items.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Cannot apply discount to empty cart. Please add items to cart first.'
+            });
+        }
+        
+        // CRITICAL: Ensure cart has totals calculated before applying discount
+        // If totals are missing or invalid, calculate them from items
+        ensureCartTotals(cart);
+        
+        // Verify subtotal is valid after ensuring totals
+        if (!cart.totals || !cart.totals.subtotal || isNaN(cart.totals.subtotal) || cart.totals.subtotal <= 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Cart subtotal is invalid. Please ensure cart items have valid prices.'
+            });
+        }
         
         // IMPORTANT: All discount calculations MUST be done on the backend
         // Discount is calculated on product price (subtotal) BEFORE tax
@@ -531,7 +780,7 @@ router.post('/:userId/apply-discount', async (req, res) => {
         
         // Calculate totals with discount using backend service
         const calculationResult = await discountService.calculateOrderTotals(
-            cart.totals.subtotal || 0,
+            cart.totals.subtotal,
             cart.totals.shipping || 0,
             cart.totals.tax || 0,
             discountCode
@@ -620,11 +869,15 @@ router.post('/:userId/remove-discount', async (req, res) => {
         if (!cartResult.success || !cartResult.data) {
             return res.status(404).json({
                 success: false,
-                error: 'Cart not found'
+                error: 'Cart not found. Please add items to cart first.'
             });
         }
         
         const cart = cartResult.data;
+        
+        // CRITICAL: Ensure cart has totals calculated before removing discount
+        // If totals are missing or invalid, calculate them from items
+        ensureCartTotals(cart);
         
         // Remove discount - recalculate totals without discount
         const discountService = require('../services/discountService');
