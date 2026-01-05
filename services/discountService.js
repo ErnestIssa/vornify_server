@@ -151,10 +151,9 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
             
             if (validation.success && validation.valid) {
                 // CRITICAL: Discount must be applied to GROSS price (VAT-included)
-                // The 'subtotal' parameter is NET price (ex-VAT), so convert to gross first
-                const grossSubtotal = subtotal * (1 + 0.25);
-                // Calculate discount on GROSS price
-                discountAmount = calculateDiscountAmount(grossSubtotal, validation.discountPercentage);
+                // The 'subtotal' parameter is already GROSS price (passed from cart endpoint)
+                // Calculate discount directly on GROSS price - DO NOT convert again
+                discountAmount = calculateDiscountAmount(subtotal, validation.discountPercentage);
                 
                 appliedDiscount = {
                     code: validation.discountCode,
