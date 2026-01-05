@@ -173,14 +173,11 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
         // Calculation order: Subtotal → Apply Discount → Calculate VAT on discounted amount → Add Shipping → Total
         const discountedSubtotal = roundToCurrency(subtotal - discountAmount);
         
-        // CRITICAL: VAT must be calculated on discounted subtotal, NOT original subtotal
-        // Formula: VAT = (Subtotal - Discount) × VAT_RATE
+        // CRITICAL: VAT MUST ALWAYS be calculated on discounted subtotal, NEVER on original subtotal
+        // Formula: VAT = (Subtotal - Discount) × 25%
         // This is legally required in Sweden - VAT is charged on the amount actually paid
-        const calculatedTax = roundToCurrency(discountedSubtotal * 0.25); // 25% VAT on discounted amount
-        
-        // If tax was provided (from cart), we should use the calculated tax instead
-        // The provided tax parameter is ignored when discount is applied, as we must recalculate
-        const finalTax = discountAmount > 0 ? calculatedTax : roundToCurrency(tax);
+        // IGNORE any tax parameter passed in - we MUST recalculate based on discounted amount
+        const finalTax = roundToCurrency(discountedSubtotal * 0.25); // 25% VAT on discounted amount
         
         const total = roundToCurrency(discountedSubtotal + finalTax + shipping);
 

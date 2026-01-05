@@ -214,38 +214,42 @@ function ensureCartTotals(cart) {
             cart.totals.discountedSubtotal = calculatedTotals.discountedSubtotal;
         }
         // Always recalculate tax from subtotal if subtotal is valid
-        if (calculatedTotals.subtotal > 0) {
-            cart.totals.tax = calculatedTotals.tax;
-        }
-        if (!cart.totals.total || isNaN(cart.totals.total)) {
-            cart.totals.total = calculatedTotals.total;
-        }
-    }
-    
-    // Ensure all totals fields are valid numbers and rounded to 2 decimal places
-    cart.totals.subtotal = roundToCurrency(typeof cart.totals.subtotal === 'number' && !isNaN(cart.totals.subtotal) ? cart.totals.subtotal : 0);
-    cart.totals.shipping = roundToCurrency(typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0);
-    
-    // CRITICAL SWEDISH VAT COMPLIANCE: VAT must be calculated on DISCOUNTED subtotal
-    // Formula: VAT = (Subtotal - Discount) × VAT_RATE
-    const discountedSubtotal = cart.totals.subtotal - cart.totals.discount;
-    if (discountedSubtotal > 0) {
-        // Calculate VAT on the discounted amount (the amount actually charged)
-        cart.totals.tax = roundToCurrency(discountedSubtotal * VAT_RATE);
-    } else if (cart.totals.subtotal > 0 && cart.totals.discount === 0) {
-        // Only calculate from original subtotal if no discount is applied
-        cart.totals.tax = roundToCurrency(cart.totals.subtotal * VAT_RATE);
+        // Use calculated totals to ensure consistency
+        cart.totals.subtotal = calculatedTotals.subtotal;
+        cart.totals.discount = calculatedTotals.discount;
+        cart.totals.discountedSubtotal = calculatedTotals.discountedSubtotal;
+        cart.totals.shipping = calculatedTotals.shipping;
+        cart.totals.tax = calculatedTotals.tax; // Tax calculated on discounted amount by calculateCartTotals
+        cart.totals.total = calculatedTotals.total;
     } else {
-        cart.totals.tax = roundToCurrency(typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0);
+        // Cart has no items - ensure all totals are 0
+        cart.totals = cart.totals || {};
+        cart.totals.subtotal = 0;
+        cart.totals.discount = 0;
+        cart.totals.discountedSubtotal = 0;
+        cart.totals.shipping = roundToCurrency(typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0);
+        cart.totals.tax = 0;
+        cart.totals.total = cart.totals.shipping;
     }
     
-    cart.totals.discount = roundToCurrency(typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount) ? cart.totals.discount : 0);
-    cart.totals.discountedSubtotal = roundToCurrency(typeof cart.totals.discountedSubtotal === 'number' && !isNaN(cart.totals.discountedSubtotal) 
-        ? cart.totals.discountedSubtotal 
-        : (cart.totals.subtotal - cart.totals.discount));
-    cart.totals.total = roundToCurrency(typeof cart.totals.total === 'number' && !isNaN(cart.totals.total) 
-        ? cart.totals.total 
-        : (cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax));
+    // CRITICAL: Double-check VAT is calculated correctly on discounted amount
+    // This is a safety check to ensure Swedish VAT compliance
+    const discountedSubtotal = cart.totals.subtotal - (cart.totals.discount || 0);
+    if (discountedSubtotal > 0) {
+        // VAT MUST be calculated on discounted amount (legally required)
+        const correctTax = roundToCurrency(discountedSubtotal * VAT_RATE);
+        cart.totals.tax = correctTax;
+    } else if (cart.totals.subtotal > 0 && (cart.totals.discount || 0) === 0) {
+        // No discount - calculate VAT on full subtotal
+        cart.totals.tax = roundToCurrency(cart.totals.subtotal * VAT_RATE);
+    }
+    
+    // Ensure all values are properly rounded and discountedSubtotal is correct
+    cart.totals.subtotal = roundToCurrency(cart.totals.subtotal || 0);
+    cart.totals.discount = roundToCurrency(cart.totals.discount || 0);
+    cart.totals.discountedSubtotal = roundToCurrency(cart.totals.subtotal - cart.totals.discount);
+    cart.totals.shipping = roundToCurrency(cart.totals.shipping || 0);
+    cart.totals.total = roundToCurrency(cart.totals.discountedSubtotal + cart.totals.tax + cart.totals.shipping);
     
     return cart;
 }
@@ -314,36 +318,20 @@ router.get('/:userId', async (req, res) => {
                 }, 0);
             }
             
-            // Ensure all numeric values are valid numbers (not NaN or undefined)
-            cart.totals.subtotal = typeof cart.totals.subtotal === 'number' && !isNaN(cart.totals.subtotal) ? cart.totals.subtotal : 0;
-            cart.totals.shipping = typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0;
-            cart.totals.discount = typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount) ? cart.totals.discount : 0;
+            // CRITICAL: Use ensureCartTotals to ensure all calculations are correct
+            // This ensures VAT is always calculated on discounted amount (Swedish VAT compliance)
+            ensureCartTotals(cart);
             
-            // CRITICAL SWEDISH VAT COMPLIANCE: VAT must be calculated on DISCOUNTED subtotal
-            // Formula: VAT = (Subtotal - Discount) × VAT_RATE
-            const discountedAmount = cart.totals.subtotal - (cart.totals.discount || 0);
-            if (discountedAmount > 0) {
-                cart.totals.tax = roundToCurrency(discountedAmount * VAT_RATE);
-            } else if (cart.totals.subtotal > 0) {
-                cart.totals.tax = roundToCurrency(cart.totals.subtotal * VAT_RATE);
-            } else {
-                cart.totals.tax = roundToCurrency(typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0);
-            }
-            
-            // Ensure discountedSubtotal is properly set
-            if (typeof cart.totals.discountedSubtotal !== 'number' || isNaN(cart.totals.discountedSubtotal)) {
-                cart.totals.discountedSubtotal = cart.totals.subtotal - cart.totals.discount;
-            }
-            
-            // Recalculate total if needed (ensures consistency)
-            const calculatedTotal = cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax;
-            cart.totals.total = typeof cart.totals.total === 'number' && !isNaN(cart.totals.total) ? cart.totals.total : calculatedTotal;
-            
-            // If there's an applied discount, ensure it's properly formatted
-            if (cart.appliedDiscount) {
-                // Ensure discount amount is a valid number
-                if (typeof cart.appliedDiscount.amount !== 'number' || isNaN(cart.appliedDiscount.amount)) {
-                    cart.appliedDiscount.amount = cart.totals.discount;
+            // If there's an applied discount, ensure discount totals match appliedDiscount amount
+            if (cart.appliedDiscount && typeof cart.appliedDiscount.amount === 'number' && !isNaN(cart.appliedDiscount.amount)) {
+                // Sync discount amount from appliedDiscount to totals.discount if they don't match
+                if (Math.abs(cart.appliedDiscount.amount - (cart.totals.discount || 0)) > 0.01) {
+                    cart.totals.discount = roundToCurrency(cart.appliedDiscount.amount);
+                    // Recalculate discountedSubtotal and tax when discount is synced
+                    cart.totals.discountedSubtotal = roundToCurrency(cart.totals.subtotal - cart.totals.discount);
+                    // CRITICAL SWEDISH VAT COMPLIANCE: Recalculate VAT on discounted amount
+                    cart.totals.tax = roundToCurrency(cart.totals.discountedSubtotal * VAT_RATE);
+                    cart.totals.total = roundToCurrency(cart.totals.discountedSubtotal + cart.totals.tax + (cart.totals.shipping || 0));
                 }
             }
             
