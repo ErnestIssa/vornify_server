@@ -154,8 +154,10 @@ router.post('/subscribe', async (req, res) => {
                             filter: { email: normalizedEmail },
                             update: {
                                 discountCode: discountCode,
+                                discountCodeCreatedAt: new Date().toISOString(),
                                 discountCodeExpiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
-                                discountCodeUsed: false
+                                discountCodeUsed: false,
+                                discountReminderSent: false
                             }
                         }
                     });

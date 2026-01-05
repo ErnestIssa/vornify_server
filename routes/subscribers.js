@@ -269,20 +269,22 @@ router.post('/subscribe', async (req, res) => {
                 let discountCode = generateDiscountCode();
                 
                 // Store discount code in database
-                await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'subscribers',
-                    command: '--update',
-                    data: {
-                        filter: { email: normalizedEmail },
-                        update: {
-                            discountCode: discountCode,
-                            discountCodeExpiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days
-                            discountCodeUsed: false,
-                            welcomeDiscountSent: true
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'subscribers',
+                        command: '--update',
+                        data: {
+                            filter: { email: normalizedEmail },
+                            update: {
+                                discountCode: discountCode,
+                                discountCodeCreatedAt: new Date().toISOString(),
+                                discountCodeExpiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days
+                                discountCodeUsed: false,
+                                discountReminderSent: false,
+                                welcomeDiscountSent: true
+                            }
                         }
-                    }
-                });
+                    });
 
                 // Send welcome email with discount code
                 try {
@@ -307,23 +309,49 @@ router.post('/subscribe', async (req, res) => {
                 subscriber.discountCodeExpiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
 
             } else {
-                // EXISTING SUBSCRIBER RESUBSCRIBING - ALWAYS resend welcome email with existing discount code
+                // EXISTING SUBSCRIBER RESUBSCRIBING - Check discount code status and send appropriate email
                 if (subscriber.discountCode) {
-                    try {
-                        const emailResult = await emailService.sendNewsletterWelcomeEmail(
-                            normalizedEmail,
-                            subscriberName,
-                            subscriber.discountCode
-                        );
+                    // Check if code is used or expired
+                    const isCodeUsed = subscriber.discountCodeUsed === true;
+                    const isCodeExpired = subscriber.discountCodeExpiresAt 
+                        ? new Date(subscriber.discountCodeExpiresAt) < new Date()
+                        : false;
+                    
+                    if (isCodeUsed || isCodeExpired) {
+                        // Code is used or expired - send used/expired notification
+                        try {
+                            const emailResult = await emailService.sendUsedExpiredDiscountNotificationEmail(
+                                normalizedEmail,
+                                subscriberName
+                            );
 
-                        if (emailResult.success) {
-                            emailsSent.push('welcome_discount_resent');
-                            console.log(`✅ [SUBSCRIBERS] Welcome discount email resent to EXISTING subscriber ${normalizedEmail} with existing code: ${subscriber.discountCode}`);
-                        } else {
-                            console.error(`❌ [SUBSCRIBERS] Failed to resend welcome discount email to ${normalizedEmail}:`, emailResult.error);
+                            if (emailResult.success) {
+                                emailsSent.push('used_expired_discount_notification');
+                                console.log(`✅ [SUBSCRIBERS] Used/expired discount notification sent to EXISTING subscriber ${normalizedEmail} (code: ${subscriber.discountCode}, used: ${isCodeUsed}, expired: ${isCodeExpired})`);
+                            } else {
+                                console.error(`❌ [SUBSCRIBERS] Failed to send used/expired discount notification to ${normalizedEmail}:`, emailResult.error);
+                            }
+                        } catch (emailError) {
+                            console.error(`❌ [SUBSCRIBERS] Exception sending used/expired discount notification to ${normalizedEmail}:`, emailError);
                         }
-                    } catch (emailError) {
-                        console.error(`❌ [SUBSCRIBERS] Exception resending welcome discount email to ${normalizedEmail}:`, emailError);
+                    } else {
+                        // Code is valid - send discount code update email
+                        try {
+                            const emailResult = await emailService.sendDiscountCodeUpdateEmail(
+                                normalizedEmail,
+                                subscriberName,
+                                subscriber.discountCode
+                            );
+
+                            if (emailResult.success) {
+                                emailsSent.push('discount_reminder');
+                                console.log(`✅ [SUBSCRIBERS] Discount reminder email sent to EXISTING subscriber ${normalizedEmail} with existing code: ${subscriber.discountCode}`);
+                            } else {
+                                console.error(`❌ [SUBSCRIBERS] Failed to send discount reminder email to ${normalizedEmail}:`, emailResult.error);
+                            }
+                        } catch (emailError) {
+                            console.error(`❌ [SUBSCRIBERS] Exception sending discount reminder email to ${normalizedEmail}:`, emailError);
+                        }
                     }
                 } else {
                     // Existing subscriber but no discount code - generate one

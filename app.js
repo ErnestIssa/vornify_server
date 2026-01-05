@@ -343,6 +343,29 @@ if (process.env.NODE_ENV !== 'test') {
         } else {
             console.log('🛒 [ABANDONED CHECKOUT] Service disabled (ENABLE_ABANDONED_CHECKOUT=false)');
         }
+
+        // Start discount reminder processing (runs once per day)
+        if (process.env.ENABLE_DISCOUNT_REMINDER !== 'false') {
+            const discountReminderService = require('./services/discountReminderService');
+            console.log('📧 [DISCOUNT REMINDER] Service enabled - checking once per day');
+            console.log('📧 [DISCOUNT REMINDER] Sends reminder 7 days after code creation (if unused)');
+            
+            // Run immediately on startup (after 3 minute delay to let server stabilize)
+            setTimeout(() => {
+                discountReminderService.processDiscountReminders().catch(err => {
+                    console.error('❌ [DISCOUNT REMINDER] Initial processing error:', err);
+                });
+            }, 180000); // 3 minute delay
+            
+            // Then run once per day (24 hours)
+            setInterval(() => {
+                discountReminderService.processDiscountReminders().catch(err => {
+                    console.error('❌ [DISCOUNT REMINDER] Scheduled processing error:', err);
+                });
+            }, 24 * 60 * 60 * 1000); // 24 hours (once per day)
+        } else {
+            console.log('📧 [DISCOUNT REMINDER] Service disabled (ENABLE_DISCOUNT_REMINDER=false)');
+        }
     });
 }
 
