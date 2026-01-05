@@ -74,6 +74,56 @@ function calculateCartTotals(cart) {
     };
 }
 
+// Helper function to save cart to database (handles full document replacement correctly)
+async function saveCartToDatabase(userId, cart, originalCart = null) {
+    const cartExists = originalCart !== null;
+    
+    if (cartExists) {
+        // Cart exists - use delete + create for full replacement
+        // This avoids MongoDB $set issues with arrays/nested objects
+        const originalId = originalCart._id;
+        
+        // Delete existing cart first
+        const deleteResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--delete',
+            data: { userId }
+        });
+        
+        if (!deleteResult.success) {
+            return {
+                success: false,
+                error: 'Failed to delete existing cart',
+                details: deleteResult.error || deleteResult.message || 'Database operation failed'
+            };
+        }
+        
+        // Preserve original _id if it exists
+        if (originalId) {
+            cart._id = originalId;
+        }
+        
+        // Create new cart with updated data
+        const createResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--create',
+            data: cart
+        });
+        
+        return createResult;
+    } else {
+        // Cart doesn't exist - create new one
+        return await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--create',
+            data: cart
+        });
+    }
+}
+
 // Helper function to ensure cart has totals calculated
 function ensureCartTotals(cart) {
     if (!cart.totals) {
@@ -267,16 +317,9 @@ router.post('/:userId/add', async (req, res) => {
         cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
         cart.updatedAt = new Date().toISOString();
         
-        // Save cart to database
-        const saveResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'carts',
-            command: '--upsert',
-            data: {
-                filter: { userId },
-                update: cart
-            }
-        });
+        // Save cart to database using helper function
+        const originalCart = cartResult.success && cartResult.data ? cartResult.data : null;
+        const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
             res.json({
@@ -357,16 +400,8 @@ router.put('/:userId/update', async (req, res) => {
         cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart
-        const saveResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'carts',
-            command: '--upsert',
-            data: {
-                filter: { userId },
-                update: cart
-            }
-        });
+        // Save updated cart using helper function
+        const saveResult = await saveCartToDatabase(userId, cart, cart);
         
         if (saveResult.success) {
             res.json({
@@ -427,16 +462,8 @@ router.delete('/:userId/remove/:cartItemId', async (req, res) => {
         cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart
-        const saveResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'carts',
-            command: '--upsert',
-            data: {
-                filter: { userId },
-                update: cart
-            }
-        });
+        // Save updated cart using helper function
+        const saveResult = await saveCartToDatabase(userId, cart, cart);
         
         if (saveResult.success) {
             res.json({
@@ -537,15 +564,8 @@ router.put('/:userId/save-email', async (req, res) => {
         cart.updatedAt = new Date().toISOString();
         
         // Save updated cart
-        const saveResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'carts',
-            command: '--upsert',
-            data: {
-                filter: { userId },
-                update: cart
-            }
-        });
+        // Save updated cart using helper function
+        const saveResult = await saveCartToDatabase(userId, cart, cart);
         
         if (saveResult.success) {
             console.log(`📧 [CART] Email saved to cart for user ${userId}:`, {
@@ -749,19 +769,54 @@ router.post('/:userId', async (req, res) => {
         // Determine if cart exists (we already fetched it earlier)
         const cartExists = cartResult.success && cartResult.data;
         
-        // Save cart to database using appropriate command
-        // Use --create if cart doesn't exist, --update if it does
-        const saveResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'carts',
-            command: cartExists ? '--update' : '--create',
-            data: cartExists 
-                ? {
-                    filter: { userId },
-                    update: cart
-                }
-                : cart  // For --create, pass the cart object directly
-        });
+        // CRITICAL: MongoDB's $set operator (used by --update) doesn't work well 
+        // for full document replacements with arrays. We need to use delete + create
+        // for full replacements to avoid "Modifiers operate on fields but we found type array" error
+        
+        let saveResult;
+        
+        if (cartExists) {
+            // Cart exists - use delete + create for full replacement
+            const originalId = cartResult.data._id;
+            
+            // Delete existing cart first
+            const deleteResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'carts',
+                command: '--delete',
+                data: { userId }
+            });
+            
+            if (!deleteResult.success) {
+                console.error(`❌ [CART SYNC] Failed to delete existing cart:`, deleteResult);
+                return res.status(500).json({
+                    success: false,
+                    error: 'Failed to update cart (delete failed)',
+                    details: deleteResult.error || deleteResult.message || 'Database operation failed'
+                });
+            }
+            
+            // Preserve original _id if it exists
+            if (originalId) {
+                cart._id = originalId;
+            }
+            
+            // Create new cart with updated data
+            saveResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'carts',
+                command: '--create',
+                data: cart
+            });
+        } else {
+            // Cart doesn't exist - create new one
+            saveResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'carts',
+                command: '--create',
+                data: cart
+            });
+        }
         
         if (saveResult.success) {
             console.log(`✅ [CART SYNC] Cart synced successfully for userId: ${userId}, items: ${cart.items.length}, total: ${cart.totals.total}`);
@@ -887,16 +942,8 @@ router.post('/:userId/apply-discount', async (req, res) => {
         
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart
-        const saveResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'carts',
-            command: '--upsert',
-            data: {
-                filter: { userId },
-                update: cart
-            }
-        });
+        // Save updated cart using helper function
+        const saveResult = await saveCartToDatabase(userId, cart, cart);
         
         if (saveResult.success) {
             res.json({
@@ -968,16 +1015,8 @@ router.post('/:userId/remove-discount', async (req, res) => {
         cart.appliedDiscount = null; // Remove discount info
         cart.updatedAt = new Date().toISOString();
         
-        // Save updated cart
-        const saveResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'carts',
-            command: '--upsert',
-            data: {
-                filter: { userId },
-                update: cart
-            }
-        });
+        // Save updated cart using helper function
+        const saveResult = await saveCartToDatabase(userId, cart, cart);
         
         if (saveResult.success) {
             res.json({
