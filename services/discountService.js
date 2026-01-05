@@ -150,8 +150,11 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
             const validation = await validateDiscountCode(discountCode);
             
             if (validation.success && validation.valid) {
-                // Calculate discount on subtotal (BEFORE tax)
-                discountAmount = calculateDiscountAmount(subtotal, validation.discountPercentage);
+                // CRITICAL: Discount must be applied to GROSS price (VAT-included)
+                // The 'subtotal' parameter is NET price (ex-VAT), so convert to gross first
+                const grossSubtotal = subtotal * (1 + 0.25);
+                // Calculate discount on GROSS price
+                discountAmount = calculateDiscountAmount(grossSubtotal, validation.discountPercentage);
                 
                 appliedDiscount = {
                     code: validation.discountCode,
@@ -169,25 +172,31 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
             }
         }
 
-        // CRITICAL SWEDISH VAT COMPLIANCE: VAT must be calculated on the DISCOUNTED amount
-        // Calculation order: Subtotal → Apply Discount → Calculate VAT on discounted amount → Add Shipping → Total
-        const discountedSubtotal = roundToCurrency(subtotal - discountAmount);
+        // CRITICAL: Product prices are VAT-INCLUDED (B2C pricing in Sweden)
+        // The 'subtotal' parameter is now the GROSS price (VAT-included)
+        // Apply discount to gross price, then extract net and VAT from discounted gross
         
-        // CRITICAL: VAT MUST ALWAYS be calculated on discounted subtotal, NEVER on original subtotal
-        // Formula: VAT = (Subtotal - Discount) × 25%
-        // This is legally required in Sweden - VAT is charged on the amount actually paid
-        // IGNORE any tax parameter passed in - we MUST recalculate based on discounted amount
-        const finalTax = roundToCurrency(discountedSubtotal * 0.25); // 25% VAT on discounted amount
+        // Apply discount to GROSS price (customer sees discount on gross price)
+        const discountedGross = roundToCurrency(Math.max(0, subtotal - discountAmount));
         
-        const total = roundToCurrency(discountedSubtotal + finalTax + shipping);
+        // Extract net (ex-VAT) and VAT from discounted gross price
+        // Net = Discounted Gross / 1.25
+        const discountedNet = roundToCurrency(discountedGross / (1 + 0.25));
+        const finalTax = roundToCurrency(discountedGross - discountedNet);
+        
+        // Extract net from original gross price for display
+        const originalNet = roundToCurrency(subtotal / (1 + 0.25));
+        
+        // Total is discounted gross + shipping
+        const total = roundToCurrency(discountedGross + shipping);
 
         const totals = {
-            subtotal: roundToCurrency(subtotal),              // Original product prices (before discount)
-            discount: discountAmount,                         // Discount amount (already rounded, calculated on subtotal)
-            discountedSubtotal: discountedSubtotal,           // Subtotal after discount (rounded) - this is the taxable amount
+            subtotal: originalNet,                            // Net price (ex-VAT) before discount
+            discount: discountAmount,                         // Discount amount (applied to gross price)
+            discountedSubtotal: discountedNet,                // Net price (ex-VAT) after discount
             shipping: roundToCurrency(shipping),              // Shipping cost (rounded)
-            tax: finalTax,                                    // VAT calculated on DISCOUNTED amount (legally correct)
-            total: total                                      // Final total: (subtotal - discount) + VAT + shipping
+            tax: finalTax,                                    // VAT extracted from discounted gross price
+            total: total                                      // Final total: discounted gross + shipping
         };
 
         return {

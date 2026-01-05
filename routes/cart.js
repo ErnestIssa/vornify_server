@@ -44,21 +44,22 @@ function roundToCurrency(value) {
 }
 
 // Helper function to calculate cart totals from items
-// CRITICAL SWEDISH VAT COMPLIANCE: Items prices are product prices BEFORE tax
-// VAT must be calculated on the DISCOUNTED subtotal (amount actually charged), NOT the original subtotal
-// This is legally required in Sweden - VAT is charged on the amount the customer actually pays
+// CRITICAL: Product prices are VAT-INCLUDED (B2C pricing in Sweden)
+// Calculation flow: Gross price (includes VAT) → Apply discount to gross → Extract net and VAT from discounted gross
 function calculateCartTotals(cart) {
     const items = cart.items || [];
     
-    // Calculate subtotal from items (product prices before tax)
-    const subtotal = items.reduce((sum, item) => {
+    // Calculate gross subtotal from items (product prices ALREADY include VAT)
+    const grossSubtotal = items.reduce((sum, item) => {
         const itemPrice = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
         const itemQuantity = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
         return sum + (itemPrice * itemQuantity);
     }, 0);
     
-    // CRITICAL SWEDISH VAT COMPLIANCE: VAT must be calculated on the DISCOUNTED amount
-    // Calculation order: Subtotal → Apply Discount → Calculate VAT on discounted amount → Add Shipping → Total
+    // Extract net (ex-VAT) from gross price
+    // Formula: Net = Gross / (1 + VAT_RATE) = Gross / 1.25
+    const netSubtotal = roundToCurrency(grossSubtotal / (1 + VAT_RATE));
+    const vatFromGross = roundToCurrency(grossSubtotal - netSubtotal);
     
     // Ensure existing totals are preserved or initialized
     const existingTotals = cart.totals || {};
@@ -70,33 +71,26 @@ function calculateCartTotals(cart) {
         ? existingTotals.discount 
         : 0);
     
-    // Calculate discounted subtotal (rounded to 2 decimals)
-    const discountedSubtotal = roundToCurrency(Math.max(0, subtotal - discount));
+    // Apply discount to GROSS price (VAT-included price)
+    const discountedGross = roundToCurrency(Math.max(0, grossSubtotal - discount));
     
-    // CRITICAL: VAT must be calculated on DISCOUNTED subtotal, NOT original subtotal
-    // This is legally required in Sweden - VAT is charged on the amount actually paid
-    // Formula: VAT = (Subtotal - Discount) × VAT_RATE
-    let tax = 0;
-    if (discountedSubtotal > 0) {
-        tax = roundToCurrency(discountedSubtotal * VAT_RATE);
-    } else if (subtotal > 0 && discount === 0) {
-        // Only calculate from original subtotal if no discount is applied
-        tax = roundToCurrency(subtotal * VAT_RATE);
-    } else {
-        // Preserve existing tax if subtotal is 0
-        tax = roundToCurrency(typeof existingTotals.tax === 'number' && !isNaN(existingTotals.tax) ? existingTotals.tax : 0);
-    }
+    // Extract net and VAT from discounted gross price
+    // Net = Discounted Gross / 1.25
+    const discountedNet = roundToCurrency(discountedGross / (1 + VAT_RATE));
+    const discountedVat = roundToCurrency(discountedGross - discountedNet);
     
-    // Calculate total: (Subtotal - Discount) + VAT + Shipping
-    const total = roundToCurrency(discountedSubtotal + tax + shipping);
+    // Total is the discounted gross price + shipping
+    const total = roundToCurrency(discountedGross + shipping);
     
     return {
-        subtotal: roundToCurrency(subtotal),              // Original product prices (before discount)
-        discount: discount,                               // Discount amount
-        discountedSubtotal: discountedSubtotal,           // Subtotal after discount - this is the taxable amount
+        subtotal: netSubtotal,                            // Net price (ex-VAT) for display
+        discount: discount,                               // Discount amount (applied to gross)
+        discountedSubtotal: discountedNet,                // Net price after discount (ex-VAT)
         shipping: shipping,                               // Shipping cost
-        tax: tax,                                         // VAT calculated on DISCOUNTED amount (legally correct)
-        total: total                                      // Final total: (subtotal - discount) + VAT + shipping
+        tax: discountedVat,                               // VAT extracted from discounted gross price
+        total: total,                                     // Final total: discounted gross + shipping
+        grossSubtotal: grossSubtotal,                     // Original gross price (for reference)
+        discountedGross: discountedGross                  // Discounted gross price (for reference)
     };
 }
 
@@ -228,33 +222,16 @@ function ensureCartTotals(cart) {
         cart.totals.total = cart.totals.shipping;
     }
     
-    // CRITICAL SWEDISH VAT COMPLIANCE: Always recalculate VAT on discounted amount
-    // Formula: VAT = (Subtotal - Discount) × VAT_RATE
-    // This MUST be calculated AFTER discount is applied, not before
-    // Recalculate discountedSubtotal to ensure it's correct
-    const discountedSubtotal = roundToCurrency((cart.totals.subtotal || 0) - (cart.totals.discount || 0));
-    cart.totals.discountedSubtotal = discountedSubtotal;
-    
-    // Recalculate VAT based on discounted subtotal
-    if (discountedSubtotal > 0) {
-        // VAT MUST be calculated on discounted amount (legally required in Sweden)
-        cart.totals.tax = roundToCurrency(discountedSubtotal * VAT_RATE);
-    } else if ((cart.totals.subtotal || 0) > 0 && (cart.totals.discount || 0) === 0) {
-        // No discount - calculate VAT on full subtotal
-        cart.totals.tax = roundToCurrency(cart.totals.subtotal * VAT_RATE);
-    } else {
-        // If discountedSubtotal is 0 or negative, tax should be 0
-        cart.totals.tax = 0;
-    }
-    
-    // Ensure all values are properly rounded
+    // CRITICAL: calculateCartTotals already handles VAT-included pricing correctly
+    // It extracts net and VAT from gross prices, applies discount to gross, and recalculates
+    // No need to recalculate here - use the values from calculateCartTotals
+    // Just ensure all values are properly rounded
     cart.totals.subtotal = roundToCurrency(cart.totals.subtotal || 0);
     cart.totals.discount = roundToCurrency(cart.totals.discount || 0);
+    cart.totals.discountedSubtotal = roundToCurrency(cart.totals.discountedSubtotal || 0);
     cart.totals.shipping = roundToCurrency(cart.totals.shipping || 0);
-    
-    // CRITICAL: Recalculate total using the correct formula
-    // Total = Discounted Subtotal + VAT + Shipping
-    cart.totals.total = roundToCurrency(cart.totals.discountedSubtotal + cart.totals.tax + cart.totals.shipping);
+    cart.totals.tax = roundToCurrency(cart.totals.tax || 0);
+    cart.totals.total = roundToCurrency(cart.totals.total || 0);
     
     return cart;
 }
@@ -942,11 +919,13 @@ router.post('/:userId', async (req, res) => {
         if (existingAppliedDiscount && existingAppliedDiscount.code && existingDiscount > 0) {
             try {
                 // Recalculate totals with existing discount
+                // CRITICAL: cart.totals.subtotal is NET price, but discount must be applied to GROSS price
+                const grossSubtotal = roundToCurrency((cart.totals.subtotal || 0) * (1 + VAT_RATE));
                 const discountService = require('../services/discountService');
                 const recalculationResult = await discountService.calculateOrderTotals(
-                    cart.totals.subtotal,
+                    grossSubtotal, // Pass GROSS price (VAT-included), not NET
                     cart.totals.shipping,
-                    cart.totals.tax,
+                    0, // Tax will be recalculated by service
                     existingAppliedDiscount.code
                 );
                 
@@ -1122,19 +1101,21 @@ router.post('/:userId/apply-discount', async (req, res) => {
             });
         }
         
-        // CRITICAL SWEDISH VAT COMPLIANCE: VAT must be calculated on DISCOUNTED amount
-        // The discountService will automatically calculate VAT correctly on the discounted subtotal
+        // CRITICAL: Product prices are VAT-INCLUDED (B2C pricing)
+        // cart.totals.subtotal is NET price, but discount must be applied to GROSS price
+        // Convert NET to GROSS: Gross = Net × 1.25
+        const grossSubtotal = roundToCurrency((cart.totals.subtotal || 0) * (1 + VAT_RATE));
         
         // IMPORTANT: All discount calculations MUST be done on the backend
-        // Discount is calculated on product price (subtotal), then VAT is calculated on discounted amount
+        // Pass GROSS price so discount is calculated on gross (customer-facing price)
         const discountService = require('../services/discountService');
         
         // Calculate totals with discount using backend service
-        // The service will calculate VAT on the discounted amount automatically (Swedish VAT compliance)
+        // Pass gross price (not net) so discount is calculated correctly on VAT-included price
         const calculationResult = await discountService.calculateOrderTotals(
-            cart.totals.subtotal,
+            grossSubtotal, // Pass GROSS price (VAT-included), not NET
             cart.totals.shipping || 0,
-            cart.totals.tax || 0, // Current tax (will be recalculated on discounted amount by service)
+            0, // Tax will be recalculated by service
             discountCode
         );
         
@@ -1263,13 +1244,14 @@ router.post('/:userId/remove-discount', async (req, res) => {
         // Do NOT recalculate tax here - ensureCartTotals handles it correctly
         
         // Remove discount - recalculate totals without discount
-        // When discount is removed, discountedSubtotal = subtotal, so VAT is calculated on full subtotal
+        // CRITICAL: cart.totals.subtotal is NET price, convert to GROSS for calculation
+        const grossSubtotal = roundToCurrency((cart.totals.subtotal || 0) * (1 + VAT_RATE));
         const discountService = require('../services/discountService');
         
         const calculationResult = await discountService.calculateOrderTotals(
-            cart.totals.subtotal || 0,
+            grossSubtotal, // Pass GROSS price (VAT-included), not NET
             cart.totals.shipping || 0,
-            0, // Tax will be recalculated on the new discounted amount (which is now full subtotal)
+            0, // Tax will be recalculated by service
             null // No discount code
         );
         
