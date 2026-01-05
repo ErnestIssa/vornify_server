@@ -32,44 +32,64 @@ function generateCartItemId() {
     return 'cart_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
+// VAT Rate constant (Sweden uses 25% VAT)
+const VAT_RATE = 0.25; // 25%
+
+// Helper function to round currency values to 2 decimal places
+// Ensures all monetary values are displayed with proper decimal formatting (e.g., 50.00 instead of 50)
+function roundToCurrency(value) {
+    if (typeof value !== 'number' || isNaN(value)) return 0;
+    // Round to 2 decimal places for currency display
+    return Math.round(value * 100) / 100;
+}
+
 // Helper function to calculate cart totals from items
-// IMPORTANT: Items prices may include tax - subtotal should exclude tax
+// IMPORTANT: Items prices are product prices BEFORE tax
+// VAT is calculated on the subtotal (product prices) and is NOT affected by discounts
 function calculateCartTotals(cart) {
     const items = cart.items || [];
     
     // Calculate subtotal from items (product prices before tax)
-    // If items prices include tax, we need to extract the subtotal
-    // For now, assume items prices are the subtotal (excluding tax)
     const subtotal = items.reduce((sum, item) => {
         const itemPrice = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
         const itemQuantity = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
         return sum + (itemPrice * itemQuantity);
     }, 0);
     
+    // CRITICAL: Calculate VAT from subtotal (product prices)
+    // VAT is ALWAYS calculated from the original subtotal, regardless of discounts
+    // Formula: VAT = Subtotal * VAT_RATE (25% in Sweden)
+    const calculatedTax = subtotal > 0 ? roundToCurrency(subtotal * VAT_RATE) : 0;
+    
     // Ensure existing totals are preserved or initialized
     const existingTotals = cart.totals || {};
-    const shipping = typeof existingTotals.shipping === 'number' && !isNaN(existingTotals.shipping) 
+    const shipping = roundToCurrency(typeof existingTotals.shipping === 'number' && !isNaN(existingTotals.shipping) 
         ? existingTotals.shipping 
-        : 0;
-    const tax = typeof existingTotals.tax === 'number' && !isNaN(existingTotals.tax) 
-        ? existingTotals.tax 
-        : 0;
-    const discount = typeof existingTotals.discount === 'number' && !isNaN(existingTotals.discount) 
+        : 0);
+    
+    // Use calculated tax if subtotal > 0, otherwise preserve existing tax (if it exists)
+    // This ensures VAT is always shown when there are products
+    const tax = subtotal > 0 
+        ? calculatedTax 
+        : roundToCurrency(typeof existingTotals.tax === 'number' && !isNaN(existingTotals.tax) ? existingTotals.tax : 0);
+    
+    const discount = roundToCurrency(typeof existingTotals.discount === 'number' && !isNaN(existingTotals.discount) 
         ? existingTotals.discount 
-        : 0;
+        : 0);
     
-    // Calculate discounted subtotal
-    const discountedSubtotal = Math.max(0, subtotal - discount);
+    // Calculate discounted subtotal (rounded to 2 decimals)
+    const discountedSubtotal = roundToCurrency(Math.max(0, subtotal - discount));
     
-    // Calculate total
-    const total = discountedSubtotal + shipping + tax;
+    // Calculate total: Subtotal - Discount + VAT + Shipping
+    // IMPORTANT: VAT is NOT affected by discount - it's always calculated from original subtotal
+    const total = roundToCurrency(discountedSubtotal + shipping + tax);
     
     return {
-        subtotal: subtotal,
+        subtotal: roundToCurrency(subtotal),
         discount: discount,
         discountedSubtotal: discountedSubtotal,
         shipping: shipping,
-        tax: tax,
+        tax: tax, // VAT calculated from subtotal, not affected by discount
         total: total
     };
 }
@@ -181,31 +201,40 @@ function ensureCartTotals(cart) {
         if (!cart.totals.shipping || isNaN(cart.totals.shipping)) {
             cart.totals.shipping = calculatedTotals.shipping;
         }
-        if (!cart.totals.tax || isNaN(cart.totals.tax)) {
-            cart.totals.tax = calculatedTotals.tax;
-        }
         if (!cart.totals.discount || isNaN(cart.totals.discount)) {
             cart.totals.discount = calculatedTotals.discount;
         }
         if (!cart.totals.discountedSubtotal || isNaN(cart.totals.discountedSubtotal)) {
             cart.totals.discountedSubtotal = calculatedTotals.discountedSubtotal;
         }
+        // Always recalculate tax from subtotal if subtotal is valid
+        if (calculatedTotals.subtotal > 0) {
+            cart.totals.tax = calculatedTotals.tax;
+        }
         if (!cart.totals.total || isNaN(cart.totals.total)) {
             cart.totals.total = calculatedTotals.total;
         }
     }
     
-    // Ensure all totals fields are valid numbers
-    cart.totals.subtotal = typeof cart.totals.subtotal === 'number' && !isNaN(cart.totals.subtotal) ? cart.totals.subtotal : 0;
-    cart.totals.shipping = typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0;
-    cart.totals.tax = typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0;
-    cart.totals.discount = typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount) ? cart.totals.discount : 0;
-    cart.totals.discountedSubtotal = typeof cart.totals.discountedSubtotal === 'number' && !isNaN(cart.totals.discountedSubtotal) 
+    // Ensure all totals fields are valid numbers and rounded to 2 decimal places
+    cart.totals.subtotal = roundToCurrency(typeof cart.totals.subtotal === 'number' && !isNaN(cart.totals.subtotal) ? cart.totals.subtotal : 0);
+    cart.totals.shipping = roundToCurrency(typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0);
+    
+    // CRITICAL: Always recalculate tax from subtotal when subtotal > 0
+    // VAT should always be shown when there are products
+    if (cart.totals.subtotal > 0) {
+        cart.totals.tax = roundToCurrency(cart.totals.subtotal * VAT_RATE);
+    } else {
+        cart.totals.tax = roundToCurrency(typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0);
+    }
+    
+    cart.totals.discount = roundToCurrency(typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount) ? cart.totals.discount : 0);
+    cart.totals.discountedSubtotal = roundToCurrency(typeof cart.totals.discountedSubtotal === 'number' && !isNaN(cart.totals.discountedSubtotal) 
         ? cart.totals.discountedSubtotal 
-        : (cart.totals.subtotal - cart.totals.discount);
-    cart.totals.total = typeof cart.totals.total === 'number' && !isNaN(cart.totals.total) 
+        : (cart.totals.subtotal - cart.totals.discount));
+    cart.totals.total = roundToCurrency(typeof cart.totals.total === 'number' && !isNaN(cart.totals.total) 
         ? cart.totals.total 
-        : (cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax);
+        : (cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax));
     
     return cart;
 }
@@ -239,17 +268,53 @@ router.get('/:userId', async (req, res) => {
                 updatedAt: new Date().toISOString()
             };
             
+            // CRITICAL: Handle array result from database
+            let cartData = cart;
+            if (Array.isArray(cart)) {
+                cartData = cart.length > 0 ? cart[0] : {
+                    userId,
+                    items: [],
+                    totals: {
+                        subtotal: 0,
+                        tax: 0,
+                        shipping: 0,
+                        discount: 0,
+                        discountedSubtotal: 0,
+                        total: 0
+                    },
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                };
+            }
+            cart = cartData;
+            
             // CRITICAL: Ensure all discount fields are properly initialized to prevent NaN values
             // This fixes the issue where discount values show as NaN when returning from checkout
             if (!cart.totals) {
                 cart.totals = {};
             }
             
+            // Recalculate subtotal from items if missing
+            if (!cart.totals.subtotal || isNaN(cart.totals.subtotal) || cart.totals.subtotal === 0) {
+                cart.totals.subtotal = (cart.items || []).reduce((sum, item) => {
+                    const itemPrice = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+                    const itemQuantity = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+                    return sum + (itemPrice * itemQuantity);
+                }, 0);
+            }
+            
             // Ensure all numeric values are valid numbers (not NaN or undefined)
             cart.totals.subtotal = typeof cart.totals.subtotal === 'number' && !isNaN(cart.totals.subtotal) ? cart.totals.subtotal : 0;
-            cart.totals.tax = typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0;
             cart.totals.shipping = typeof cart.totals.shipping === 'number' && !isNaN(cart.totals.shipping) ? cart.totals.shipping : 0;
             cart.totals.discount = typeof cart.totals.discount === 'number' && !isNaN(cart.totals.discount) ? cart.totals.discount : 0;
+            
+            // CRITICAL: Always calculate tax from subtotal when there are products
+            // VAT should always be shown when there is a product price
+            if (cart.totals.subtotal > 0) {
+                cart.totals.tax = cart.totals.subtotal * VAT_RATE;
+            } else {
+                cart.totals.tax = typeof cart.totals.tax === 'number' && !isNaN(cart.totals.tax) ? cart.totals.tax : 0;
+            }
             
             // Ensure discountedSubtotal is properly set
             if (typeof cart.totals.discountedSubtotal !== 'number' || isNaN(cart.totals.discountedSubtotal)) {
@@ -367,9 +432,32 @@ router.post('/:userId/add', async (req, res) => {
             });
         }
         
-        // Update cart totals
-        cart.totals.subtotal = cart.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-        cart.totals.total = cart.totals.subtotal + cart.totals.tax + cart.totals.shipping - cart.totals.discount;
+        // Update cart totals - all values rounded to 2 decimal places
+        const calculatedSubtotal = cart.items.reduce((sum, item) => {
+            const itemPrice = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+            const itemQuantity = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+            return sum + (itemPrice * itemQuantity);
+        }, 0);
+        cart.totals.subtotal = roundToCurrency(calculatedSubtotal);
+        
+        // CRITICAL: Always calculate tax from subtotal (VAT should always be shown when there are products)
+        // Tax is calculated from subtotal, NOT affected by discount
+        if (cart.totals.subtotal > 0) {
+            cart.totals.tax = roundToCurrency(cart.totals.subtotal * VAT_RATE);
+        } else {
+            cart.totals.tax = 0;
+        }
+        
+        // Ensure discount and discountedSubtotal are calculated correctly (rounded to 2 decimals)
+        if (!cart.totals.discount || isNaN(cart.totals.discount)) {
+            cart.totals.discount = 0;
+        } else {
+            cart.totals.discount = roundToCurrency(cart.totals.discount);
+        }
+        cart.totals.discountedSubtotal = roundToCurrency(cart.totals.subtotal - cart.totals.discount);
+        
+        // Calculate total: Subtotal - Discount + VAT + Shipping (rounded to 2 decimals)
+        cart.totals.total = roundToCurrency(cart.totals.discountedSubtotal + cart.totals.tax + cart.totals.shipping);
         cart.updatedAt = new Date().toISOString();
         
         // Save cart to database using helper function (originalCart was set before modifications)
@@ -812,11 +900,17 @@ router.post('/:userId', async (req, res) => {
             });
         }
         
-        // Preserve existing shipping and tax if they were set
+        // Preserve existing shipping if it was set
         if (existingShipping > 0) {
             cart.totals.shipping = existingShipping;
         }
-        if (existingTax > 0) {
+        
+        // CRITICAL: Always recalculate tax from subtotal (VAT should always be shown when there are products)
+        // Tax is calculated from subtotal, NOT affected by discount
+        if (cart.totals.subtotal > 0) {
+            cart.totals.tax = cart.totals.subtotal * VAT_RATE;
+        } else {
+            // Only use existing tax if subtotal is 0
             cart.totals.tax = existingTax;
         }
         
@@ -833,30 +927,42 @@ router.post('/:userId', async (req, res) => {
                 );
                 
                 if (recalculationResult.success) {
+                    // All values from discountService are already rounded to 2 decimals
                     cart.totals.discount = recalculationResult.totals.discount;
                     cart.totals.discountedSubtotal = recalculationResult.totals.discountedSubtotal;
-                    cart.totals.total = recalculationResult.totals.total;
+                    // CRITICAL: Tax should NOT change when reapplying discount
+                    // Tax is always calculated from original subtotal (already rounded above)
+                    cart.totals.total = roundToCurrency(cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax);
+                    
+                    // Ensure appliedDiscount amount is rounded
+                    if (existingAppliedDiscount && typeof existingAppliedDiscount.amount === 'number') {
+                        existingAppliedDiscount.amount = roundToCurrency(existingAppliedDiscount.amount);
+                    }
                     cart.appliedDiscount = existingAppliedDiscount;
                 } else {
-                    // Discount became invalid, remove it
+                    // Discount became invalid, remove it - round all values to 2 decimals
                     console.log(`⚠️ [CART SYNC] Existing discount ${existingAppliedDiscount.code} is no longer valid, removing`);
                     cart.totals.discount = 0;
-                    cart.totals.discountedSubtotal = cart.totals.subtotal;
-                    cart.totals.total = cart.totals.subtotal + cart.totals.shipping + cart.totals.tax;
+                    cart.totals.discountedSubtotal = roundToCurrency(cart.totals.subtotal);
+                    // CRITICAL: Tax should NOT change when removing discount
+                    // Tax is always calculated from original subtotal (already rounded above)
+                    cart.totals.total = roundToCurrency(cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax);
                     cart.appliedDiscount = null;
                 }
             } catch (discountError) {
                 console.error(`❌ [CART SYNC] Error reapplying discount:`, discountError);
-                // Continue without discount if there's an error
+                // Continue without discount if there's an error - round all values
                 cart.totals.discount = 0;
-                cart.totals.discountedSubtotal = cart.totals.subtotal;
-                cart.totals.total = cart.totals.subtotal + cart.totals.shipping + cart.totals.tax;
+                cart.totals.discountedSubtotal = roundToCurrency(cart.totals.subtotal);
+                cart.totals.total = roundToCurrency(cart.totals.subtotal + cart.totals.shipping + cart.totals.tax);
                 cart.appliedDiscount = null;
             }
         } else {
+            // No discount - round all values to 2 decimals
             cart.totals.discount = 0;
-            cart.totals.discountedSubtotal = cart.totals.subtotal;
-            cart.totals.total = cart.totals.subtotal + cart.totals.shipping + cart.totals.tax;
+            cart.totals.discountedSubtotal = roundToCurrency(cart.totals.subtotal);
+            // CRITICAL: Tax is already calculated from subtotal above (already rounded)
+            cart.totals.total = roundToCurrency(cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax);
             cart.appliedDiscount = null;
         }
         
@@ -987,15 +1093,20 @@ router.post('/:userId/apply-discount', async (req, res) => {
             });
         }
         
+        // CRITICAL: Store original tax BEFORE applying discount
+        // VAT is calculated from subtotal and should NEVER be affected by discount
+        const originalTax = cart.totals.tax || (cart.totals.subtotal * VAT_RATE);
+        
         // IMPORTANT: All discount calculations MUST be done on the backend
         // Discount is calculated on product price (subtotal) BEFORE tax
         const discountService = require('../services/discountService');
         
         // Calculate totals with discount using backend service
+        // IMPORTANT: Pass the ORIGINAL tax (calculated from subtotal), not affected by discount
         const calculationResult = await discountService.calculateOrderTotals(
             cart.totals.subtotal,
             cart.totals.shipping || 0,
-            cart.totals.tax || 0,
+            originalTax, // Use original tax - VAT should not be affected by discount
             discountCode
         );
         
@@ -1014,9 +1125,25 @@ router.post('/:userId/apply-discount', async (req, res) => {
         cart.totals.discountedSubtotal = typeof calculationResult.totals.discountedSubtotal === 'number' && !isNaN(calculationResult.totals.discountedSubtotal)
             ? calculationResult.totals.discountedSubtotal
             : (cart.totals.subtotal || 0) - (cart.totals.discount || 0);
-        cart.totals.total = typeof calculationResult.totals.total === 'number' && !isNaN(calculationResult.totals.total)
+        
+        // CRITICAL: Tax/VAT should NEVER change when discount is applied
+        // Tax is always calculated from the original subtotal, not the discounted amount
+        cart.totals.tax = roundToCurrency(originalTax);
+        
+        // Round all totals to 2 decimal places for proper currency formatting
+        cart.totals.subtotal = roundToCurrency(cart.totals.subtotal);
+        cart.totals.discount = roundToCurrency(cart.totals.discount);
+        cart.totals.discountedSubtotal = roundToCurrency(cart.totals.discountedSubtotal);
+        cart.totals.shipping = roundToCurrency(cart.totals.shipping || 0);
+        
+        cart.totals.total = roundToCurrency(typeof calculationResult.totals.total === 'number' && !isNaN(calculationResult.totals.total)
             ? calculationResult.totals.total
-            : cart.totals.discountedSubtotal + (cart.totals.shipping || 0) + (cart.totals.tax || 0);
+            : cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax);
+        
+        // Ensure appliedDiscount amount is also rounded
+        if (cart.appliedDiscount && typeof cart.appliedDiscount.amount === 'number') {
+            cart.appliedDiscount.amount = roundToCurrency(cart.appliedDiscount.amount);
+        }
         
         // Store applied discount information
         if (calculationResult.appliedDiscount) {
@@ -1098,12 +1225,25 @@ router.post('/:userId/remove-discount', async (req, res) => {
         // If totals are missing or invalid, calculate them from items
         ensureCartTotals(cart);
         
+        // CRITICAL: Ensure tax is calculated from subtotal (VAT should always be shown when there are products)
+        if (!cart.totals.tax || isNaN(cart.totals.tax) || cart.totals.tax === 0) {
+            if (cart.totals.subtotal > 0) {
+                cart.totals.tax = cart.totals.subtotal * VAT_RATE;
+            } else {
+                cart.totals.tax = 0;
+            }
+        }
+        
         // Remove discount - recalculate totals without discount
         const discountService = require('../services/discountService');
+        
+        // CRITICAL: Use the calculated tax (not affected by discount removal)
+        const currentTax = cart.totals.tax || (cart.totals.subtotal * VAT_RATE);
+        
         const calculationResult = await discountService.calculateOrderTotals(
             cart.totals.subtotal || 0,
             cart.totals.shipping || 0,
-            cart.totals.tax || 0,
+            currentTax, // Use current tax - VAT should not be affected by discount removal
             null // No discount code
         );
         
@@ -1117,7 +1257,12 @@ router.post('/:userId/remove-discount', async (req, res) => {
         // Update cart totals without discount
         cart.totals.discount = 0;
         cart.totals.discountedSubtotal = cart.totals.subtotal || 0;
-        cart.totals.total = calculationResult.totals.total;
+        
+        // CRITICAL: Tax/VAT should NOT change when discount is removed
+        // Tax is always calculated from the original subtotal
+        cart.totals.tax = currentTax;
+        
+        cart.totals.total = cart.totals.discountedSubtotal + cart.totals.shipping + cart.totals.tax;
         cart.appliedDiscount = null; // Remove discount info
         cart.updatedAt = new Date().toISOString();
         

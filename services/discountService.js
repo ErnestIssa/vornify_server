@@ -9,6 +9,16 @@ const db = getDBInstance();
  */
 
 /**
+ * Helper function to round currency values to 2 decimal places
+ * Ensures all monetary values are displayed with proper decimal formatting (e.g., 50.00 instead of 50)
+ */
+function roundToCurrency(value) {
+    if (typeof value !== 'number' || isNaN(value)) return 0;
+    // Round to 2 decimal places for currency display
+    return Math.round(value * 100) / 100;
+}
+
+/**
  * Calculate discount amount
  * CRITICAL: Discount is calculated on product price (subtotal) BEFORE tax
  * Formula: subtotal + shipping + tax - discount = total
@@ -16,7 +26,7 @@ const db = getDBInstance();
  * 
  * @param {number} subtotal - Cart subtotal (product prices, BEFORE tax)
  * @param {number} discountPercentage - Discount percentage (e.g., 10 for 10%)
- * @returns {number} Discount amount
+ * @returns {number} Discount amount (rounded to 2 decimal places)
  */
 function calculateDiscountAmount(subtotal, discountPercentage) {
     if (!subtotal || subtotal <= 0) return 0;
@@ -24,10 +34,12 @@ function calculateDiscountAmount(subtotal, discountPercentage) {
     if (discountPercentage > 100) discountPercentage = 100; // Cap at 100%
     
     // Calculate discount on subtotal (product prices, BEFORE tax)
+    // Example: 10% discount on 500 SEK = 500 * (10 / 100) = 50.00 SEK
     const discountAmount = subtotal * (discountPercentage / 100);
     
     // Never allow discount to exceed subtotal
-    return Math.min(discountAmount, subtotal);
+    // Round to 2 decimal places for proper currency formatting
+    return roundToCurrency(Math.min(discountAmount, subtotal));
 }
 
 /**
@@ -160,16 +172,16 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
         // Calculate totals
         // IMPORTANT: Discount is applied to subtotal BEFORE tax calculation
         // Total = subtotal - discount + shipping + tax
-        const discountedSubtotal = subtotal - discountAmount;
-        const total = discountedSubtotal + shipping + tax;
+        const discountedSubtotal = roundToCurrency(subtotal - discountAmount);
+        const total = roundToCurrency(discountedSubtotal + shipping + tax);
 
         const totals = {
-            subtotal: subtotal,              // Original product prices (before discount)
-            discount: discountAmount,        // Discount amount (calculated on subtotal)
-            discountedSubtotal: discountedSubtotal, // Subtotal after discount
-            shipping: shipping,              // Shipping cost
-            tax: tax,                        // Tax amount
-            total: total                     // Final total
+            subtotal: roundToCurrency(subtotal),              // Original product prices (before discount)
+            discount: discountAmount,                         // Discount amount (already rounded, calculated on subtotal)
+            discountedSubtotal: discountedSubtotal,           // Subtotal after discount (rounded)
+            shipping: roundToCurrency(shipping),              // Shipping cost (rounded)
+            tax: roundToCurrency(tax),                        // Tax amount (rounded)
+            total: total                                      // Final total (rounded)
         };
 
         return {
