@@ -9,6 +9,56 @@ const reviewStatsHelper = require('../utils/reviewStatsHelper');
 
 const db = getDBInstance();
 
+// GET /api/products/most-viewed - Get most viewed products (last 7 days)
+// This route must be defined before /:id to avoid route conflicts
+router.get('/most-viewed', async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 12;
+        
+        // Get all products
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: {}
+        });
+        
+        if (result.success) {
+            let products = result.data || [];
+            
+            // Filter products that have views and are active
+            products = products.filter(product => 
+                (product.viewsLast7Days || 0) > 0 && 
+                product.active !== false
+            );
+            
+            // Sort by viewsLast7Days DESC
+            products.sort((a, b) => (b.viewsLast7Days || 0) - (a.viewsLast7Days || 0));
+            
+            // Limit results
+            products = products.slice(0, limit);
+            
+            console.log(`📊 [Most Viewed] Returning ${products.length} most viewed products`);
+            
+            res.json({
+                success: true,
+                data: products
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to retrieve most viewed products'
+            });
+        }
+    } catch (error) {
+        console.error('❌ [Most Viewed] Error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve most viewed products'
+        });
+    }
+});
+
 // GET /api/products/categories - Get all product categories
 // This route must be defined before /:id to avoid route conflicts
 router.get('/categories', async (req, res) => {
@@ -218,6 +268,91 @@ router.get('/:id', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve product'
+        });
+    }
+});
+
+// POST /api/products/:id/view - Track product view
+router.post('/:id/view', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Try to find product by id first
+        let result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: { id }
+        });
+        
+        // If not found by id, try _id (MongoDB ObjectId)
+        if (!result.success || !result.data) {
+            const { ObjectId } = require('mongodb');
+            try {
+                result = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: new ObjectId(id) }
+                });
+            } catch (e) {
+                result = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: id }
+                });
+            }
+        }
+        
+        if (result.success && result.data) {
+            const product = result.data;
+            
+            // Initialize view counters if they don't exist
+            const views = (product.views || 0) + 1;
+            const viewsLast7Days = (product.viewsLast7Days || 0) + 1;
+            const lastViewedAt = new Date().toISOString();
+            
+            // Update product with new view counts
+            const updateResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'products',
+                command: '--update',
+                data: {
+                    filter: { id: product.id },
+                    update: {
+                        views: views,
+                        viewsLast7Days: viewsLast7Days,
+                        lastViewedAt: lastViewedAt
+                    }
+                }
+            });
+            
+            if (updateResult.success) {
+                console.log(`👁️ [View Tracked] Product ${product.id} - Total: ${views}, Last 7 days: ${viewsLast7Days}`);
+                
+                res.json({
+                    success: true,
+                    views: views,
+                    viewsLast7Days: viewsLast7Days
+                });
+            } else {
+                res.status(500).json({
+                    success: false,
+                    error: 'Failed to update view count'
+                });
+            }
+        } else {
+            res.status(404).json({
+                success: false,
+                error: 'Product not found'
+            });
+        }
+    } catch (error) {
+        console.error('❌ [View Tracking] Error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to track product view'
         });
     }
 });

@@ -366,6 +366,38 @@ if (process.env.NODE_ENV !== 'test') {
         } else {
             console.log('📧 [DISCOUNT REMINDER] Service disabled (ENABLE_DISCOUNT_REMINDER=false)');
         }
+        
+        // Start weekly product views reset (runs once per week)
+        if (process.env.ENABLE_WEEKLY_VIEWS_RESET !== 'false') {
+            const productViewsResetService = require('./services/productViewsResetService');
+            console.log('📊 [WEEKLY VIEWS RESET] Service enabled - resetting viewsLast7Days every 7 days');
+            
+            // Calculate time until next Monday 00:00
+            const now = new Date();
+            const nextMonday = new Date(now);
+            nextMonday.setDate(now.getDate() + ((8 - now.getDay()) % 7)); // Next Monday
+            nextMonday.setHours(0, 0, 0, 0); // Set to 00:00
+            
+            const timeUntilNextMonday = nextMonday - now;
+            
+            console.log(`📊 [WEEKLY VIEWS RESET] Next reset scheduled for: ${nextMonday.toISOString()}`);
+            
+            // Run on next Monday, then every 7 days
+            setTimeout(() => {
+                productViewsResetService.resetWeeklyViews().catch(err => {
+                    console.error('❌ [WEEKLY VIEWS RESET] Initial reset error:', err);
+                });
+                
+                // Then run every 7 days
+                setInterval(() => {
+                    productViewsResetService.resetWeeklyViews().catch(err => {
+                        console.error('❌ [WEEKLY VIEWS RESET] Scheduled reset error:', err);
+                    });
+                }, 7 * 24 * 60 * 60 * 1000); // 7 days
+            }, timeUntilNextMonday);
+        } else {
+            console.log('📊 [WEEKLY VIEWS RESET] Service disabled (ENABLE_WEEKLY_VIEWS_RESET=false)');
+        }
     });
 }
 
