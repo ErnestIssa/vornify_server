@@ -11,6 +11,7 @@ const ordersRoutes = require('./routes/orders');
 const emailTestRoutes = require('./routes/emailTest');
 const newsletterRoutes = require('./routes/newsletter');
 const subscriberRoutes = require('./routes/subscribers');
+const waitlistRoutes = require('./routes/waitlist');
 const authRoutes = require('./routes/auth');
 const emailStatsRoutes = require('./routes/emailStats');
 const emailVerificationRoutes = require('./routes/emailVerification');
@@ -226,6 +227,7 @@ app.use('/api/orders', ordersRoutes);
 app.use('/api/email-test', emailTestRoutes); // Email testing endpoints
 app.use('/api/newsletter', newsletterRoutes); // Legacy newsletter endpoints (now uses new 'subscribers' collection)
 app.use('/api/subscribers', subscriberRoutes); // New unified subscriber system
+app.use('/api/waitlist', waitlistRoutes); // Waitlist system
 app.use('/api/auth', authRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
 app.use('/api/email/verify', emailVerificationRoutes); // Email verification and testing

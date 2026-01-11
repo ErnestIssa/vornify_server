@@ -1105,6 +1105,78 @@ class EmailService {
     }
 
     /**
+     * Send waitlist confirmation email
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {string} earlyAccessCode - Early access code (optional)
+     * @returns {Promise<object>} Result object
+     */
+    async sendWaitlistConfirmationEmail(to, name, earlyAccessCode = null) {
+        try {
+            const templateId = process.env.SENDGRID_WAITLIST_CONFIRMATION_TEMPLATE_ID || 'd-0bc36f5c95dc4f0a9a864a6ca90eb23d';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                early_access_code: earlyAccessCode || '',
+                has_early_access_code: !!earlyAccessCode,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                earlyAccessCode ? 'Welcome to Peak Mode — You Have Early Access!' : 'Welcome to Peak Mode Waitlist!',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Waitlist confirmation email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send waitlist confirmation email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Send private early access notification email (admin-triggered)
+     * @param {string} to - Recipient email address
+     * @param {string} name - Customer name
+     * @param {string} earlyAccessCode - Early access code (optional)
+     * @returns {Promise<object>} Result object
+     */
+    async sendPrivateEarlyAccessNotificationEmail(to, name, earlyAccessCode = null) {
+        try {
+            const templateId = process.env.SENDGRID_PRIVATE_EARLY_ACCESS_TEMPLATE_ID || 'd-00dc888e24b34a95a38a575f3f5abace';
+            
+            const dynamicData = {
+                customer_name: name || 'Valued Customer',
+                early_access_code: earlyAccessCode || '',
+                has_early_access_code: !!earlyAccessCode,
+                website_url: 'https://peakmode.se',
+                year: new Date().getFullYear()
+            };
+
+            return await this.sendCustomEmail(
+                to,
+                'Private Early Access to Peak Mode',
+                templateId,
+                dynamicData
+            );
+
+        } catch (error) {
+            console.error('❌ Private early access notification email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send private early access notification email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
      * Log communication to database (if needed)
      * @param {string} email - Email address
      * @param {object} communication - Communication details
