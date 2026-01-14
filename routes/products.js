@@ -82,25 +82,35 @@ router.get('/most-viewed', async (req, res) => {
                 products = [products];
             }
             
-            // Filter products that:
-            // 1. Have views in the last 7 days (> 0)
-            // 2. Are published (published: true or published field doesn't exist for backward compatibility)
-            // 3. Are active (active !== false, or active field doesn't exist)
+            // Filter products by published and active status only (include products with 0 views)
             products = products.filter(product => {
-                const hasViews = (product.viewsLast7Days || 0) > 0;
                 const isPublished = product.published !== false; // Default to true if not set
                 const isActive = product.active !== false; // Default to true if not set
                 
-                return hasViews && isPublished && isActive;
+                return isPublished && isActive;
             });
             
-            // Sort by viewsLast7Days DESC (highest first)
-            products.sort((a, b) => (b.viewsLast7Days || 0) - (a.viewsLast7Days || 0));
+            // Sort by viewsLast7Days DESC, then by views DESC (highest first)
+            // Products with 0 views will be sorted to the bottom
+            products.sort((a, b) => {
+                const viewsLast7DaysA = a.viewsLast7Days || 0;
+                const viewsLast7DaysB = b.viewsLast7Days || 0;
+                const viewsA = a.views || 0;
+                const viewsB = b.views || 0;
+                
+                // First sort by viewsLast7Days DESC
+                if (viewsLast7DaysB !== viewsLast7DaysA) {
+                    return viewsLast7DaysB - viewsLast7DaysA;
+                }
+                
+                // Then sort by views DESC (if viewsLast7Days are equal)
+                return viewsB - viewsA;
+            });
             
             // Limit results
             products = products.slice(0, limit);
             
-            console.log(`📊 [Most Viewed] Returning ${products.length} most viewed products (filtered from ${result.data?.length || 0} total)`);
+            console.log(`📊 [Most Viewed] Returning ${products.length} most viewed products (sorted from ${result.data?.length || 0} total)`);
             
             res.json({
                 success: true,
