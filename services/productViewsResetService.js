@@ -27,7 +27,13 @@ async function resetWeeklyViews() {
             };
         }
         
-        const products = result.data || [];
+        let products = result.data || [];
+        
+        // Handle case where result.data might be a single object instead of array
+        if (!Array.isArray(products)) {
+            products = [products];
+        }
+        
         let resetCount = 0;
         let errorCount = 0;
         
@@ -35,12 +41,29 @@ async function resetWeeklyViews() {
         for (const product of products) {
             if (product.viewsLast7Days && product.viewsLast7Days > 0) {
                 try {
+                    // Build filter - use id or _id
+                    let filter = {};
+                    if (product.id) {
+                        filter = { id: product.id };
+                    } else if (product._id) {
+                        const { ObjectId } = require('mongodb');
+                        try {
+                            filter = { _id: new ObjectId(product._id) };
+                        } catch (e) {
+                            filter = { _id: product._id };
+                        }
+                    } else {
+                        console.warn(`⚠️ [Weekly Views Reset] Product missing both id and _id, skipping`);
+                        errorCount++;
+                        continue;
+                    }
+                    
                     const updateResult = await db.executeOperation({
                         database_name: 'peakmode',
                         collection_name: 'products',
                         command: '--update',
                         data: {
-                            filter: { id: product.id },
+                            filter: filter,
                             update: {
                                 viewsLast7Days: 0
                             }
@@ -49,14 +72,17 @@ async function resetWeeklyViews() {
                     
                     if (updateResult.success) {
                         resetCount++;
-                        console.log(`✅ [Weekly Views Reset] Reset product ${product.id} (had ${product.viewsLast7Days} views)`);
+                        const productId = product.id || product._id;
+                        console.log(`✅ [Weekly Views Reset] Reset product ${productId} (had ${product.viewsLast7Days} views)`);
                     } else {
                         errorCount++;
-                        console.error(`❌ [Weekly Views Reset] Failed to reset product ${product.id}`);
+                        const productId = product.id || product._id;
+                        console.error(`❌ [Weekly Views Reset] Failed to reset product ${productId}`);
                     }
                 } catch (error) {
                     errorCount++;
-                    console.error(`❌ [Weekly Views Reset] Error resetting product ${product.id}:`, error);
+                    const productId = product.id || product._id;
+                    console.error(`❌ [Weekly Views Reset] Error resetting product ${productId}:`, error);
                 }
             }
         }

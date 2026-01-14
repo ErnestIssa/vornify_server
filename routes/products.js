@@ -9,6 +9,57 @@ const reviewStatsHelper = require('../utils/reviewStatsHelper');
 
 const db = getDBInstance();
 
+// Server-side throttling: track recent views by IP + product ID
+// Format: Map<"IP:PRODUCT_ID", timestamp>
+const viewThrottleCache = new Map();
+const THROTTLE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Check if a view should be throttled (prevent duplicate views from same IP within 30 minutes)
+ * @param {string} ip - Client IP address
+ * @param {string} productId - Product ID
+ * @returns {boolean} - true if view should be throttled (rejected), false if allowed
+ */
+function shouldThrottleView(ip, productId) {
+    const key = `${ip}:${productId}`;
+    const lastViewTime = viewThrottleCache.get(key);
+    
+    if (!lastViewTime) {
+        // First view from this IP for this product, allow it
+        viewThrottleCache.set(key, Date.now());
+        return false;
+    }
+    
+    const timeSinceLastView = Date.now() - lastViewTime;
+    
+    if (timeSinceLastView < THROTTLE_DURATION_MS) {
+        // View is within throttle window, reject it
+        return true;
+    }
+    
+    // Throttle window has passed, allow the view and update timestamp
+    viewThrottleCache.set(key, Date.now());
+    return false;
+}
+
+// Clean up old throttle entries every hour to prevent memory leaks
+setInterval(() => {
+    const now = Date.now();
+    const keysToDelete = [];
+    
+    for (const [key, timestamp] of viewThrottleCache.entries()) {
+        if (now - timestamp > THROTTLE_DURATION_MS) {
+            keysToDelete.push(key);
+        }
+    }
+    
+    keysToDelete.forEach(key => viewThrottleCache.delete(key));
+    
+    if (keysToDelete.length > 0) {
+        console.log(`🧹 [View Throttle] Cleaned up ${keysToDelete.length} expired throttle entries`);
+    }
+}, 60 * 60 * 1000); // Every hour
+
 // GET /api/products/most-viewed - Get most viewed products (last 7 days)
 // This route must be defined before /:id to avoid route conflicts
 router.get('/most-viewed', async (req, res) => {
@@ -26,19 +77,30 @@ router.get('/most-viewed', async (req, res) => {
         if (result.success) {
             let products = result.data || [];
             
-            // Filter products that have views and are active
-            products = products.filter(product => 
-                (product.viewsLast7Days || 0) > 0 && 
-                product.active !== false
-            );
+            // Handle case where result.data might be a single object instead of array
+            if (!Array.isArray(products)) {
+                products = [products];
+            }
             
-            // Sort by viewsLast7Days DESC
+            // Filter products that:
+            // 1. Have views in the last 7 days (> 0)
+            // 2. Are published (published: true or published field doesn't exist for backward compatibility)
+            // 3. Are active (active !== false, or active field doesn't exist)
+            products = products.filter(product => {
+                const hasViews = (product.viewsLast7Days || 0) > 0;
+                const isPublished = product.published !== false; // Default to true if not set
+                const isActive = product.active !== false; // Default to true if not set
+                
+                return hasViews && isPublished && isActive;
+            });
+            
+            // Sort by viewsLast7Days DESC (highest first)
             products.sort((a, b) => (b.viewsLast7Days || 0) - (a.viewsLast7Days || 0));
             
             // Limit results
             products = products.slice(0, limit);
             
-            console.log(`📊 [Most Viewed] Returning ${products.length} most viewed products`);
+            console.log(`📊 [Most Viewed] Returning ${products.length} most viewed products (filtered from ${result.data?.length || 0} total)`);
             
             res.json({
                 success: true,
@@ -54,7 +116,8 @@ router.get('/most-viewed', async (req, res) => {
         console.error('❌ [Most Viewed] Error:', error);
         res.status(500).json({
             success: false,
-            error: 'Failed to retrieve most viewed products'
+            error: 'Failed to retrieve most viewed products',
+            details: error.message
         });
     }
 });
@@ -277,6 +340,21 @@ router.post('/:id/view', async (req, res) => {
     try {
         const { id } = req.params;
         
+        // Get client IP for throttling
+        const clientIp = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        
+        // Check server-side throttling (30 minutes per IP + product ID)
+        if (shouldThrottleView(clientIp, id)) {
+            console.log(`⏸️ [View Throttled] Product ${id} from IP ${clientIp} - view rejected (within 30 min window)`);
+            return res.status(200).json({
+                success: true,
+                views: 0,
+                viewsLast7Days: 0,
+                throttled: true,
+                message: 'View throttled (already tracked recently)'
+            });
+        }
+        
         // Try to find product by id first
         let result = await db.executeOperation({
             database_name: 'peakmode',
@@ -285,8 +363,21 @@ router.post('/:id/view', async (req, res) => {
             data: { id }
         });
         
+        let product = null;
+        let productId = null;
+        let product_id = null; // MongoDB _id
+        let foundById = false; // Track which field was used to find product
+        
+        // Extract product data (handle array or single object)
+        if (result.success && result.data) {
+            product = Array.isArray(result.data) ? result.data[0] : result.data;
+            productId = product?.id;
+            product_id = product?._id;
+            foundById = true;
+        }
+        
         // If not found by id, try _id (MongoDB ObjectId)
-        if (!result.success || !result.data) {
+        if (!product || !productId) {
             const { ObjectId } = require('mongodb');
             try {
                 result = await db.executeOperation({
@@ -303,56 +394,81 @@ router.post('/:id/view', async (req, res) => {
                     data: { _id: id }
                 });
             }
+            
+            if (result.success && result.data) {
+                product = Array.isArray(result.data) ? result.data[0] : result.data;
+                productId = product?.id;
+                product_id = product?._id || id;
+                foundById = false;
+            }
         }
         
-        if (result.success && result.data) {
-            const product = result.data;
-            
-            // Initialize view counters if they don't exist
-            const views = (product.views || 0) + 1;
-            const viewsLast7Days = (product.viewsLast7Days || 0) + 1;
-            const lastViewedAt = new Date().toISOString();
-            
-            // Update product with new view counts
-            const updateResult = await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'products',
-                command: '--update',
-                data: {
-                    filter: { id: product.id },
-                    update: {
-                        views: views,
-                        viewsLast7Days: viewsLast7Days,
-                        lastViewedAt: lastViewedAt
-                    }
-                }
-            });
-            
-            if (updateResult.success) {
-                console.log(`👁️ [View Tracked] Product ${product.id} - Total: ${views}, Last 7 days: ${viewsLast7Days}`);
-                
-                res.json({
-                    success: true,
-                    views: views,
-                    viewsLast7Days: viewsLast7Days
-                });
-            } else {
-                res.status(500).json({
-                    success: false,
-                    error: 'Failed to update view count'
-                });
-            }
-        } else {
-            res.status(404).json({
+        if (!product || (!productId && !product_id)) {
+            return res.status(404).json({
                 success: false,
                 error: 'Product not found'
+            });
+        }
+        
+        // Initialize view counters if they don't exist
+        const views = (product.views || 0) + 1;
+        const viewsLast7Days = (product.viewsLast7Days || 0) + 1;
+        const lastViewedAt = new Date().toISOString();
+        
+        // Build filter - use whichever field was used to find the product
+        let filter = {};
+        if (foundById && productId) {
+            filter = { id: productId };
+        } else if (product_id) {
+            const { ObjectId } = require('mongodb');
+            // Try ObjectId first, fall back to string
+            try {
+                filter = { _id: new ObjectId(product_id) };
+            } catch (e) {
+                filter = { _id: product_id };
+            }
+        } else {
+            // Fallback to id field
+            filter = { id: productId || id };
+        }
+        
+        // Update product with new view counts
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--update',
+            data: {
+                filter: filter,
+                update: {
+                    views: views,
+                    viewsLast7Days: viewsLast7Days,
+                    lastViewedAt: lastViewedAt
+                }
+            }
+        });
+        
+        if (updateResult.success) {
+            console.log(`👁️ [View Tracked] Product ${productId || product_id} - Total: ${views}, Last 7 days: ${viewsLast7Days}`);
+            
+            res.json({
+                success: true,
+                views: views,
+                viewsLast7Days: viewsLast7Days
+            });
+        } else {
+            console.error(`❌ [View Tracking] Failed to update product ${productId || product_id}:`, updateResult.error);
+            res.status(500).json({
+                success: false,
+                error: 'Failed to update view count',
+                details: updateResult.error
             });
         }
     } catch (error) {
         console.error('❌ [View Tracking] Error:', error);
         res.status(500).json({
             success: false,
-            error: 'Failed to track product view'
+            error: 'Failed to track product view',
+            details: error.message
         });
     }
 });
