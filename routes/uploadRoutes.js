@@ -16,26 +16,28 @@ const router = express.Router();
 
 // Multer error handler middleware
 const handleMulterError = (err, req, res, next) => {
-  // Determine which field name to use based on route
+  // Determine if this is a support route
   const isSupportRoute = req.path.includes('/support');
-  const fieldName = isSupportRoute ? 'attachments' : 'files';
   
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({ 
-        success: false,
         message: 'File too large',
-        [fieldName]: [],
+        files: [],
+        attachments: isSupportRoute ? [] : undefined, // Include both for support routes
         count: 0
       });
     }
     console.error('Multer error:', err);
-    return res.status(400).json({ 
-      success: false,
+    const response = { 
       message: `Upload error: ${err.message}`,
-      [fieldName]: [],
+      files: [],
       count: 0
-    });
+    };
+    if (isSupportRoute) {
+      response.attachments = [];
+    }
+    return res.status(400).json(response);
   }
   if (err) {
     console.error('❌ [UPLOAD] Middleware error:', err);
@@ -46,20 +48,26 @@ const handleMulterError = (err, req, res, next) => {
     });
     // Check if it's a Cloudinary format error
     if (err.message && err.message.includes('format') && err.message.includes('not allowed')) {
-      return res.status(400).json({ 
-        success: false,
+      const response = { 
         message: err.message,
-        [fieldName]: [],
+        files: [],
         count: 0
-      });
+      };
+      if (isSupportRoute) {
+        response.attachments = [];
+      }
+      return res.status(400).json(response);
     }
-    return res.status(500).json({ 
-      success: false,
+    const response = { 
       message: 'Upload failed',
-      [fieldName]: [],
+      files: [],
       count: 0,
       error: err.message
-    });
+    };
+    if (isSupportRoute) {
+      response.attachments = [];
+    }
+    return res.status(500).json(response);
   }
   next();
 };

@@ -101,6 +101,7 @@ exports.uploadMessage = async (req, res) => {
 /**
  * Upload support ticket attachments
  * Handles single file or multiple files
+ * Returns same structure as review uploads for frontend compatibility
  */
 exports.uploadSupport = async (req, res) => {
   try {
@@ -114,9 +115,9 @@ exports.uploadSupport = async (req, res) => {
 
     if (files.length === 0) {
       return res.status(400).json({ 
-        success: false,
         message: 'No attachment uploaded',
-        attachments: [],
+        files: [],
+        attachments: [], // Include both for compatibility
         count: 0
       });
     }
@@ -138,9 +139,10 @@ exports.uploadSupport = async (req, res) => {
       };
     });
 
+    // Return both 'files' and 'attachments' for maximum frontend compatibility
     return res.status(201).json({
-      success: true,
-      attachments: uploaded,
+      files: uploaded,        // Primary field (matches review format)
+      attachments: uploaded,  // Alternative field (for compatibility)
       count: uploaded.length,
     });
   } catch (error) {
@@ -154,9 +156,10 @@ exports.uploadSupport = async (req, res) => {
     });
     
     // Return consistent format even on error so frontend can handle it
+    // Include both 'files' and 'attachments' arrays
     res.status(500).json({ 
-      success: false,
       message: 'Support upload failed',
+      files: [],
       attachments: [],
       count: 0,
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
