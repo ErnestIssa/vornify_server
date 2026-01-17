@@ -778,14 +778,33 @@ router.post('/contact', async (req, res) => {
 
         console.log(`✅ Support message received from ${normalizedEmail}, ticket: ${conversation.ticketId}`);
 
+        // Track email sending status
+        let emailSent = false;
+        let emailError = null;
+
         try {
-            await emailService.sendSupportConfirmationEmail(
+            const confirmationResult = await emailService.sendSupportConfirmationEmail(
                 normalizedEmail,
                 trimmedName.split(' ')[0] || 'there',
                 conversation.ticketId
             );
-        } catch (emailError) {
-            console.error('⚠️ Failed to send support confirmation email:', emailError);
+            
+            if (confirmationResult.success) {
+                emailSent = true;
+                console.log(`✅ Support confirmation email sent to ${normalizedEmail}`);
+            } else {
+                emailError = confirmationResult.error || confirmationResult.details || 'Unknown error';
+                console.error('⚠️ Failed to send support confirmation email:', emailError);
+                
+                // Check if template ID is a placeholder
+                const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 'd-support_confirmation_template_id';
+                if (templateId === 'd-support_confirmation_template_id' || !templateId.startsWith('d-')) {
+                    console.warn('⚠️ [EMAIL] SendGrid template ID appears to be a placeholder. Please set SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID environment variable with a valid SendGrid template GUID.');
+                }
+            }
+        } catch (emailErr) {
+            emailError = emailErr.message || 'Email sending failed';
+            console.error('❌ Failed to send support confirmation email:', emailErr);
         }
 
         try {
@@ -798,7 +817,7 @@ router.post('/contact', async (req, res) => {
             });
 
             if (!forwardResult.success) {
-                console.error('⚠️ Failed to forward support message to inbox:', forwardResult.details);
+                console.error('⚠️ Failed to forward support message to inbox:', forwardResult.details || forwardResult.error);
             }
         } catch (error) {
             console.error('⚠️ Error forwarding support message to inbox:', error);
@@ -809,7 +828,8 @@ router.post('/contact', async (req, res) => {
             message: 'Support message received. We\'ll reply within 24 hours.',
             ticketId: conversation.ticketId,
             adminMessageId: conversation._id || conversation.ticketId,
-            emailSent: true,
+            emailSent: emailSent, // Only true if email actually succeeded
+            emailError: emailError || undefined, // Include error details if email failed
             conversation: buildSummaryFromConversation(conversation)
         });
     } catch (error) {

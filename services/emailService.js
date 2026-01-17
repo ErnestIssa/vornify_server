@@ -650,6 +650,17 @@ class EmailService {
         try {
             const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 'd-support_confirmation_template_id';
             
+            // Validate template ID - warn if it's a placeholder
+            if (!templateId || templateId === 'd-support_confirmation_template_id' || templateId.startsWith('d-')) {
+                const errorMsg = 'SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID is not configured or is a placeholder. Please set a valid SendGrid template GUID in environment variables.';
+                console.error('❌ [EMAIL]', errorMsg);
+                return {
+                    success: false,
+                    error: 'Email template not configured',
+                    details: errorMsg
+                };
+            }
+            
             const dynamicData = {
                 customer_name: firstName || 'Valued Customer',
                 ticket_id: ticketId || 'N/A',
