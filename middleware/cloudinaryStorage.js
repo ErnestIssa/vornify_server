@@ -5,7 +5,7 @@ const productImageStorage = new CloudinaryStorage({
   cloudinary,
   params: {
     folder: 'peakmode/products',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'avif'],
     transformation: [{ width: 1200, crop: 'limit' }],
   },
 });
