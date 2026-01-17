@@ -715,6 +715,42 @@ router.post('/support-confirmation', async (req, res) => {
 });
 
 /**
+ * POST /api/email/test-support
+ * Test support confirmation email sending
+ */
+router.post('/test-support', async (req, res) => {
+    try {
+        const { to = 'ernestissa32@gmail.com', firstName = 'Test User', ticketId = 'TEST-' + Date.now() } = req.body;
+
+        console.log(`🧪 [TEST] Sending test support confirmation email to ${to}`);
+
+        const result = await emailService.sendSupportConfirmationEmail(to, firstName, ticketId);
+
+        if (result.success) {
+            return res.status(200).json({
+                success: true,
+                message: 'Test email sent successfully',
+                result: result
+            });
+        } else {
+            return res.status(500).json({
+                success: false,
+                message: 'Test email failed',
+                result: result
+            });
+        }
+
+    } catch (error) {
+        console.error('Test email error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+/**
  * GET /api/email/verify
  * Verify SendGrid connection and configuration
  */

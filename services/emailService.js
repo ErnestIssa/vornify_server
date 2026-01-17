@@ -47,24 +47,80 @@ class EmailService {
                 throw new Error('Recipient email address is required');
             }
 
-            if (!templateId || (templateId.startsWith('d-') && templateId.includes('template_id'))) {
-                // Warn if using placeholder template ID
-                console.warn(`⚠️ Warning: Using placeholder template ID: ${templateId}. Please set proper SendGrid template ID in environment variables.`);
-            }
-
+            // Check if template ID is a placeholder
+            const isPlaceholder = !templateId || (templateId.startsWith('d-') && templateId.includes('template_id'));
+            
             const msg = {
                 to: to,
-                from: this.fromEmail,
-                templateId: templateId,
-                dynamicTemplateData: dynamicData || {}
+                from: this.fromEmail
             };
 
-            // Add subject if provided (though templates usually have their own subject)
-            if (subject) {
-                msg.subject = subject;
-            }
+            // Add subject (required for non-template emails)
+            msg.subject = subject || 'Email from Peak Mode';
 
-            console.log(`📧 Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
+            // If template ID is a placeholder, send plain content instead
+            if (isPlaceholder) {
+                console.warn(`⚠️ Warning: Using placeholder template ID: ${templateId}. Sending plain text email instead.`);
+                
+                // Generate plain text and HTML content from dynamic data
+                let textContent = '';
+                let htmlContent = '';
+                
+                // Add greeting based on dynamic data
+                if (dynamicData && dynamicData.customer_name) {
+                    textContent = `Hello ${dynamicData.customer_name},\n\n`;
+                    htmlContent = `<p>Hello ${dynamicData.customer_name},</p>`;
+                } else {
+                    textContent = 'Hello,\n\n';
+                    htmlContent = '<p>Hello,</p>';
+                }
+                
+                // Add main message based on subject/type
+                if (subject && subject.includes('Support Request')) {
+                    const ticketId = dynamicData?.ticket_id || 'N/A';
+                    textContent += `Thank you for contacting Peak Mode Support. We have received your support request.\n\n`;
+                    textContent += `Your ticket ID is: ${ticketId}\n\n`;
+                    textContent += `We will review your message and respond within 24 hours.\n\n`;
+                    
+                    htmlContent += `<p>Thank you for contacting Peak Mode Support. We have received your support request.</p>`;
+                    htmlContent += `<p><strong>Your ticket ID is:</strong> ${ticketId}</p>`;
+                    htmlContent += `<p>We will review your message and respond within 24 hours.</p>`;
+                } else {
+                    // Generic message
+                    textContent += subject || 'Thank you for contacting us.\n\n';
+                    htmlContent += `<p>${subject || 'Thank you for contacting us.'}</p>`;
+                }
+                
+                // Add additional dynamic data
+                if (dynamicData) {
+                    const excludeKeys = ['customer_name', 'ticket_id', 'subject', 'message'];
+                    Object.entries(dynamicData).forEach(([key, value]) => {
+                        if (!excludeKeys.includes(key) && value) {
+                            const label = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                            textContent += `${label}: ${value}\n`;
+                            htmlContent += `<p><strong>${label}:</strong> ${value}</p>`;
+                        }
+                    });
+                }
+                
+                // Add footer
+                if (dynamicData?.support_url) {
+                    textContent += `\nYou can view your support request at: ${dynamicData.support_url}\n\n`;
+                    htmlContent += `<p><a href="${dynamicData.support_url}">View your support request</a></p>`;
+                }
+                
+                textContent += `\nBest regards,\nPeak Mode Team`;
+                htmlContent += `<p>Best regards,<br>Peak Mode Team</p>`;
+                
+                // Use plain text and HTML content instead of template
+                msg.text = textContent;
+                msg.html = htmlContent;
+            } else {
+                // Use template ID as normal
+                msg.templateId = templateId;
+                msg.dynamicTemplateData = dynamicData || {};
+                console.log(`📧 Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
+            }
             
             const response = await sgMail.send(msg);
             
