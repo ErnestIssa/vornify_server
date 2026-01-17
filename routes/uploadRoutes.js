@@ -16,12 +16,26 @@ const router = express.Router();
 
 // Multer error handler middleware
 const handleMulterError = (err, req, res, next) => {
+  // Determine which field name to use based on route
+  const isSupportRoute = req.path.includes('/support');
+  const fieldName = isSupportRoute ? 'attachments' : 'files';
+  
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ message: 'File too large' });
+      return res.status(400).json({ 
+        success: false,
+        message: 'File too large',
+        [fieldName]: [],
+        count: 0
+      });
     }
     console.error('Multer error:', err);
-    return res.status(400).json({ message: `Upload error: ${err.message}` });
+    return res.status(400).json({ 
+      success: false,
+      message: `Upload error: ${err.message}`,
+      [fieldName]: [],
+      count: 0
+    });
   }
   if (err) {
     console.error('❌ [UPLOAD] Middleware error:', err);
@@ -32,9 +46,20 @@ const handleMulterError = (err, req, res, next) => {
     });
     // Check if it's a Cloudinary format error
     if (err.message && err.message.includes('format') && err.message.includes('not allowed')) {
-      return res.status(400).json({ message: err.message });
+      return res.status(400).json({ 
+        success: false,
+        message: err.message,
+        [fieldName]: [],
+        count: 0
+      });
     }
-    return res.status(500).json({ message: 'Upload failed', error: err.message });
+    return res.status(500).json({ 
+      success: false,
+      message: 'Upload failed',
+      [fieldName]: [],
+      count: 0,
+      error: err.message
+    });
   }
   next();
 };

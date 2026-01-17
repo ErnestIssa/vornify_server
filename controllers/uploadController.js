@@ -104,10 +104,21 @@ exports.uploadMessage = async (req, res) => {
  */
 exports.uploadSupport = async (req, res) => {
   try {
-    const files = req.files || (req.file ? [req.file] : []);
+    // Handle both single file and multiple files
+    let files = [];
+    if (req.files && Array.isArray(req.files)) {
+      files = req.files;
+    } else if (req.file) {
+      files = [req.file];
+    }
 
     if (files.length === 0) {
-      return res.status(400).json({ message: 'No attachment uploaded' });
+      return res.status(400).json({ 
+        success: false,
+        message: 'No attachment uploaded',
+        attachments: [],
+        count: 0
+      });
     }
 
     const uploaded = files.map(file => {
@@ -128,6 +139,7 @@ exports.uploadSupport = async (req, res) => {
     });
 
     return res.status(201).json({
+      success: true,
       attachments: uploaded,
       count: uploaded.length,
     });
@@ -140,8 +152,13 @@ exports.uploadSupport = async (req, res) => {
       filesLength: req.files ? req.files.length : 0,
       fileKeys: req.file ? Object.keys(req.file) : []
     });
+    
+    // Return consistent format even on error so frontend can handle it
     res.status(500).json({ 
+      success: false,
       message: 'Support upload failed',
+      attachments: [],
+      count: 0,
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
