@@ -650,18 +650,6 @@ class EmailService {
         try {
             const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 'd-support_confirmation_template_id';
             
-            // Validate template ID - check if it's a placeholder
-            if (!templateId || templateId === 'd-support_confirmation_template_id') {
-                const errorMsg = 'SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID is not configured or is a placeholder. Please set a valid SendGrid template GUID in environment variables.';
-                console.error('❌ [EMAIL]', errorMsg);
-                console.error('❌ [EMAIL] Current template ID value:', templateId || '(not set)');
-                return {
-                    success: false,
-                    error: 'Email template not configured',
-                    details: errorMsg
-                };
-            }
-            
             const dynamicData = {
                 customer_name: firstName || 'Valued Customer',
                 ticket_id: ticketId || 'N/A',
@@ -1043,18 +1031,6 @@ class EmailService {
     async sendSupportInboxEmail({ fromEmail, fromName, subject, message, ticketId }) {
         try {
             const templateId = process.env.SENDGRID_SUPPORT_INBOX_TEMPLATE_ID || 'd-support_inbox_template_id';
-            
-            // Validate template ID - check if it's a placeholder
-            if (!templateId || templateId === 'd-support_inbox_template_id') {
-                const errorMsg = 'SENDGRID_SUPPORT_INBOX_TEMPLATE_ID is not configured or is a placeholder. Please set a valid SendGrid template GUID in environment variables.';
-                console.error('❌ [EMAIL]', errorMsg);
-                console.error('❌ [EMAIL] Current template ID value:', templateId || '(not set)');
-                return {
-                    success: false,
-                    error: 'Email template not configured',
-                    details: errorMsg
-                };
-            }
             
             const dynamicData = {
                 customer_name: fromName || 'Customer',
