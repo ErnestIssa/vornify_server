@@ -1,4 +1,5 @@
 const express = require('express');
+const multer = require('multer');
 const { uploadProductImage, uploadReview, uploadMessage, uploadSupport } = require('../middleware/uploadProductImage');
 const { 
   uploadProductImage: uploadController,
@@ -13,9 +14,25 @@ const {
 
 const router = express.Router();
 
+// Multer error handler middleware
+const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ message: 'File too large' });
+    }
+    return res.status(400).json({ message: `Upload error: ${err.message}` });
+  }
+  if (err) {
+    console.error('Upload middleware error:', err);
+    return res.status(500).json({ message: 'Upload failed', error: err.message });
+  }
+  next();
+};
+
 router.post(
   '/product-image',
   uploadProductImage.single('image'),
+  handleMulterError,
   uploadController
 );
 

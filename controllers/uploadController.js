@@ -9,13 +9,38 @@ exports.uploadProductImage = async (req, res) => {
       return res.status(400).json({ message: 'No file uploaded' });
     }
 
+    // CloudinaryStorage provides path (secure_url) and filename (public_id)
+    const url = req.file.path;
+    const public_id = req.file.filename;
+
+    if (!url || !public_id) {
+      console.error('Invalid file object from CloudinaryStorage:', {
+        hasPath: !!req.file.path,
+        hasFilename: !!req.file.filename,
+        fileKeys: Object.keys(req.file || {})
+      });
+      return res.status(500).json({ 
+        message: 'Invalid file data from upload',
+        details: 'Missing url or public_id'
+      });
+    }
+
     return res.status(201).json({
-      url: req.file.path,
-      public_id: req.file.filename,
+      url: url,
+      public_id: public_id,
     });
   } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ message: 'Image upload failed' });
+    console.error('❌ [PRODUCT UPLOAD] Upload error:', error);
+    console.error('❌ [PRODUCT UPLOAD] Error stack:', error.stack);
+    console.error('❌ [PRODUCT UPLOAD] Request file:', req.file ? {
+      hasPath: !!req.file.path,
+      hasFilename: !!req.file.filename,
+      keys: Object.keys(req.file)
+    } : 'req.file is null/undefined');
+    res.status(500).json({ 
+      message: 'Image upload failed',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 };
 
