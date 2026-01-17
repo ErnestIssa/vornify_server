@@ -110,18 +110,40 @@ exports.uploadSupport = async (req, res) => {
       return res.status(400).json({ message: 'No attachment uploaded' });
     }
 
-    const uploaded = files.map(file => ({
-      url: file.path,
-      public_id: file.filename,
-    }));
+    const uploaded = files.map(file => {
+      // Validate file object has required properties
+      if (!file.path || !file.filename) {
+        console.error('Invalid file object in support upload:', {
+          hasPath: !!file.path,
+          hasFilename: !!file.filename,
+          fileKeys: Object.keys(file || {})
+        });
+        throw new Error('Invalid file data from upload');
+      }
+
+      return {
+        url: file.path,
+        public_id: file.filename,
+      };
+    });
 
     return res.status(201).json({
       attachments: uploaded,
       count: uploaded.length,
     });
   } catch (error) {
-    console.error('Support upload error:', error);
-    res.status(500).json({ message: 'Support upload failed' });
+    console.error('❌ [SUPPORT UPLOAD] Upload error:', error);
+    console.error('❌ [SUPPORT UPLOAD] Error stack:', error.stack);
+    console.error('❌ [SUPPORT UPLOAD] Request files:', {
+      hasFiles: !!req.files,
+      hasFile: !!req.file,
+      filesLength: req.files ? req.files.length : 0,
+      fileKeys: req.file ? Object.keys(req.file) : []
+    });
+    res.status(500).json({ 
+      message: 'Support upload failed',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 };
 

@@ -32,7 +32,7 @@ const supportStorage = new CloudinaryStorage({
   cloudinary,
   params: {
     folder: 'peakmode/support',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'avif', 'mp4', 'mov', 'webm'],
     transformation: [{ width: 1200, crop: 'limit' }],
   },
 });
