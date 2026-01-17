@@ -798,8 +798,9 @@ router.post('/contact', async (req, res) => {
                 
                 // Check if template ID is a placeholder
                 const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 'd-support_confirmation_template_id';
-                if (templateId === 'd-support_confirmation_template_id' || !templateId.startsWith('d-')) {
+                if (!templateId || templateId === 'd-support_confirmation_template_id') {
                     console.warn('⚠️ [EMAIL] SendGrid template ID appears to be a placeholder. Please set SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID environment variable with a valid SendGrid template GUID.');
+                    console.warn('⚠️ [EMAIL] Current template ID value:', templateId || '(not set)');
                 }
             }
         } catch (emailErr) {
