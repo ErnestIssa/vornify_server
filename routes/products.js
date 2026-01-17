@@ -60,6 +60,34 @@ setInterval(() => {
     }
 }, 60 * 60 * 1000); // Every hour
 
+/**
+ * Validate Cloudinary media fields
+ * Ensures media and imagePublicIds arrays match in length if either is provided
+ * @param {Array} media - Array of Cloudinary URLs
+ * @param {Array} imagePublicIds - Array of Cloudinary public_ids
+ * @returns {Object} - { valid: boolean, error: string | null }
+ */
+function validateCloudinaryMedia(media, imagePublicIds) {
+    // If both are undefined/null, validation passes (optional fields)
+    if ((!media || media.length === 0) && (!imagePublicIds || imagePublicIds.length === 0)) {
+        return { valid: true, error: null };
+    }
+    
+    // Normalize to arrays (handle undefined/null)
+    const mediaArray = Array.isArray(media) ? media : [];
+    const publicIdsArray = Array.isArray(imagePublicIds) ? imagePublicIds : [];
+    
+    // If one exists, both must exist and match in length
+    if (mediaArray.length !== publicIdsArray.length) {
+        return {
+            valid: false,
+            error: `media array length (${mediaArray.length}) must match imagePublicIds array length (${publicIdsArray.length})`
+        };
+    }
+    
+    return { valid: true, error: null };
+}
+
 // GET /api/products/most-viewed - Get most viewed products (last 7 days)
 // This route must be defined before /:id to avoid route conflicts
 router.get('/most-viewed', async (req, res) => {
@@ -666,6 +694,15 @@ router.post('/', async (req, res) => {
             });
         }
         
+        // Validate Cloudinary media fields
+        const mediaValidation = validateCloudinaryMedia(productData.media, productData.imagePublicIds);
+        if (!mediaValidation.valid) {
+            return res.status(400).json({
+                success: false,
+                error: mediaValidation.error
+            });
+        }
+        
         // Generate product ID if not provided
         if (!productData.id) {
             productData.id = 'prod_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -676,6 +713,10 @@ router.post('/', async (req, res) => {
         productData.updatedAt = new Date().toISOString();
         productData.active = productData.active !== undefined ? productData.active : true;
         productData.featured = productData.featured !== undefined ? productData.featured : false;
+        
+        // Set Cloudinary media fields (default to empty arrays if not provided)
+        productData.media = Array.isArray(productData.media) ? productData.media : [];
+        productData.imagePublicIds = Array.isArray(productData.imagePublicIds) ? productData.imagePublicIds : [];
         
         // Process inventory data if provided
         if (productData.inventory) {
@@ -720,6 +761,25 @@ router.put('/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
+        
+        // Validate Cloudinary media fields if provided
+        if (updateData.media !== undefined || updateData.imagePublicIds !== undefined) {
+            const mediaValidation = validateCloudinaryMedia(updateData.media, updateData.imagePublicIds);
+            if (!mediaValidation.valid) {
+                return res.status(400).json({
+                    success: false,
+                    error: mediaValidation.error
+                });
+            }
+            
+            // Normalize to arrays if provided (ensure they're arrays, not undefined)
+            if (updateData.media !== undefined) {
+                updateData.media = Array.isArray(updateData.media) ? updateData.media : [];
+            }
+            if (updateData.imagePublicIds !== undefined) {
+                updateData.imagePublicIds = Array.isArray(updateData.imagePublicIds) ? updateData.imagePublicIds : [];
+            }
+        }
         
         // Add updated timestamp
         updateData.updatedAt = new Date().toISOString();

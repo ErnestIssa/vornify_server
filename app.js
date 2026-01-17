@@ -7,6 +7,7 @@ const paymentRoutes = require('./routes/payment');
 const storageRoutes = require('./routes/storage');
 const emailRoutes = require('./routes/emailRoutes');
 const uploadRoutes = require('./routes/upload');
+const cloudinaryUploadRoutes = require('./routes/uploadRoutes');
 const ordersRoutes = require('./routes/orders');
 const emailTestRoutes = require('./routes/emailTest');
 const newsletterRoutes = require('./routes/newsletter');
@@ -33,6 +34,10 @@ const abandonedCartService = require('./services/abandonedCartService');
 const abandonedCheckoutService = require('./services/abandonedCheckoutService');
 const paymentFailureService = require('./services/paymentFailureService');
 require('dotenv').config();
+
+// Cloudinary configuration check (temporary sanity check)
+const cloudinary = require('./config/cloudinary');
+console.log('Cloudinary configured:', cloudinary.config().cloud_name);
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -223,6 +228,7 @@ app.use('/api/payments', paymentRoutes); // New Stripe payment endpoints
 app.use('/api/storage', storageRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/uploads', cloudinaryUploadRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/email-test', emailTestRoutes); // Email testing endpoints
 app.use('/api/newsletter', newsletterRoutes); // Legacy newsletter endpoints (now uses new 'subscribers' collection)
