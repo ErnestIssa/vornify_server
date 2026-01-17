@@ -704,7 +704,11 @@ class EmailService {
      */
     async sendSupportConfirmationEmail(to, firstName, ticketId) {
         try {
-            const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 'd-support_confirmation_template_id';
+            // Check multiple possible environment variable names (handle typos/variations)
+            const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 
+                               process.env.SENDGRID_SUPPORT_COMFIRMATION_TEMPLATE_ID || // Handle typo: COMFIRMATION
+                               process.env.SENDGRID_SUPPORT_CONFIRMATION_ID || // Handle missing _TEMPLATE
+                               'd-support_confirmation_template_id';
             
             const dynamicData = {
                 customer_name: firstName || 'Valued Customer',
@@ -1086,7 +1090,10 @@ class EmailService {
      */
     async sendSupportInboxEmail({ fromEmail, fromName, subject, message, ticketId }) {
         try {
-            const templateId = process.env.SENDGRID_SUPPORT_INBOX_TEMPLATE_ID || 'd-support_inbox_template_id';
+            // Check multiple possible environment variable names (handle variations)
+            const templateId = process.env.SENDGRID_SUPPORT_INBOX_TEMPLATE_ID || 
+                               process.env.SENDGRID_SUPPORT_INBOX_ID || // Handle missing _TEMPLATE
+                               'd-support_inbox_template_id';
             
             const dynamicData = {
                 customer_name: fromName || 'Customer',
