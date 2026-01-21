@@ -29,6 +29,7 @@ const customerRoutes = require('./routes/customers');
 const reviewRoutes = require('./routes/reviews');
 const currencyRoutes = require('./routes/currency');
 const adminRoutes = require('./routes/admin');
+const metaFeedRoutes = require('./routes/metaFeed');
 const errorHandler = require('./middleware/errorHandler');
 const abandonedCartService = require('./services/abandonedCartService');
 const abandonedCheckoutService = require('./services/abandonedCheckoutService');
@@ -207,6 +208,10 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString()
     });
 });
+
+// Meta Commerce Manager product feed (public CSV)
+// Accessible at: /meta-feed.csv
+app.use('/', metaFeedRoutes);
 
 // API documentation endpoint
 app.get('/', (req, res) => {
