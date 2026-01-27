@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 
 const db = getDBInstance();
@@ -58,27 +59,28 @@ async function authenticateAdmin(req, res, next) {
         }
 
         // Verify admin still exists and is active
+        const adminLookup = (decoded && decoded.adminId && ObjectId.isValid(decoded.adminId))
+            ? { _id: new ObjectId(decoded.adminId), active: { $ne: false } }
+            : { username: decoded.username, active: { $ne: false } };
+
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--read',
-            data: { 
-                filter: { 
-                    _id: decoded.adminId || { id: decoded.adminId },
-                    active: { $ne: false } // Active or undefined
-                } 
-            }
+            // VortexDB expects the query directly (NOT { filter: ... })
+            data: adminLookup
         });
 
-        if (!adminResult.success || !adminResult.data) {
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+        if (!adminResult.success || !admin) {
             return res.status(401).json({
                 success: false,
                 error: 'Admin account not found or disabled',
                 code: 'ADMIN_NOT_FOUND'
             });
         }
-
-        const admin = adminResult.data;
 
         // Attach admin info to request object
         req.admin = {

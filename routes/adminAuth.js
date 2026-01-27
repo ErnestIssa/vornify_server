@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 
 const router = express.Router();
@@ -24,8 +25,9 @@ if (!JWT_SECRET) {
 router.post('/login', async (req, res) => {
     try {
         const { username, password } = req.body;
+        const normalizedUsername = String(username || '').toLowerCase().trim();
 
-        if (!username || !password) {
+        if (!normalizedUsername || !password) {
             return res.status(400).json({
                 success: false,
                 error: 'Username and password are required'
@@ -44,10 +46,14 @@ router.post('/login', async (req, res) => {
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--read',
-            data: { filter: { username: username.toLowerCase().trim() } }
+            // VortexDB expects the query directly (NOT { filter: ... })
+            data: { username: normalizedUsername }
         });
 
-        if (!adminResult.success || !adminResult.data) {
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+        if (!adminResult.success || !admin) {
             // Return generic error to prevent username enumeration
             return res.status(401).json({
                 success: false,
@@ -55,10 +61,51 @@ router.post('/login', async (req, res) => {
             });
         }
 
-        const admin = adminResult.data;
+        if (!admin.password || typeof admin.password !== 'string') {
+            return res.status(500).json({
+                success: false,
+                error: 'Admin account is misconfigured (missing password hash). Please re-create the admin account.',
+                errorCode: 'ADMIN_PASSWORD_MISSING'
+            });
+        }
 
         // Verify password
-        const passwordMatch = await bcrypt.compare(password, admin.password);
+        const looksLikeBcryptHash = admin.password.startsWith('$2a$') || admin.password.startsWith('$2b$') || admin.password.startsWith('$2y$');
+        let passwordMatch = false;
+
+        if (looksLikeBcryptHash) {
+            passwordMatch = await bcrypt.compare(password, admin.password);
+        } else {
+            // Legacy/incorrectly-created admin (plain text password).
+            // Allow login IF it matches, then upgrade to bcrypt hash.
+            if (admin.password === password) {
+                passwordMatch = true;
+
+                try {
+                    const upgradedHash = await bcrypt.hash(password, 10);
+                    const filter = (admin._id && ObjectId.isValid(admin._id)) ? { _id: new ObjectId(admin._id) } : { username: normalizedUsername };
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'admins',
+                        command: '--update',
+                        data: {
+                            filter,
+                            update: {
+                                password: upgradedHash,
+                                updatedAt: new Date().toISOString(),
+                                passwordUpgradedAt: new Date().toISOString()
+                            }
+                        }
+                    });
+                    console.log(`🔐 [ADMIN AUTH] Upgraded plaintext password to bcrypt for ${normalizedUsername}`);
+                } catch (upgradeErr) {
+                    console.warn('⚠️ [ADMIN AUTH] Password upgrade failed (login still allowed):', upgradeErr.message);
+                }
+            } else {
+                passwordMatch = false;
+            }
+        }
+
         if (!passwordMatch) {
             return res.status(401).json({
                 success: false,
@@ -86,12 +133,13 @@ router.post('/login', async (req, res) => {
         });
 
         // Update last login timestamp
+        const updateFilter = (admin._id && ObjectId.isValid(admin._id)) ? { _id: new ObjectId(admin._id) } : { username: normalizedUsername };
         await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--update',
             data: {
-                filter: { _id: admin._id || { id: admin.id } },
+                filter: updateFilter,
                 update: {
                     lastLoginAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString()
@@ -167,26 +215,26 @@ router.post('/verify', async (req, res) => {
         }
 
         // Verify admin still exists and is active
+        const adminLookup = (decoded && decoded.adminId && ObjectId.isValid(decoded.adminId))
+            ? { _id: new ObjectId(decoded.adminId), active: { $ne: false } }
+            : { username: decoded.username, active: { $ne: false } };
+
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--read',
-            data: { 
-                filter: { 
-                    _id: decoded.adminId || { id: decoded.adminId },
-                    active: { $ne: false } // Active or undefined
-                } 
-            }
+            data: adminLookup
         });
 
-        if (!adminResult.success || !adminResult.data) {
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+        if (!adminResult.success || !admin) {
             return res.status(401).json({
                 valid: false,
                 error: 'Admin account not found or disabled'
             });
         }
-
-        const admin = adminResult.data;
 
         // Return valid response
         res.json({
@@ -269,16 +317,9 @@ router.post('/init', async (req, res) => {
             ? (Array.isArray(existingAdminsResult.data) ? existingAdminsResult.data : [existingAdminsResult.data])
             : [];
 
-        if (existingAdmins.length > 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Admin accounts already exist. Use /login endpoint instead.'
-            });
-        }
-
         // Get default credentials from request or environment
         const { username, password, name } = req.body;
-        const defaultUsername = username || process.env.ADMIN_USERNAME || 'admin';
+        const defaultUsername = (username || process.env.ADMIN_USERNAME || 'admin').toLowerCase().trim();
         const defaultPassword = password || process.env.ADMIN_PASSWORD || 'admin123';
         const adminName = name || process.env.ADMIN_NAME || 'Administrator';
 
@@ -289,13 +330,89 @@ router.post('/init', async (req, res) => {
             });
         }
 
+        // If an admin already exists with this username, allow "upgrade" if it was created incorrectly (plaintext password)
+        const existingByUsername = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: { username: defaultUsername }
+        });
+        const existingUserData = existingByUsername && existingByUsername.success ? existingByUsername.data : null;
+        const existingAdmin = Array.isArray(existingUserData) ? existingUserData[0] : existingUserData;
+
+        if (existingAdmin) {
+            const looksLikeBcryptHash = typeof existingAdmin.password === 'string' &&
+                (existingAdmin.password.startsWith('$2a$') || existingAdmin.password.startsWith('$2b$') || existingAdmin.password.startsWith('$2y$'));
+
+            if (looksLikeBcryptHash) {
+                return res.status(409).json({
+                    success: false,
+                    error: 'Admin account already exists. Please login instead.',
+                    errorCode: 'ADMIN_ALREADY_EXISTS'
+                });
+            }
+
+            if (existingAdmin.password !== defaultPassword) {
+                return res.status(409).json({
+                    success: false,
+                    error: 'Admin account already exists, but the password does not match. Please login with the existing password or reset it.',
+                    errorCode: 'ADMIN_EXISTS_PASSWORD_MISMATCH'
+                });
+            }
+
+            // Upgrade plaintext password to bcrypt
+            const upgradedHash = await bcrypt.hash(defaultPassword, 10);
+            const filter = (existingAdmin._id && ObjectId.isValid(existingAdmin._id)) ? { _id: new ObjectId(existingAdmin._id) } : { username: defaultUsername };
+            const upgradeResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'admins',
+                command: '--update',
+                data: {
+                    filter,
+                    update: {
+                        password: upgradedHash,
+                        name: existingAdmin.name || adminName,
+                        updatedAt: new Date().toISOString(),
+                        passwordUpgradedAt: new Date().toISOString()
+                    }
+                }
+            });
+
+            if (!upgradeResult.success) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'Failed to upgrade admin password hashing',
+                    errorCode: 'PASSWORD_UPGRADE_FAILED'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Admin account already existed; password was upgraded to secure hashing. You can now login.',
+                admin: {
+                    username: defaultUsername,
+                    name: existingAdmin.name || adminName,
+                    role: existingAdmin.role || 'admin'
+                }
+            });
+        }
+
+        // If ANY admin exists already, disable init to prevent arbitrary admin creation
+        if (existingAdmins.length > 0) {
+            return res.status(403).json({
+                success: false,
+                error: 'Admin initialization is disabled because an admin already exists. Please login instead.',
+                errorCode: 'INIT_DISABLED'
+            });
+        }
+
         // Hash password
         const saltRounds = 10;
         const hashedPassword = await bcrypt.hash(defaultPassword, saltRounds);
 
         // Create admin account
         const newAdmin = {
-            username: defaultUsername.toLowerCase().trim(),
+            username: defaultUsername,
             password: hashedPassword,
             name: adminName,
             role: 'admin',

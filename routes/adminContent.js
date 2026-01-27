@@ -18,15 +18,14 @@ router.get('/content', async (req, res) => {
             database_name: 'peakmode',
             collection_name: 'admin_content',
             command: '--read',
-            data: { filter: { type: 'site_content' } }
+            // VortexDB expects the query directly (NOT { filter: ... })
+            data: { type: 'site_content' }
         });
 
         let content = null;
-        if (contentResult.success && contentResult.data) {
-            // Handle both single object and array responses
-            content = Array.isArray(contentResult.data) 
-                ? contentResult.data[0] 
-                : contentResult.data;
+        if (contentResult && contentResult.success) {
+            const d = contentResult.data;
+            content = Array.isArray(d) ? d[0] : d;
         }
 
         // Default content structure if none exists
@@ -99,7 +98,7 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                 database_name: 'peakmode',
                 collection_name: 'admin_content',
                 command: '--read',
-                data: { filter: { type: 'site_content' } }
+                data: { type: 'site_content' }
             });
 
             let existingContent = null;
@@ -194,7 +193,7 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                 database_name: 'peakmode',
                 collection_name: 'admin_content',
                 command: '--read',
-                data: { filter: { type: 'site_content' } }
+                data: { type: 'site_content' }
             });
 
             let existingContent = null;
