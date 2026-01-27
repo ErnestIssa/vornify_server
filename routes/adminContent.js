@@ -124,12 +124,11 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                     command: '--update',
                     data: {
                         filter: { type: 'site_content' },
+                        // VortexDB --update wraps $set internally, so provide plain fields here.
                         update: {
-                            $set: {
-                                [section]: data,
-                                updatedAt: updateData.updatedAt,
-                                updatedBy: updateData.updatedBy
-                            }
+                            [section]: data,
+                            updatedAt: updateData.updatedAt,
+                            updatedBy: updateData.updatedBy
                         }
                     }
                 });
@@ -211,12 +210,11 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                     command: '--update',
                     data: {
                         filter: { type: 'site_content' },
+                        // VortexDB --update wraps $set internally, so provide plain fields here.
                         update: {
-                            $set: {
-                                ...updateFields,
-                                updatedAt: new Date().toISOString(),
-                                updatedBy: req.admin.username
-                            }
+                            ...updateFields,
+                            updatedAt: new Date().toISOString(),
+                            updatedBy: req.admin.username
                         }
                     }
                 });

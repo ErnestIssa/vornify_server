@@ -30,24 +30,26 @@ router.post('/login', async (req, res) => {
         if (!normalizedUsername || !password) {
             return res.status(400).json({
                 success: false,
-                error: 'Username and password are required'
+                message: 'Username and password are required',
+                errorCode: 'VALIDATION_ERROR'
             });
         }
 
         if (!JWT_SECRET) {
             return res.status(500).json({
                 success: false,
-                error: 'Server configuration error: JWT_SECRET not set'
+                message: 'Server configuration error: JWT_SECRET not set',
+                errorCode: 'SERVER_CONFIG_ERROR'
             });
         }
 
-        // Find admin in database
+        // Find admin in database (support both username and email fields)
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--read',
             // VortexDB expects the query directly (NOT { filter: ... })
-            data: { username: normalizedUsername }
+            data: { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] }
         });
 
         const adminData = adminResult && adminResult.success ? adminResult.data : null;
@@ -57,15 +59,17 @@ router.post('/login', async (req, res) => {
             // Return generic error to prevent username enumeration
             return res.status(401).json({
                 success: false,
-                error: 'Invalid username or password'
+                message: 'Invalid username or password',
+                errorCode: 'INVALID_CREDENTIALS'
             });
         }
 
         if (!admin.password || typeof admin.password !== 'string') {
-            return res.status(500).json({
+            // Treat as invalid credentials (do not leak account state)
+            return res.status(401).json({
                 success: false,
-                error: 'Admin account is misconfigured (missing password hash). Please re-create the admin account.',
-                errorCode: 'ADMIN_PASSWORD_MISSING'
+                message: 'Invalid username or password',
+                errorCode: 'INVALID_CREDENTIALS'
             });
         }
 
@@ -83,7 +87,9 @@ router.post('/login', async (req, res) => {
 
                 try {
                     const upgradedHash = await bcrypt.hash(password, 10);
-                    const filter = (admin._id && ObjectId.isValid(admin._id)) ? { _id: new ObjectId(admin._id) } : { username: normalizedUsername };
+                    const filter = (admin._id && ObjectId.isValid(admin._id))
+                        ? { _id: new ObjectId(admin._id) }
+                        : { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] };
                     await db.executeOperation({
                         database_name: 'peakmode',
                         collection_name: 'admins',
@@ -92,6 +98,9 @@ router.post('/login', async (req, res) => {
                             filter,
                             update: {
                                 password: upgradedHash,
+                                // Ensure both fields exist for consistency with unique email indexes
+                                username: admin.username || normalizedUsername,
+                                email: admin.email || normalizedUsername,
                                 updatedAt: new Date().toISOString(),
                                 passwordUpgradedAt: new Date().toISOString()
                             }
@@ -109,7 +118,8 @@ router.post('/login', async (req, res) => {
         if (!passwordMatch) {
             return res.status(401).json({
                 success: false,
-                error: 'Invalid username or password'
+                message: 'Invalid username or password',
+                errorCode: 'INVALID_CREDENTIALS'
             });
         }
 
@@ -117,7 +127,8 @@ router.post('/login', async (req, res) => {
         if (admin.active === false) {
             return res.status(403).json({
                 success: false,
-                error: 'Admin account is disabled'
+                message: 'Admin account is disabled',
+                errorCode: 'ADMIN_DISABLED'
             });
         }
 
@@ -133,7 +144,9 @@ router.post('/login', async (req, res) => {
         });
 
         // Update last login timestamp
-        const updateFilter = (admin._id && ObjectId.isValid(admin._id)) ? { _id: new ObjectId(admin._id) } : { username: normalizedUsername };
+        const updateFilter = (admin._id && ObjectId.isValid(admin._id))
+            ? { _id: new ObjectId(admin._id) }
+            : { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] };
         await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
@@ -153,7 +166,8 @@ router.post('/login', async (req, res) => {
             token,
             admin: {
                 id: admin._id || admin.id,
-                username: admin.username,
+                username: admin.username || admin.email || normalizedUsername,
+                email: admin.email || admin.username || normalizedUsername,
                 role: admin.role || 'admin',
                 name: admin.name || admin.username
             }
@@ -163,7 +177,8 @@ router.post('/login', async (req, res) => {
         console.error('❌ [ADMIN AUTH] Login error:', error);
         res.status(500).json({
             success: false,
-            error: 'Internal server error during login'
+            message: 'Internal server error during login',
+            errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
 });
@@ -180,15 +195,19 @@ router.post('/verify', async (req, res) => {
 
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             return res.status(401).json({
+                success: false,
                 valid: false,
-                error: 'No token provided'
+                message: 'No token provided',
+                errorCode: 'NO_TOKEN'
             });
         }
 
         if (!JWT_SECRET) {
             return res.status(500).json({
+                success: false,
                 valid: false,
-                error: 'Server configuration error: JWT_SECRET not set'
+                message: 'Server configuration error: JWT_SECRET not set',
+                errorCode: 'SERVER_CONFIG_ERROR'
             });
         }
 
@@ -201,13 +220,17 @@ router.post('/verify', async (req, res) => {
         } catch (jwtError) {
             if (jwtError.name === 'TokenExpiredError') {
                 return res.status(401).json({
+                    success: false,
                     valid: false,
-                    error: 'Token expired'
+                    message: 'Token expired',
+                    errorCode: 'TOKEN_EXPIRED'
                 });
             } else if (jwtError.name === 'JsonWebTokenError') {
                 return res.status(401).json({
+                    success: false,
                     valid: false,
-                    error: 'Invalid token'
+                    message: 'Invalid token',
+                    errorCode: 'INVALID_TOKEN'
                 });
             } else {
                 throw jwtError;
@@ -231,13 +254,16 @@ router.post('/verify', async (req, res) => {
 
         if (!adminResult.success || !admin) {
             return res.status(401).json({
+                success: false,
                 valid: false,
-                error: 'Admin account not found or disabled'
+                message: 'Admin account not found or disabled',
+                errorCode: 'ADMIN_NOT_FOUND'
             });
         }
 
         // Return valid response
         res.json({
+            success: true,
             valid: true,
             admin: {
                 id: admin._id || admin.id,
@@ -250,8 +276,10 @@ router.post('/verify', async (req, res) => {
     } catch (error) {
         console.error('❌ [ADMIN AUTH] Verify error:', error);
         res.status(500).json({
+            success: false,
             valid: false,
-            error: 'Internal server error during verification'
+            message: 'Internal server error during verification',
+            errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
 });
@@ -292,7 +320,8 @@ router.post('/logout', async (req, res) => {
         console.error('❌ [ADMIN AUTH] Logout error:', error);
         res.status(500).json({
             success: false,
-            error: 'Internal server error during logout'
+            message: 'Internal server error during logout',
+            errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
 });
@@ -317,6 +346,15 @@ router.post('/init', async (req, res) => {
             ? (Array.isArray(existingAdminsResult.data) ? existingAdminsResult.data : [existingAdminsResult.data])
             : [];
 
+        // Production-ready bootstrap: allow init ONLY if no admins exist.
+        if (existingAdmins.length > 0) {
+            return res.status(403).json({
+                success: false,
+                message: 'Init disabled after first admin. Please login instead.',
+                errorCode: 'INIT_DISABLED'
+            });
+        }
+
         // Get default credentials from request or environment
         const { username, password, name } = req.body;
         const defaultUsername = (username || process.env.ADMIN_USERNAME || 'admin').toLowerCase().trim();
@@ -326,83 +364,26 @@ router.post('/init', async (req, res) => {
         if (!defaultPassword || defaultPassword.length < 6) {
             return res.status(400).json({
                 success: false,
-                error: 'Password must be at least 6 characters long'
+                message: 'Password must be at least 6 characters long',
+                errorCode: 'VALIDATION_ERROR'
             });
         }
 
-        // If an admin already exists with this username, allow "upgrade" if it was created incorrectly (plaintext password)
+        // Defensive: if an admin already exists with this username/email (race), return 409.
         const existingByUsername = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--read',
-            data: { username: defaultUsername }
+            data: { $or: [{ username: defaultUsername }, { email: defaultUsername }] }
         });
         const existingUserData = existingByUsername && existingByUsername.success ? existingByUsername.data : null;
         const existingAdmin = Array.isArray(existingUserData) ? existingUserData[0] : existingUserData;
 
         if (existingAdmin) {
-            const looksLikeBcryptHash = typeof existingAdmin.password === 'string' &&
-                (existingAdmin.password.startsWith('$2a$') || existingAdmin.password.startsWith('$2b$') || existingAdmin.password.startsWith('$2y$'));
-
-            if (looksLikeBcryptHash) {
-                return res.status(409).json({
-                    success: false,
-                    error: 'Admin account already exists. Please login instead.',
-                    errorCode: 'ADMIN_ALREADY_EXISTS'
-                });
-            }
-
-            if (existingAdmin.password !== defaultPassword) {
-                return res.status(409).json({
-                    success: false,
-                    error: 'Admin account already exists, but the password does not match. Please login with the existing password or reset it.',
-                    errorCode: 'ADMIN_EXISTS_PASSWORD_MISMATCH'
-                });
-            }
-
-            // Upgrade plaintext password to bcrypt
-            const upgradedHash = await bcrypt.hash(defaultPassword, 10);
-            const filter = (existingAdmin._id && ObjectId.isValid(existingAdmin._id)) ? { _id: new ObjectId(existingAdmin._id) } : { username: defaultUsername };
-            const upgradeResult = await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'admins',
-                command: '--update',
-                data: {
-                    filter,
-                    update: {
-                        password: upgradedHash,
-                        name: existingAdmin.name || adminName,
-                        updatedAt: new Date().toISOString(),
-                        passwordUpgradedAt: new Date().toISOString()
-                    }
-                }
-            });
-
-            if (!upgradeResult.success) {
-                return res.status(500).json({
-                    success: false,
-                    error: 'Failed to upgrade admin password hashing',
-                    errorCode: 'PASSWORD_UPGRADE_FAILED'
-                });
-            }
-
-            return res.json({
-                success: true,
-                message: 'Admin account already existed; password was upgraded to secure hashing. You can now login.',
-                admin: {
-                    username: defaultUsername,
-                    name: existingAdmin.name || adminName,
-                    role: existingAdmin.role || 'admin'
-                }
-            });
-        }
-
-        // If ANY admin exists already, disable init to prevent arbitrary admin creation
-        if (existingAdmins.length > 0) {
-            return res.status(403).json({
+            return res.status(409).json({
                 success: false,
-                error: 'Admin initialization is disabled because an admin already exists. Please login instead.',
-                errorCode: 'INIT_DISABLED'
+                message: 'Admin already exists',
+                errorCode: 'ADMIN_EXISTS'
             });
         }
 
@@ -413,6 +394,7 @@ router.post('/init', async (req, res) => {
         // Create admin account
         const newAdmin = {
             username: defaultUsername,
+            email: defaultUsername,
             password: hashedPassword,
             name: adminName,
             role: 'admin',
@@ -435,16 +417,19 @@ router.post('/init', async (req, res) => {
                 message: 'Initial admin account created successfully',
                 admin: {
                     username: newAdmin.username,
+                    email: newAdmin.email,
                     name: newAdmin.name,
                     role: newAdmin.role
                 },
                 warning: 'Please change the default password after first login'
             });
         } else {
-            res.status(500).json({
+            const errMsg = (createResult && (createResult.error || createResult.message)) ? String(createResult.error || createResult.message) : '';
+            const isDup = errMsg.includes('E11000') || errMsg.toLowerCase().includes('duplicate key');
+            return res.status(isDup ? 409 : 500).json({
                 success: false,
-                error: 'Failed to create admin account',
-                details: createResult
+                message: isDup ? 'Admin already exists' : 'Failed to create admin account',
+                errorCode: isDup ? 'ADMIN_EXISTS' : 'INTERNAL_SERVER_ERROR'
             });
         }
 
@@ -452,7 +437,8 @@ router.post('/init', async (req, res) => {
         console.error('❌ [ADMIN AUTH] Init error:', error);
         res.status(500).json({
             success: false,
-            error: 'Internal server error during admin initialization'
+            message: 'Internal server error during admin initialization',
+            errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
 });
