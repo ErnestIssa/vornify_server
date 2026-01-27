@@ -27,7 +27,14 @@ router.post('/login', async (req, res) => {
         const { username, password } = req.body;
         const normalizedUsername = String(username || '').toLowerCase().trim();
 
+        console.log('🔐 [ADMIN AUTH LOGIN] Request received:', {
+            username: normalizedUsername,
+            passwordLength: password ? password.length : 0,
+            timestamp: new Date().toISOString()
+        });
+
         if (!normalizedUsername || !password) {
+            console.log('❌ [ADMIN AUTH LOGIN] Missing username or password');
             return res.status(400).json({
                 success: false,
                 message: 'Username and password are required',
@@ -36,6 +43,7 @@ router.post('/login', async (req, res) => {
         }
 
         if (!JWT_SECRET) {
+            console.error('❌ [ADMIN AUTH LOGIN] JWT_SECRET not configured');
             return res.status(500).json({
                 success: false,
                 message: 'Server configuration error: JWT_SECRET not set',
@@ -44,6 +52,7 @@ router.post('/login', async (req, res) => {
         }
 
         // Find admin in database (support both username and email fields)
+        console.log('🔍 [ADMIN AUTH LOGIN] Searching admin by username/email:', normalizedUsername);
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
@@ -52,10 +61,17 @@ router.post('/login', async (req, res) => {
             data: { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] }
         });
 
+        console.log('🔍 [ADMIN AUTH LOGIN] Database query result:', {
+            success: adminResult.success,
+            hasData: !!adminResult.data,
+            dataType: Array.isArray(adminResult.data) ? 'array' : typeof adminResult.data
+        });
+
         const adminData = adminResult && adminResult.success ? adminResult.data : null;
         const admin = Array.isArray(adminData) ? adminData[0] : adminData;
 
         if (!adminResult.success || !admin) {
+            console.log('❌ [ADMIN AUTH LOGIN] Admin not found for:', normalizedUsername);
             // Return generic error to prevent username enumeration
             return res.status(401).json({
                 success: false,
@@ -64,7 +80,19 @@ router.post('/login', async (req, res) => {
             });
         }
 
+        console.log('✅ [ADMIN AUTH LOGIN] Admin found:', {
+            id: admin._id || admin.id,
+            username: admin.username,
+            email: admin.email,
+            name: admin.name,
+            hasPassword: !!admin.password,
+            passwordLength: admin.password ? admin.password.length : 0,
+            passwordType: typeof admin.password,
+            passwordStartsWith: admin.password ? admin.password.substring(0, 10) : 'N/A'
+        });
+
         if (!admin.password || typeof admin.password !== 'string') {
+            console.log('❌ [ADMIN AUTH LOGIN] Admin has no password field or password is not a string');
             // Treat as invalid credentials (do not leak account state)
             return res.status(401).json({
                 success: false,
@@ -75,15 +103,24 @@ router.post('/login', async (req, res) => {
 
         // Verify password
         const looksLikeBcryptHash = admin.password.startsWith('$2a$') || admin.password.startsWith('$2b$') || admin.password.startsWith('$2y$');
+        console.log('🔍 [ADMIN AUTH LOGIN] Password analysis:', {
+            looksLikeBcryptHash,
+            passwordPrefix: admin.password.substring(0, 10)
+        });
+
         let passwordMatch = false;
 
         if (looksLikeBcryptHash) {
+            console.log('🔍 [ADMIN AUTH LOGIN] Password is bcrypt hash, comparing...');
             passwordMatch = await bcrypt.compare(password, admin.password);
+            console.log('🔍 [ADMIN AUTH LOGIN] Password comparison result:', passwordMatch);
         } else {
+            console.log('⚠️ [ADMIN AUTH LOGIN] Password appears to be plaintext, comparing directly...');
             // Legacy/incorrectly-created admin (plain text password).
             // Allow login IF it matches, then upgrade to bcrypt hash.
             if (admin.password === password) {
                 passwordMatch = true;
+                console.log('✅ [ADMIN AUTH LOGIN] Plaintext password matches, upgrading to bcrypt...');
 
                 try {
                     const upgradedHash = await bcrypt.hash(password, 10);
@@ -106,16 +143,18 @@ router.post('/login', async (req, res) => {
                             }
                         }
                     });
-                    console.log(`🔐 [ADMIN AUTH] Upgraded plaintext password to bcrypt for ${normalizedUsername}`);
+                    console.log(`✅ [ADMIN AUTH LOGIN] Password upgraded to bcrypt for ${normalizedUsername}`);
                 } catch (upgradeErr) {
-                    console.warn('⚠️ [ADMIN AUTH] Password upgrade failed (login still allowed):', upgradeErr.message);
+                    console.error('⚠️ [ADMIN AUTH LOGIN] Password upgrade failed (login still allowed):', upgradeErr.message);
                 }
             } else {
                 passwordMatch = false;
+                console.log('❌ [ADMIN AUTH LOGIN] Plaintext password does not match');
             }
         }
 
         if (!passwordMatch) {
+            console.log('❌ [ADMIN AUTH LOGIN] Password verification failed');
             return res.status(401).json({
                 success: false,
                 message: 'Invalid username or password',
@@ -125,6 +164,7 @@ router.post('/login', async (req, res) => {
 
         // Check if admin is active
         if (admin.active === false) {
+            console.log('❌ [ADMIN AUTH LOGIN] Admin account is disabled');
             return res.status(403).json({
                 success: false,
                 message: 'Admin account is disabled',
@@ -133,6 +173,7 @@ router.post('/login', async (req, res) => {
         }
 
         // Generate JWT token
+        console.log('✅ [ADMIN AUTH LOGIN] Login successful, generating token...');
         const tokenPayload = {
             adminId: admin._id || admin.id,
             username: admin.username,
@@ -160,6 +201,7 @@ router.post('/login', async (req, res) => {
             }
         });
 
+        console.log('✅ [ADMIN AUTH LOGIN] Token generated, returning success');
         // Return success response (exclude password)
         res.json({
             success: true,
@@ -174,7 +216,11 @@ router.post('/login', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [ADMIN AUTH] Login error:', error);
+        console.error('❌ [ADMIN AUTH LOGIN] Error:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name
+        });
         res.status(500).json({
             success: false,
             message: 'Internal server error during login',
@@ -438,6 +484,185 @@ router.post('/init', async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Internal server error during admin initialization',
+            errorCode: 'INTERNAL_SERVER_ERROR'
+        });
+    }
+});
+
+/**
+ * GET /api/admin/auth/diagnostic
+ * Diagnostic endpoint to check admin database state
+ * Returns admin count, admin list (without passwords), and password info
+ */
+router.get('/diagnostic', async (req, res) => {
+    try {
+        console.log('🔍 [ADMIN AUTH DIAGNOSTIC] Request received');
+
+        // Get all admins (without passwords for security)
+        const allAdminsResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: {}
+        });
+
+        const allAdminsData = allAdminsResult.success && allAdminsResult.data
+            ? (Array.isArray(allAdminsResult.data) ? allAdminsResult.data : [allAdminsResult.data])
+            : [];
+
+        const adminCount = allAdminsData.length;
+
+        // Get one admin with password info (for debugging - sanitized)
+        let passwordInfo = null;
+        if (allAdminsData.length > 0) {
+            const sampleAdmin = allAdminsData[0];
+            passwordInfo = {
+                hasPassword: !!sampleAdmin.password,
+                passwordLength: sampleAdmin.password ? sampleAdmin.password.length : 0,
+                passwordType: typeof sampleAdmin.password,
+                passwordStartsWith: sampleAdmin.password ? sampleAdmin.password.substring(0, 10) : null,
+                isBcryptHash: sampleAdmin.password ? (
+                    sampleAdmin.password.startsWith('$2b$') ||
+                    sampleAdmin.password.startsWith('$2a$') ||
+                    sampleAdmin.password.startsWith('$2y$')
+                ) : false
+            };
+        }
+
+        // Format admin list (exclude passwords)
+        const adminsList = allAdminsData.map(a => ({
+            id: a._id || a.id,
+            username: a.username,
+            email: a.email,
+            name: a.name,
+            role: a.role || 'admin',
+            active: a.active !== false,
+            createdAt: a.createdAt,
+            updatedAt: a.updatedAt,
+            lastLoginAt: a.lastLoginAt
+        }));
+
+        console.log('🔍 [ADMIN AUTH DIAGNOSTIC] Results:', {
+            adminCount,
+            admins: adminsList.map(a => ({ id: a.id, username: a.username, email: a.email })),
+            passwordInfo
+        });
+
+        res.json({
+            success: true,
+            adminCount,
+            admins: adminsList,
+            passwordInfo,
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('❌ [ADMIN AUTH DIAGNOSTIC] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: error.message || 'Internal server error',
+            errorCode: 'INTERNAL_SERVER_ERROR'
+        });
+    }
+});
+
+/**
+ * POST /api/admin/auth/reset-password
+ * Reset admin password (requires reset secret or no admins exist)
+ * Body: { username, newPassword, resetSecret? }
+ */
+router.post('/reset-password', async (req, res) => {
+    try {
+        const { username, newPassword, resetSecret } = req.body;
+
+        if (!username || !newPassword) {
+            return res.status(400).json({
+                success: false,
+                message: 'Username and newPassword are required',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
+
+        if (newPassword.length < 6) {
+            return res.status(400).json({
+                success: false,
+                message: 'Password must be at least 6 characters long',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
+
+        // Check reset secret if set in env (optional security)
+        const requiredSecret = process.env.ADMIN_RESET_SECRET;
+        if (requiredSecret && resetSecret !== requiredSecret) {
+            return res.status(403).json({
+                success: false,
+                message: 'Invalid reset secret',
+                errorCode: 'INVALID_SECRET'
+            });
+        }
+
+        const normalizedUsername = String(username).toLowerCase().trim();
+
+        // Find admin
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] }
+        });
+
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+        if (!adminResult.success || !admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found',
+                errorCode: 'ADMIN_NOT_FOUND'
+            });
+        }
+
+        // Hash new password
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+        // Update password
+        const filter = (admin._id && ObjectId.isValid(admin._id))
+            ? { _id: new ObjectId(admin._id) }
+            : { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] };
+
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--update',
+            data: {
+                filter,
+                update: {
+                    password: hashedPassword,
+                    updatedAt: new Date().toISOString(),
+                    passwordResetAt: new Date().toISOString()
+                }
+            }
+        });
+
+        if (updateResult.success) {
+            console.log(`✅ [ADMIN AUTH RESET] Password reset for ${normalizedUsername}`);
+            res.json({
+                success: true,
+                message: 'Password reset successfully'
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                message: 'Failed to reset password',
+                errorCode: 'UPDATE_FAILED'
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ [ADMIN AUTH RESET] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
             errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
