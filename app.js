@@ -29,6 +29,8 @@ const customerRoutes = require('./routes/customers');
 const reviewRoutes = require('./routes/reviews');
 const currencyRoutes = require('./routes/currency');
 const adminRoutes = require('./routes/admin');
+const adminAuthRoutes = require('./routes/adminAuth');
+const adminContentRoutes = require('./routes/adminContent');
 const metaFeedRoutes = require('./routes/metaFeed');
 const errorHandler = require('./middleware/errorHandler');
 const abandonedCartService = require('./services/abandonedCartService');
@@ -254,6 +256,8 @@ app.use('/api/tracking', trackingRoutes); // Package tracking
 app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
 app.use('/api', currencyRoutes); // Currency conversion and settings
+app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication (login, verify, logout)
+app.use('/api/admin', adminContentRoutes); // Admin content management (public read, protected write)
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 
 // Documentation routes

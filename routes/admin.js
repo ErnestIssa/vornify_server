@@ -1,5 +1,6 @@
 const express = require('express');
 const getDBInstance = require('../vornifydb/dbInstance');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -11,7 +12,7 @@ const db = getDBInstance();
  * WARNING: This will permanently delete all records in newsletter_subscribers collection
  * Only use this after verifying all data has been migrated to 'subscribers' collection
  */
-router.delete('/cleanup-newsletter-subscribers', async (req, res) => {
+router.delete('/cleanup-newsletter-subscribers', authenticateAdmin, async (req, res) => {
     try {
         console.log('🧹 [ADMIN] Starting cleanup of newsletter_subscribers collection...');
         
@@ -75,7 +76,7 @@ router.delete('/cleanup-newsletter-subscribers', async (req, res) => {
  * GET /api/admin/check-newsletter-subscribers
  * Check if newsletter_subscribers collection exists and has records
  */
-router.get('/check-newsletter-subscribers', async (req, res) => {
+router.get('/check-newsletter-subscribers', authenticateAdmin, async (req, res) => {
     try {
         const checkResult = await db.executeOperation({
             database_name: 'peakmode',

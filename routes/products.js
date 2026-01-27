@@ -6,6 +6,7 @@ const translationService = require('../services/translationService');
 const productTranslationHelper = require('../services/productTranslationHelper');
 const seoHelper = require('../utils/seoHelper');
 const reviewStatsHelper = require('../utils/reviewStatsHelper');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
 
 const db = getDBInstance();
 
@@ -679,7 +680,7 @@ router.get('/', async (req, res) => {
 });
 
 // POST /api/products - Create new product (admin)
-router.post('/', async (req, res) => {
+router.post('/', authenticateAdmin, async (req, res) => {
     try {
         const productData = req.body;
         
@@ -757,7 +758,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/products/:id - Update product (admin)
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
@@ -839,7 +840,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // DELETE /api/products/:id - Delete product (admin)
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         

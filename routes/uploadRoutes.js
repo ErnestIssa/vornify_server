@@ -11,6 +11,7 @@ const {
   cleanupUnusedMessageImages,
   cleanupUnusedSupportImages
 } = require('../controllers/uploadController');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
 
 const router = express.Router();
 
@@ -72,8 +73,10 @@ const handleMulterError = (err, req, res, next) => {
   next();
 };
 
+// Product image upload - ADMIN ONLY
 router.post(
   '/product-image',
+  authenticateAdmin,
   uploadProductImage.single('image'),
   handleMulterError,
   uploadController
@@ -97,19 +100,19 @@ router.post('/support/multiple', uploadSupport.array('attachments', 10), handleM
 // POST /api/uploads/cleanup-products
 // Admin-only endpoint to cleanup unused Cloudinary product images
 // WARNING: Only deletes images that are NOT referenced in MongoDB products
-router.post('/cleanup-products', cleanupUnusedProductImages);
+router.post('/cleanup-products', authenticateAdmin, cleanupUnusedProductImages);
 
 // POST /api/uploads/cleanup-reviews
 // Admin-only endpoint to cleanup unused Cloudinary review images
-router.post('/cleanup-reviews', cleanupUnusedReviewImages);
+router.post('/cleanup-reviews', authenticateAdmin, cleanupUnusedReviewImages);
 
 // POST /api/uploads/cleanup-messages
 // Admin-only endpoint to cleanup unused Cloudinary message attachments
-router.post('/cleanup-messages', cleanupUnusedMessageImages);
+router.post('/cleanup-messages', authenticateAdmin, cleanupUnusedMessageImages);
 
 // POST /api/uploads/cleanup-support
 // Admin-only endpoint to cleanup unused Cloudinary support attachments
-router.post('/cleanup-support', cleanupUnusedSupportImages);
+router.post('/cleanup-support', authenticateAdmin, cleanupUnusedSupportImages);
 
 module.exports = router;
 
