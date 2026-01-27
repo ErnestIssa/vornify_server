@@ -45,6 +45,64 @@ console.log('Cloudinary configured:', cloudinary.config().cloud_name);
 const app = express();
 const port = process.env.PORT || 10000;
 
+// Track timers so we can stop them on graceful shutdown (important for Render deploys)
+const activeTimeouts = [];
+const activeIntervals = [];
+function trackTimeout(handle) {
+    activeTimeouts.push(handle);
+    return handle;
+}
+function trackInterval(handle) {
+    activeIntervals.push(handle);
+    return handle;
+}
+
+let server = null;
+
+async function gracefulShutdown(signal) {
+    try {
+        console.log(`🛑 [SHUTDOWN] Received ${signal}. Closing server and background jobs...`);
+
+        // Stop scheduled jobs first (prevents new work during shutdown)
+        for (const t of activeTimeouts) clearTimeout(t);
+        for (const i of activeIntervals) clearInterval(i);
+
+        // Stop accepting new connections
+        if (server) {
+            await new Promise(resolve => server.close(resolve));
+            console.log('✅ [SHUTDOWN] HTTP server closed');
+        }
+
+        // Close MongoDB pool (singleton)
+        try {
+            const getDBInstance = require('./vornifydb/dbInstance');
+            const dbInstance = getDBInstance();
+            if (dbInstance && typeof dbInstance.close === 'function') {
+                await dbInstance.close();
+                console.log('✅ [SHUTDOWN] MongoDB client closed');
+            }
+        } catch (dbCloseErr) {
+            console.warn('⚠️ [SHUTDOWN] Failed to close MongoDB client:', dbCloseErr.message);
+        }
+
+        process.exit(0);
+    } catch (err) {
+        console.error('❌ [SHUTDOWN] Error during shutdown:', err);
+        process.exit(1);
+    }
+}
+
+// Render sends SIGTERM on deploy; handle it so old instances exit fast.
+process.on('SIGTERM', () => {
+    // Force exit if something hangs
+    setTimeout(() => process.exit(1), 10000).unref();
+    gracefulShutdown('SIGTERM');
+});
+process.on('SIGINT', () => {
+    setTimeout(() => process.exit(1), 10000).unref();
+    gracefulShutdown('SIGINT');
+});
+
 // CORS configuration for production
 app.use(cors({
     origin: '*', // Allow all origins
@@ -291,7 +349,7 @@ app.use((req, res) => {
 
 // Start server
 if (process.env.NODE_ENV !== 'test') {
-    app.listen(port, () => {
+    server = app.listen(port, () => {
         console.log(`Server is running on port ${port}`);
         console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
         
@@ -300,18 +358,18 @@ if (process.env.NODE_ENV !== 'test') {
             console.log('🛒 [ABANDONED CART] Service enabled - checking every 10 minutes');
             
             // Run immediately on startup (after 1 minute delay to let server stabilize)
-            setTimeout(() => {
+            trackTimeout(setTimeout(() => {
                 abandonedCartService.processAbandonedCarts().catch(err => {
                     console.error('❌ [ABANDONED CART] Initial processing error:', err);
                 });
-            }, 60000); // 1 minute delay
+            }, 60000)); // 1 minute delay
             
             // Then run every 5 minutes (to catch carts abandoned 10 minutes ago)
-            setInterval(() => {
+            trackInterval(setInterval(() => {
                 abandonedCartService.processAbandonedCarts().catch(err => {
                     console.error('❌ [ABANDONED CART] Scheduled processing error:', err);
                 });
-            }, 5 * 60 * 1000); // 5 minutes (check twice per 10-minute window)
+            }, 5 * 60 * 1000)); // 5 minutes (check twice per 10-minute window)
         } else {
             console.log('🛒 [ABANDONED CART] Service disabled (ENABLE_ABANDONED_CART=false)');
         }
@@ -322,18 +380,18 @@ if (process.env.NODE_ENV !== 'test') {
             console.log('💳 [PAYMENT FAILURE] Email delay: 3 minutes after payment failure');
             
             // Run immediately on startup (after 1 minute delay to let server stabilize)
-            setTimeout(() => {
+            trackTimeout(setTimeout(() => {
                 paymentFailureService.processPendingPaymentFailures().catch(err => {
                     console.error('❌ [PAYMENT FAILURE] Initial processing error:', err);
                 });
-            }, 60000); // 1 minute delay
+            }, 60000)); // 1 minute delay
             
             // Then run every 1 minute (to catch 3-minute windows accurately)
-            setInterval(() => {
+            trackInterval(setInterval(() => {
                 paymentFailureService.processPendingPaymentFailures().catch(err => {
                     console.error('❌ [PAYMENT FAILURE] Scheduled processing error:', err);
                 });
-            }, 60 * 1000); // 1 minute
+            }, 60 * 1000)); // 1 minute
         } else {
             console.log('💳 [PAYMENT FAILURE] Service disabled (ENABLE_PAYMENT_FAILURE_EMAIL=false)');
         }
@@ -345,18 +403,18 @@ if (process.env.NODE_ENV !== 'test') {
             console.log('🛒 [ABANDONED CHECKOUT] Second email: 20 minutes after abandonment (10 minutes after first)');
             
             // Run immediately on startup (after 2 minute delay to let server stabilize)
-            setTimeout(() => {
+            trackTimeout(setTimeout(() => {
                 abandonedCheckoutService.processAbandonedCheckouts().catch(err => {
                     console.error('❌ [ABANDONED CHECKOUT] Initial processing error:', err);
                 });
-            }, 120000); // 2 minute delay
+            }, 120000)); // 2 minute delay
             
             // Then run every 5 minutes (to catch 10-minute windows accurately)
-            setInterval(() => {
+            trackInterval(setInterval(() => {
                 abandonedCheckoutService.processAbandonedCheckouts().catch(err => {
                     console.error('❌ [ABANDONED CHECKOUT] Scheduled processing error:', err);
                 });
-            }, 5 * 60 * 1000); // 5 minutes (checks twice per 10-minute window)
+            }, 5 * 60 * 1000)); // 5 minutes (checks twice per 10-minute window)
         } else {
             console.log('🛒 [ABANDONED CHECKOUT] Service disabled (ENABLE_ABANDONED_CHECKOUT=false)');
         }
@@ -368,18 +426,18 @@ if (process.env.NODE_ENV !== 'test') {
             console.log('📧 [DISCOUNT REMINDER] Sends reminder 7 days after code creation (if unused)');
             
             // Run immediately on startup (after 3 minute delay to let server stabilize)
-            setTimeout(() => {
+            trackTimeout(setTimeout(() => {
                 discountReminderService.processDiscountReminders().catch(err => {
                     console.error('❌ [DISCOUNT REMINDER] Initial processing error:', err);
                 });
-            }, 180000); // 3 minute delay
+            }, 180000)); // 3 minute delay
             
             // Then run once per day (24 hours)
-            setInterval(() => {
+            trackInterval(setInterval(() => {
                 discountReminderService.processDiscountReminders().catch(err => {
                     console.error('❌ [DISCOUNT REMINDER] Scheduled processing error:', err);
                 });
-            }, 24 * 60 * 60 * 1000); // 24 hours (once per day)
+            }, 24 * 60 * 60 * 1000)); // 24 hours (once per day)
         } else {
             console.log('📧 [DISCOUNT REMINDER] Service disabled (ENABLE_DISCOUNT_REMINDER=false)');
         }

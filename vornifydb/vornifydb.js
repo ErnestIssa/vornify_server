@@ -1064,6 +1064,27 @@ class VortexDB {
             };
         }
     }
+
+    /**
+     * Gracefully close MongoDB client/pool (used during deploy shutdown).
+     * Render sends SIGTERM on deploy; if we don't close connections/timers,
+     * shutdown can take too long and deployments can time out.
+     */
+    async close() {
+        try {
+            if (this.client) {
+                try {
+                    await this.client.close();
+                } catch (closeError) {
+                    // Ignore close errors
+                }
+            }
+        } finally {
+            this.client = null;
+            this.collectionCache.clear();
+            this.dbCache.clear();
+        }
+    }
 }
 
 module.exports = VortexDB;
