@@ -93,8 +93,34 @@ function validateCloudinaryMedia(media, imagePublicIds) {
 // This route must be defined before /:id to avoid route conflicts
 router.get('/most-viewed', async (req, res) => {
     try {
+        console.log('🔍 [MOST VIEWED] Request received:', {
+            limit: req.query.limit,
+            timestamp: new Date().toISOString()
+        });
+
         const limit = parseInt(req.query.limit) || 12;
         
+        // Check if db instance is available
+        if (!db) {
+            console.error('❌ [MOST VIEWED] Database instance not available');
+            return res.status(500).json({
+                success: false,
+                error: 'Database not initialized',
+                message: 'Database connection not available'
+            });
+        }
+
+        // Check if executeOperation method exists
+        if (typeof db.executeOperation !== 'function') {
+            console.error('❌ [MOST VIEWED] executeOperation method not available');
+            return res.status(500).json({
+                success: false,
+                error: 'Database method not available',
+                message: 'executeOperation method not found'
+            });
+        }
+
+        console.log('🔍 [MOST VIEWED] Querying database for products...');
         // Get all products
         const result = await db.executeOperation({
             database_name: 'peakmode',
@@ -103,7 +129,13 @@ router.get('/most-viewed', async (req, res) => {
             data: {}
         });
         
-        if (result.success) {
+        console.log('🔍 [MOST VIEWED] Database query result:', {
+            success: result?.success,
+            hasData: !!result?.data,
+            dataType: Array.isArray(result?.data) ? 'array' : typeof result?.data
+        });
+        
+        if (result && (result.success || result.status !== false)) {
             let products = result.data || [];
             
             // Handle case where result.data might be a single object instead of array
@@ -141,11 +173,17 @@ router.get('/most-viewed', async (req, res) => {
             
             console.log(`📊 [Most Viewed] Returning ${products.length} most viewed products (sorted from ${result.data?.length || 0} total)`);
             
+            console.log(`✅ [MOST VIEWED] Returning ${products.length} products`);
             res.json({
                 success: true,
                 data: products
             });
         } else {
+            console.error('❌ [MOST VIEWED] Database query failed:', {
+                result: result,
+                hasError: !!result?.error,
+                errorMessage: result?.error || result?.message
+            });
             res.status(500).json({
                 success: false,
                 error: 'Failed to retrieve most viewed products'
