@@ -3,6 +3,14 @@ const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 const currencyService = require('../services/currencyService');
+const {
+    validateTransition,
+    getStatusText,
+    createStatusHistoryEntry,
+    updateStatusTimestamps,
+    isCancelled,
+    isFinalState
+} = require('../utils/orderStatusMachine');
 
 const db = getDBInstance();
 
@@ -505,7 +513,16 @@ router.post('/create', async (req, res) => {
             updatedAt: new Date().toISOString(),
             orderDate: new Date().toISOString(),
             
-            // Timeline
+            // Order status (default to pending after payment)
+            status: orderData.status || 'pending',
+            
+            // Status history and timestamps (initialize with pending status)
+            statusHistory: [
+                createStatusHistoryEntry(orderData.status || 'pending', 'system')
+            ],
+            statusTimestamps: updateStatusTimestamps({}, orderData.status || 'pending'),
+            
+            // Timeline (for backward compatibility)
             timeline: [
                 {
                     status: 'Order Placed',
@@ -638,12 +655,13 @@ router.post('/create', async (req, res) => {
 // Update order status
 router.post('/update-status', async (req, res) => {
     try {
-        const { orderId, status, shippingProvider, trackingNumber, trackingUrl, estimatedDelivery } = req.body;
+        const { orderId, status, shippingProvider, trackingNumber, trackingUrl, estimatedDelivery, changedBy } = req.body;
         
         if (!orderId || !status) {
             return res.status(400).json({
                 success: false,
-                error: 'orderId and status are required'
+                error: 'orderId and status are required',
+                errorCode: 'VALIDATION_ERROR'
             });
         }
         
@@ -658,24 +676,56 @@ router.post('/update-status', async (req, res) => {
         if (!findResult.success || !findResult.data) {
             return res.status(404).json({
                 success: false,
-                error: 'Order not found'
+                error: 'Order not found',
+                errorCode: 'ORDER_NOT_FOUND'
             });
         }
         
         const order = findResult.data;
+        const currentStatus = order.status || 'pending';
+        const newStatus = String(status).toLowerCase().trim();
         
-        // Prepare timeline entry
+        // Validate status transition
+        const validation = validateTransition(currentStatus, newStatus);
+        if (!validation.valid) {
+            return res.status(400).json({
+                success: false,
+                error: validation.error,
+                errorCode: 'INVALID_STATUS_TRANSITION',
+                currentStatus,
+                requestedStatus: newStatus
+            });
+        }
+        
+        // Check if order is in final state
+        if (isFinalState(currentStatus) && currentStatus !== newStatus) {
+            return res.status(400).json({
+                success: false,
+                error: `Cannot update order status. Order is in final state: ${currentStatus}`,
+                errorCode: 'FINAL_STATE_REACHED'
+            });
+        }
+        
+        // Create status history entry
+        const statusHistoryEntry = createStatusHistoryEntry(newStatus, changedBy || 'system');
+        
+        // Update status timestamps
+        const updatedStatusTimestamps = updateStatusTimestamps(order.statusTimestamps || {}, newStatus);
+        
+        // Prepare timeline entry (for backward compatibility)
         const timelineEntry = {
             status: status.charAt(0).toUpperCase() + status.slice(1),
             date: new Date().toISOString(),
-            description: generateTimelineDescription(status, shippingProvider, trackingNumber)
+            description: generateTimelineDescription(newStatus, shippingProvider, trackingNumber)
         };
         
         // Prepare update data
         const updateData = {
-            status,
+            status: newStatus,
             updatedAt: new Date().toISOString(),
-            timeline: [...(order.timeline || []), timelineEntry]
+            timeline: [...(order.timeline || []), timelineEntry],
+            statusHistory: [...(order.statusHistory || []), statusHistoryEntry],
+            statusTimestamps: updatedStatusTimestamps
         };
         
         // Add shipping fields if provided
@@ -810,36 +860,270 @@ router.post('/update-status', async (req, res) => {
     }
 });
 
-// Track order by Order ID
-router.get('/track/:orderId', async (req, res) => {
+/**
+ * GET /api/orders/track
+ * Public endpoint to track order by orderId and email
+ * No authentication required - email acts as verification
+ * 
+ * Query Parameters:
+ * - orderId (REQUIRED) - Order ID to track
+ * - email (REQUIRED) - Customer email for verification
+ * 
+ * Returns normalized order data matching frontend OrderStatus interface
+ * 
+ * IMPORTANT: This route must be defined BEFORE /:orderId to avoid route conflicts
+ */
+router.get('/track', async (req, res) => {
     try {
-        const { orderId } = req.params;
-        
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'orders',
-            command: '--read',
-            data: { orderId }
+        console.log('🔍 [ORDER TRACK] Request received:', {
+            query: req.query,
+            timestamp: new Date().toISOString()
         });
-        
-        if (result.success && result.data) {
-            // VornifyDB returns a single object when query is provided
-            res.json({
-                success: true,
-                data: result.data
-            });
-        } else {
-            res.status(404).json({
-                success: false,
-                error: 'Order not found'
+
+        const { orderId, email } = req.query;
+
+        // Validate required parameters
+        if (!orderId || !email) {
+            console.log('❌ [ORDER TRACK] Missing parameters:', { orderId: !!orderId, email: !!email });
+            return res.status(400).json({
+                error: 'Invalid parameters',
+                message: 'Order ID and email are required'
             });
         }
-    } catch (error) {
-        console.error('Order tracking error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to track order'
+
+        // Normalize email (lowercase, trim)
+        const normalizedEmail = String(email).toLowerCase().trim();
+        const normalizedOrderId = String(orderId).trim();
+
+        console.log('🔍 [ORDER TRACK] Processing:', {
+            orderId: normalizedOrderId,
+            email: normalizedEmail
         });
+
+        // Find order by orderId
+        console.log('🔍 [ORDER TRACK] Querying database for order:', normalizedOrderId);
+        let orderResult;
+        try {
+            orderResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'orders',
+                command: '--read',
+                data: { orderId: normalizedOrderId }
+            });
+            console.log('🔍 [ORDER TRACK] Database query result:', {
+                success: orderResult?.success,
+                hasData: !!orderResult?.data
+            });
+        } catch (dbError) {
+            console.error('❌ [ORDER TRACK] Database query error:', {
+                message: dbError.message,
+                stack: dbError.stack
+            });
+            return res.status(500).json({
+                error: 'Database error',
+                message: 'Failed to query order from database'
+            });
+        }
+
+        if (!orderResult || !orderResult.success || !orderResult.data) {
+            console.log('❌ [ORDER TRACK] Order not found:', normalizedOrderId);
+            return res.status(404).json({
+                error: 'Order not found',
+                message: 'Order not found'
+            });
+        }
+
+        const order = Array.isArray(orderResult.data) ? orderResult.data[0] : orderResult.data;
+        
+        if (!order) {
+            console.log('❌ [ORDER TRACK] Order data is null or undefined');
+            return res.status(404).json({
+                error: 'Order not found',
+                message: 'Order not found'
+            });
+        }
+
+        console.log('✅ [ORDER TRACK] Order found:', {
+            orderId: order.orderId,
+            status: order.status,
+            hasCustomer: !!order.customer,
+            hasCustomerEmail: !!order.customerEmail
+        });
+
+        // Check if order is cancelled - exclude from tracking
+        if (isCancelled(order.status)) {
+            console.log('❌ [ORDER TRACK] Order is cancelled:', normalizedOrderId);
+            return res.status(404).json({
+                error: 'Order not found',
+                message: 'Order not found'
+            });
+        }
+
+        // Verify email matches order
+        const orderEmail = (order.customer?.email || order.customerEmail || '').toLowerCase().trim();
+        
+        if (orderEmail !== normalizedEmail) {
+            console.log('❌ [ORDER TRACK] Email mismatch:', {
+                provided: normalizedEmail,
+                orderEmail: orderEmail
+            });
+            return res.status(403).json({
+                error: 'Email mismatch',
+                message: 'Email does not match this order'
+            });
+        }
+
+        console.log('✅ [ORDER TRACK] Order found and email verified:', normalizedOrderId);
+
+        const currentStatus = order.status || 'pending';
+        let statusText;
+        try {
+            statusText = getStatusText(currentStatus);
+        } catch (statusError) {
+            console.error('❌ [ORDER TRACK] Error getting status text:', statusError);
+            statusText = currentStatus; // Fallback to status value
+        }
+
+        // Normalize item images (ensure full Cloudinary URLs)
+        const normalizeImageUrl = (image) => {
+            if (!image) return '';
+            const imageStr = String(image).trim();
+            if (!imageStr) return '';
+            
+            // If already a full URL, return as-is
+            if (imageStr.startsWith('http://') || imageStr.startsWith('https://')) {
+                return imageStr;
+            }
+            
+            // If relative URL, prepend Cloudinary base URL (if needed)
+            // For now, return as-is (assuming Cloudinary URLs are already full)
+            return imageStr;
+        };
+
+        // Get status timestamps (ensure all are ISO strings)
+        const statusTimestamps = {};
+        try {
+            if (order.statusTimestamps && typeof order.statusTimestamps === 'object') {
+                Object.keys(order.statusTimestamps).forEach(status => {
+                    try {
+                        const timestamp = order.statusTimestamps[status];
+                        if (timestamp) {
+                            // Convert to ISO string if it's a Date object
+                            statusTimestamps[status] = timestamp instanceof Date 
+                                ? timestamp.toISOString() 
+                                : String(timestamp);
+                        }
+                    } catch (tsError) {
+                        console.warn('⚠️ [ORDER TRACK] Error processing timestamp for status:', status, tsError.message);
+                    }
+                });
+            }
+        } catch (tsError) {
+            console.warn('⚠️ [ORDER TRACK] Error processing statusTimestamps:', tsError.message);
+        }
+
+        // Get current status timestamp
+        const currentStatusTimestamp = statusTimestamps[currentStatus] || null;
+
+        // Build normalized response
+        const response = {
+            orderId: order.orderId || normalizedOrderId,
+            status: currentStatus,
+            statusText: statusText,
+            statusTimestamps: Object.keys(statusTimestamps).length > 0 ? statusTimestamps : undefined,
+            currentStatusTimestamp: currentStatusTimestamp,
+            trackingNumber: order.trackingNumber || null,
+            shippingProvider: order.shippingProvider || order.shippingMethodDetails?.carrier || null,
+            estimatedDelivery: order.estimatedDelivery || order.estimatedDeliveryDate || null,
+            orderDate: order.orderDate || order.createdAt || order.date || new Date().toISOString(),
+            customerName: order.customerName || 
+                         (order.customer?.name) || 
+                         `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`.trim() ||
+                         'Customer',
+            email: normalizedEmail,
+            items: (Array.isArray(order.items) ? order.items : []).map(item => {
+                try {
+                    return {
+                        name: item?.name || item?.productName || 'Product',
+                        quantity: item?.quantity || 1,
+                        price: item?.price || 0,
+                        image: normalizeImageUrl(item?.image || item?.media?.[0] || '')
+                    };
+                } catch (itemError) {
+                    console.warn('⚠️ [ORDER TRACK] Error processing item:', itemError.message);
+                    return {
+                        name: 'Product',
+                        quantity: 1,
+                        price: 0,
+                        image: ''
+                    };
+                }
+            }),
+            shippingAddress: {
+                street: order.shippingAddress?.street || 
+                       order.customer?.address || 
+                       '',
+                postalCode: order.shippingAddress?.postalCode || 
+                           order.customer?.postalCode || 
+                           '',
+                city: order.shippingAddress?.city || 
+                     order.customer?.city || 
+                     '',
+                country: order.shippingAddress?.country || 
+                        order.customer?.country || 
+                        'Sweden'
+            },
+            totals: {
+                subtotal: order.subtotal || 
+                         order.totals?.subtotal || 
+                         (order.items || []).reduce((sum, item) => sum + ((item.price || 0) * (item.quantity || 1)), 0),
+                shipping: order.shipping || 
+                         order.totals?.shipping || 
+                         order.shippingCost || 
+                         0,
+                total: order.total || 
+                      order.totals?.total || 
+                      ((order.subtotal || 0) + (order.shipping || 0))
+            }
+        };
+
+        // Remove null values from optional fields (but keep empty objects/arrays)
+        if (!response.trackingNumber) delete response.trackingNumber;
+        if (!response.shippingProvider) delete response.shippingProvider;
+        if (!response.estimatedDelivery) delete response.estimatedDelivery;
+        
+        // Always include statusTimestamps (even if empty) and currentStatusTimestamp (can be null)
+        // Frontend expects these fields to always be present
+        if (!response.statusTimestamps) {
+            response.statusTimestamps = {};
+        }
+
+        console.log('✅ [ORDER TRACK] Returning order data:', {
+            orderId: response.orderId,
+            status: response.status,
+            itemsCount: response.items.length
+        });
+
+        res.json(response);
+
+    } catch (error) {
+        console.error('❌ [ORDER TRACK] Unhandled error:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name,
+            orderId: req.query?.orderId,
+            email: req.query?.email
+        });
+        
+        // Ensure response hasn't been sent
+        if (!res.headersSent) {
+            res.status(500).json({
+                error: 'Internal server error',
+                message: error.message || 'An unexpected error occurred while processing your request'
+            });
+        } else {
+            console.error('❌ [ORDER TRACK] Response already sent, cannot send error response');
+        }
     }
 });
 
@@ -1005,12 +1289,13 @@ router.put('/:orderId', async (req, res) => {
 router.post('/:orderId/status', async (req, res) => {
     try {
         const { orderId } = req.params;
-        const { status, trackingNumber, shippingProvider, sendEmail = true } = req.body;
+        const { status, trackingNumber, shippingProvider, sendEmail = true, changedBy } = req.body;
         
         if (!status) {
             return res.status(400).json({
                 success: false,
-                error: 'Status is required'
+                error: 'Status is required',
+                errorCode: 'VALIDATION_ERROR'
             });
         }
         
@@ -1025,24 +1310,56 @@ router.post('/:orderId/status', async (req, res) => {
         if (!findResult.success || !findResult.data) {
             return res.status(404).json({
                 success: false,
-                error: 'Order not found'
+                error: 'Order not found',
+                errorCode: 'ORDER_NOT_FOUND'
             });
         }
         
         const order = findResult.data;
+        const currentStatus = order.status || 'pending';
+        const newStatus = String(status).toLowerCase().trim();
         
-        // Prepare timeline entry
+        // Validate status transition
+        const validation = validateTransition(currentStatus, newStatus);
+        if (!validation.valid) {
+            return res.status(400).json({
+                success: false,
+                error: validation.error,
+                errorCode: 'INVALID_STATUS_TRANSITION',
+                currentStatus,
+                requestedStatus: newStatus
+            });
+        }
+        
+        // Check if order is in final state
+        if (isFinalState(currentStatus) && currentStatus !== newStatus) {
+            return res.status(400).json({
+                success: false,
+                error: `Cannot update order status. Order is in final state: ${currentStatus}`,
+                errorCode: 'FINAL_STATE_REACHED'
+            });
+        }
+        
+        // Create status history entry
+        const statusHistoryEntry = createStatusHistoryEntry(newStatus, changedBy || 'system');
+        
+        // Update status timestamps
+        const updatedStatusTimestamps = updateStatusTimestamps(order.statusTimestamps || {}, newStatus);
+        
+        // Prepare timeline entry (for backward compatibility)
         const timelineEntry = {
             status: status.charAt(0).toUpperCase() + status.slice(1),
             date: new Date().toISOString(),
-            description: generateTimelineDescription(status, shippingProvider, trackingNumber)
+            description: generateTimelineDescription(newStatus, shippingProvider, trackingNumber)
         };
         
         // Prepare update data
         const updateData = {
-            status,
+            status: newStatus,
             updatedAt: new Date().toISOString(),
-            timeline: [...(order.timeline || []), timelineEntry]
+            timeline: [...(order.timeline || []), timelineEntry],
+            statusHistory: [...(order.statusHistory || []), statusHistoryEntry],
+            statusTimestamps: updatedStatusTimestamps
         };
         
         // Add shipping fields if provided
