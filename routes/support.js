@@ -1001,6 +1001,99 @@ const replyHandler = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/support/messages/compose
+ * Compose and send a new email from support@peakmode.se (not a reply)
+ */
+router.post('/messages/compose', async (req, res) => {
+    console.log('📧 [COMPOSE EMAIL] Request received');
+    try {
+        const { recipients, subject, message, attachments = [], cc = [], bcc = [] } = req.body;
+
+        // Validate required fields
+        if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'At least one recipient is required'
+            });
+        }
+
+        if (!subject || !subject.trim()) {
+            return res.status(400).json({
+                success: false,
+                error: 'Subject is required'
+            });
+        }
+
+        if (!message || !message.trim()) {
+            return res.status(400).json({
+                success: false,
+                error: 'Message is required'
+            });
+        }
+
+        // Validate email addresses
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        const allEmails = [...recipients, ...(cc || []), ...(bcc || [])];
+        const invalidEmails = allEmails.filter(email => !emailRegex.test(email));
+        
+        if (invalidEmails.length > 0) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid email addresses: ${invalidEmails.join(', ')}`
+            });
+        }
+
+        // Normalize attachments
+        const normalizedAttachments = normalizeAttachments(attachments);
+
+        console.log('📧 [COMPOSE EMAIL] Sending email:', {
+            recipients: recipients.length,
+            subject: subject.substring(0, 50),
+            hasAttachments: normalizedAttachments.length > 0,
+            cc: (cc || []).length,
+            bcc: (bcc || []).length
+        });
+
+        // Send email via email service
+        const emailResult = await emailService.sendComposedEmail({
+            recipients,
+            subject: subject.trim(),
+            message: message.trim(),
+            attachments: normalizedAttachments,
+            cc: cc || [],
+            bcc: bcc || []
+        });
+
+        if (!emailResult.success) {
+            console.error('❌ [COMPOSE EMAIL] Failed to send email:', emailResult.error);
+            return res.status(500).json({
+                success: false,
+                error: emailResult.error || 'Failed to send email',
+                details: emailResult.details
+            });
+        }
+
+        console.log('✅ [COMPOSE EMAIL] Email sent successfully:', {
+            messageId: emailResult.messageId,
+            recipients: recipients.length
+        });
+
+        res.json({
+            success: true,
+            message: 'Email sent successfully'
+        });
+
+    } catch (error) {
+        console.error('❌ [COMPOSE EMAIL] Error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
 // Register reply routes (must come before /messages/:id to avoid conflicts)
 // Add OPTIONS handler for CORS preflight
 router.options('/messages/:id/reply', (req, res) => {
@@ -1264,6 +1357,7 @@ router.use('/messages*', (req, res, next) => {
 const registeredRoutes = [
     'POST /api/support/contact',
     'GET /api/support/messages',
+    'POST /api/support/messages/compose',
     'POST /api/support/messages/:id/reply',
     'PUT /api/support/messages/:id/reply',
     'PATCH /api/support/messages/:id',

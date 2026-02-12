@@ -1168,6 +1168,157 @@ class EmailService {
     }
 
     /**
+     * Send composed email from support@peakmode.se
+     * @param {object} params - Parameters object
+     * @param {string[]} params.recipients - Array of recipient email addresses
+     * @param {string} params.subject - Email subject
+     * @param {string} params.message - Email message content (HTML or plain text)
+     * @param {Array} params.attachments - Optional array of attachment objects with {name, url, mimeType, size}
+     * @param {string[]} params.cc - Optional CC recipients
+     * @param {string[]} params.bcc - Optional BCC recipients
+     * @returns {Promise<object>} Result object
+     */
+    async sendComposedEmail({ recipients, subject, message, attachments = [], cc = [], bcc = [] }) {
+        try {
+            // Validate required fields
+            if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+                return {
+                    success: false,
+                    error: 'At least one recipient is required'
+                };
+            }
+
+            if (!subject || !subject.trim()) {
+                return {
+                    success: false,
+                    error: 'Subject is required'
+                };
+            }
+
+            if (!message || !message.trim()) {
+                return {
+                    success: false,
+                    error: 'Message is required'
+                };
+            }
+
+            // Validate email addresses
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            const allEmails = [...recipients, ...cc, ...bcc];
+            const invalidEmails = allEmails.filter(email => !emailRegex.test(email));
+            
+            if (invalidEmails.length > 0) {
+                return {
+                    success: false,
+                    error: `Invalid email addresses: ${invalidEmails.join(', ')}`
+                };
+            }
+
+            // Prepare email message
+            const msg = {
+                to: recipients,
+                from: {
+                    email: 'support@peakmode.se',
+                    name: 'Peak Mode Support'
+                },
+                subject: subject.trim(),
+                html: message.trim(),
+                text: message.trim().replace(/<[^>]*>/g, ''), // Strip HTML for plain text version
+            };
+
+            // Add CC if provided
+            if (cc && cc.length > 0) {
+                msg.cc = cc;
+            }
+
+            // Add BCC if provided
+            if (bcc && bcc.length > 0) {
+                msg.bcc = bcc;
+            }
+
+            // Handle attachments from Cloudinary URLs
+            if (attachments && attachments.length > 0) {
+                const https = require('https');
+                const http = require('http');
+                
+                msg.attachments = await Promise.all(
+                    attachments.map(async (attachment) => {
+                        try {
+                            const url = attachment.url || attachment.path || attachment.secure_url;
+                            if (!url) {
+                                console.warn(`⚠️ Attachment missing URL:`, attachment);
+                                return null;
+                            }
+
+                            // Download file from Cloudinary URL
+                            const fileContent = await new Promise((resolve, reject) => {
+                                const protocol = url.startsWith('https') ? https : http;
+                                protocol.get(url, (response) => {
+                                    if (response.statusCode !== 200) {
+                                        reject(new Error(`Failed to download attachment: ${response.statusCode}`));
+                                        return;
+                                    }
+                                    
+                                    const chunks = [];
+                                    response.on('data', (chunk) => chunks.push(chunk));
+                                    response.on('end', () => resolve(Buffer.concat(chunks)));
+                                    response.on('error', reject);
+                                }).on('error', reject);
+                            });
+
+                            // Convert to base64
+                            const base64Content = fileContent.toString('base64');
+                            
+                            return {
+                                content: base64Content,
+                                filename: attachment.name || attachment.filename || 'attachment',
+                                type: attachment.mimeType || attachment.type || 'application/octet-stream',
+                                disposition: 'attachment'
+                            };
+                        } catch (error) {
+                            console.error(`❌ Error processing attachment ${attachment.name}:`, error);
+                            // Continue without this attachment rather than failing the entire email
+                            return null;
+                        }
+                    })
+                );
+
+                // Filter out null attachments (failed downloads)
+                msg.attachments = msg.attachments.filter(Boolean);
+            }
+
+            // Send email via SendGrid
+            const response = await sgMail.send(msg);
+
+            console.log(`✅ Composed email sent successfully to ${recipients.join(', ')}`, {
+                messageId: response[0]?.headers?.['x-message-id'],
+                statusCode: response[0]?.statusCode,
+                recipients: recipients.length,
+                cc: cc.length,
+                bcc: bcc.length,
+                attachments: msg.attachments?.length || 0
+            });
+
+            return {
+                success: true,
+                message: 'Email sent successfully',
+                messageId: response[0]?.headers?.['x-message-id'],
+                timestamp: new Date().toISOString()
+            };
+
+        } catch (error) {
+            console.error('❌ Composed email error:', error);
+            const errorDetails = error.response?.body || error.message;
+            
+            return {
+                success: false,
+                error: 'Failed to send composed email',
+                details: errorDetails
+            };
+        }
+    }
+
+    /**
      * Send waitlist confirmation email
      * @param {string} to - Recipient email address
      * @param {string} name - Customer name
