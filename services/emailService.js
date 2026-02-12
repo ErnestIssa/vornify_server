@@ -1240,6 +1240,160 @@ class EmailService {
     }
 
     /**
+     * Send order status update email notification
+     * @param {object} order - Order object
+     * @param {string} status - New order status
+     * @returns {Promise<object>} Result object with success status
+     */
+    async sendOrderStatusUpdateEmail(order, status) {
+        try {
+            const templateId = process.env.SENDGRID_ORDER_STATUS_TEMPLATE_ID || 'd-17818c64b4e04e77b2c73a9df2544c77';
+            
+            // Get customer email
+            const customerEmail = order.customer?.email || order.customerEmail || order.email;
+            if (!customerEmail) {
+                throw new Error('Order does not have a customer email address');
+            }
+
+            // Get status text using order status machine
+            const { getStatusText } = require('../utils/orderStatusMachine');
+            const statusText = getStatusText(status);
+
+            // Get status message
+            const statusMessage = this.getStatusMessage(status);
+
+            // Generate tracking link if available
+            const trackingLink = this.generateTrackingLink(order, status);
+
+            // Format dates
+            const formatDate = (date) => {
+                if (!date) return null;
+                try {
+                    return new Date(date).toLocaleDateString('en-US', { 
+                        year: 'numeric', 
+                        month: 'long', 
+                        day: 'numeric' 
+                    });
+                } catch (e) {
+                    return date;
+                }
+            };
+
+            // Prepare template data
+            const dynamicTemplateData = {
+                customerName: order.customerName || 
+                             order.customer?.name || 
+                             `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`.trim() ||
+                             'Valued Customer',
+                orderId: order.orderId,
+                orderDate: formatDate(order.orderDate || order.createdAt || order.date),
+                currentStatus: status,
+                statusText: statusText,
+                statusMessage: statusMessage,
+                trackingNumber: order.trackingNumber || null,
+                shippingProvider: order.shippingProvider || null,
+                estimatedDelivery: order.estimatedDelivery ? formatDate(order.estimatedDelivery) : null,
+                trackingLink: trackingLink,
+                orderItems: (order.items || []).map(item => ({
+                    name: item.name || item.productName || 'Product',
+                    quantity: item.quantity || 1,
+                    price: item.price || 0,
+                    image: item.image || item.media?.[0] || item.primaryMedia?.url || null
+                })),
+                orderTotal: order.total || 
+                           order.totals?.total || 
+                           ((order.subtotal || 0) + (order.shipping || 0)),
+                shippingAddress: {
+                    street: order.shippingAddress?.street || 
+                           order.customer?.address || 
+                           '',
+                    postalCode: order.shippingAddress?.postalCode || 
+                               order.customer?.postalCode || 
+                               '',
+                    city: order.shippingAddress?.city || 
+                         order.customer?.city || 
+                         '',
+                    country: order.shippingAddress?.country || 
+                            order.customer?.country || 
+                            'Sweden'
+                },
+                supportEmail: 'support@peakmode.se',
+                trackOrderLink: `https://peakmode.se/track-order?orderId=${order.orderId}`,
+                websiteLink: 'https://peakmode.se'
+            };
+
+            console.log(`📧 [ORDER STATUS EMAIL] Sending status update email to ${customerEmail} for order ${order.orderId}, status: ${status}`);
+
+            return await this.sendCustomEmail(
+                customerEmail,
+                `Order ${order.orderId} - ${statusText}`,
+                templateId,
+                dynamicTemplateData
+            );
+
+        } catch (error) {
+            console.error('❌ Order status update email error:', error);
+            return {
+                success: false,
+                error: 'Failed to send order status update email',
+                details: error.message
+            };
+        }
+    }
+
+    /**
+     * Get status-specific message for email
+     * @param {string} status - Order status
+     * @returns {string} Status message
+     */
+    getStatusMessage(status) {
+        const messages = {
+            'pending': 'Your order has been received and payment confirmed.',
+            'processing': 'Your order is being prepared in our warehouse.',
+            'packed': 'Your order is packed and ready to ship.',
+            'shipped': 'Your order has been shipped! 🚀',
+            'in_transit': 'Your order is in transit! 📦',
+            'out_for_delivery': 'Your order is out for delivery! 🎉',
+            'delivered': 'Your order has been delivered! ✅',
+            'cancelled': 'Your order has been cancelled.'
+        };
+        return messages[status] || 'Your order status has been updated.';
+    }
+
+    /**
+     * Generate tracking link based on shipping provider
+     * @param {object} order - Order object
+     * @param {string} status - Order status
+     * @returns {string|null} Tracking URL or null
+     */
+    generateTrackingLink(order, status) {
+        // Only generate tracking link for shipped/in_transit/out_for_delivery statuses
+        if (!['shipped', 'in_transit', 'out_for_delivery'].includes(status)) {
+            return null;
+        }
+
+        if (!order.trackingNumber || !order.shippingProvider) {
+            return null;
+        }
+
+        const provider = String(order.shippingProvider).toLowerCase().trim();
+        const tracking = String(order.trackingNumber).trim();
+
+        const urls = {
+            'postnord': `https://tracking.postnord.se/?shipment=${tracking}`,
+            'dhl': `https://www.dhl.com/en/express/tracking.html?AWB=${tracking}`,
+            'ups': `https://www.ups.com/track?tracknum=${tracking}`,
+            'fedex': `https://www.fedex.com/fedextrack/?trknbr=${tracking}`,
+            'bring': `https://sporing.bring.no/tracking.html?q=${tracking}`,
+            'budbee': `https://track.budbee.com/${tracking}`,
+            'airmee': `https://track.airmee.com/${tracking}`,
+            'instabox': `https://track.instabox.se/${tracking}`
+        };
+
+        return urls[provider] || `https://peakmode.se/track-order?orderId=${order.orderId}`;
+    }
+
+    /**
      * Log communication to database (if needed)
      * @param {string} email - Email address
      * @param {object} communication - Communication details

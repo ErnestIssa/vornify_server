@@ -11,6 +11,11 @@ const {
     isCancelled,
     isFinalState
 } = require('../utils/orderStatusMachine');
+const {
+    generateUniqueTrackingCode,
+    normalizeEmail,
+    extractCustomerNames
+} = require('../utils/trackingCodeGenerator');
 
 const db = getDBInstance();
 
@@ -406,6 +411,12 @@ router.post('/create', async (req, res) => {
         ]);
         console.log('📦 [ORDER CREATE] Order ID generated:', orderId);
         
+        // Generate customer-friendly tracking code
+        console.log('📦 [ORDER CREATE] Generating tracking code...');
+        const { firstName, lastName } = extractCustomerNames(orderData);
+        const trackingCode = await generateUniqueTrackingCode(firstName, lastName);
+        console.log('📦 [ORDER CREATE] Tracking code generated:', trackingCode);
+        
         // Check if this is a retry payment (failed checkout retry)
         const isRetry = orderData.isRetry === true;
         const retryToken = orderData.retryToken || null;
@@ -414,6 +425,7 @@ router.post('/create', async (req, res) => {
         const order = {
             ...orderData,
             orderId,
+            trackingCode, // Customer-friendly tracking code (e.g., NEIS-1234)
             isRetry: isRetry, // Include retry flag
             retryToken: retryToken, // Include retry token
             status: orderData.status || 'processing',
@@ -444,6 +456,10 @@ router.post('/create', async (req, res) => {
             // Legacy fields for backward compatibility
             customerName: orderData.customerName || orderData.customer?.name || '',
             customerEmail: orderData.customerEmail || orderData.customer?.email || '',
+            
+            // Store first and last name for tracking code reference
+            firstName: orderData.customer?.firstName || orderData.firstName || firstName,
+            lastName: orderData.customer?.lastName || orderData.lastName || lastName,
             
             // Ensure cart items include variant information
             items: orderData.items ? orderData.items.map(item => ({
@@ -880,39 +896,55 @@ router.get('/track', async (req, res) => {
             timestamp: new Date().toISOString()
         });
 
-        const { orderId, email } = req.query;
+        const { orderId, trackingCode, email } = req.query;
 
-        // Validate required parameters
-        if (!orderId || !email) {
-            console.log('❌ [ORDER TRACK] Missing parameters:', { orderId: !!orderId, email: !!email });
+        // Validate email is provided
+        if (!email) {
+            console.log('❌ [ORDER TRACK] Missing email parameter');
             return res.status(400).json({
                 error: 'Invalid parameters',
-                message: 'Order ID and email are required'
+                message: 'Email is required'
+            });
+        }
+
+        // Validate at least one identifier is provided
+        if (!orderId && !trackingCode) {
+            console.log('❌ [ORDER TRACK] Missing identifier:', { orderId: !!orderId, trackingCode: !!trackingCode });
+            return res.status(400).json({
+                error: 'Invalid parameters',
+                message: 'Either orderId or trackingCode is required'
             });
         }
 
         // Normalize email (lowercase, trim)
-        const normalizedEmail = String(email).toLowerCase().trim();
-        const normalizedOrderId = String(orderId).trim();
+        const normalizedEmail = normalizeEmail(email);
+        const identifier = trackingCode ? String(trackingCode).toUpperCase().trim() : String(orderId).trim();
 
         console.log('🔍 [ORDER TRACK] Processing:', {
-            orderId: normalizedOrderId,
+            identifier: identifier,
+            identifierType: trackingCode ? 'trackingCode' : 'orderId',
             email: normalizedEmail
         });
 
-        // Find order by orderId
-        console.log('🔍 [ORDER TRACK] Querying database for order:', normalizedOrderId);
+        // Find order by trackingCode or orderId
+        console.log('🔍 [ORDER TRACK] Querying database for order:', identifier);
         let orderResult;
         try {
+            // Build query based on identifier type
+            const query = trackingCode 
+                ? { trackingCode: identifier }
+                : { orderId: identifier };
+            
             orderResult = await db.executeOperation({
                 database_name: 'peakmode',
                 collection_name: 'orders',
                 command: '--read',
-                data: { orderId: normalizedOrderId }
+                data: query
             });
             console.log('🔍 [ORDER TRACK] Database query result:', {
                 success: orderResult?.success,
-                hasData: !!orderResult?.data
+                hasData: !!orderResult?.data,
+                identifierType: trackingCode ? 'trackingCode' : 'orderId'
             });
         } catch (dbError) {
             console.error('❌ [ORDER TRACK] Database query error:', {
@@ -936,7 +968,7 @@ router.get('/track', async (req, res) => {
         const order = Array.isArray(orderResult.data) ? orderResult.data[0] : orderResult.data;
         
         if (!order) {
-            console.log('❌ [ORDER TRACK] Order data is null or undefined');
+            console.log('❌ [ORDER TRACK] Order not found:', identifier);
             return res.status(404).json({
                 error: 'Order not found',
                 message: 'Order not found'
@@ -945,6 +977,7 @@ router.get('/track', async (req, res) => {
 
         console.log('✅ [ORDER TRACK] Order found:', {
             orderId: order.orderId,
+            trackingCode: order.trackingCode,
             status: order.status,
             hasCustomer: !!order.customer,
             hasCustomerEmail: !!order.customerEmail
@@ -952,20 +985,30 @@ router.get('/track', async (req, res) => {
 
         // Check if order is cancelled - exclude from tracking
         if (isCancelled(order.status)) {
-            console.log('❌ [ORDER TRACK] Order is cancelled:', normalizedOrderId);
+            console.log('❌ [ORDER TRACK] Order is cancelled:', identifier);
             return res.status(404).json({
                 error: 'Order not found',
                 message: 'Order not found'
             });
         }
 
-        // Verify email matches order
-        const orderEmail = (order.customer?.email || order.customerEmail || '').toLowerCase().trim();
+        // Verify email matches order (check all possible email fields)
+        const orderEmails = [
+            order.email,
+            order.customerEmail,
+            order.customer?.email,
+            order.customerInfo?.email
+        ]
+            .filter(Boolean)
+            .map(e => normalizeEmail(e));
         
-        if (orderEmail !== normalizedEmail) {
+        const emailMatches = orderEmails.includes(normalizedEmail);
+        
+        if (!emailMatches) {
             console.log('❌ [ORDER TRACK] Email mismatch:', {
                 provided: normalizedEmail,
-                orderEmail: orderEmail
+                orderEmails: orderEmails,
+                checkedFields: ['email', 'customerEmail', 'customer.email', 'customerInfo.email']
             });
             return res.status(403).json({
                 error: 'Email mismatch',
@@ -973,7 +1016,7 @@ router.get('/track', async (req, res) => {
             });
         }
 
-        console.log('✅ [ORDER TRACK] Order found and email verified:', normalizedOrderId);
+        console.log('✅ [ORDER TRACK] Order found and email verified:', identifier);
 
         const currentStatus = order.status || 'pending';
         let statusText;
@@ -1027,7 +1070,8 @@ router.get('/track', async (req, res) => {
 
         // Build normalized response
         const response = {
-            orderId: order.orderId || normalizedOrderId,
+            orderId: order.orderId || identifier,
+            trackingCode: order.trackingCode || null, // Include customer-friendly tracking code
             status: currentStatus,
             statusText: statusText,
             statusTimestamps: Object.keys(statusTimestamps).length > 0 ? statusTimestamps : undefined,
@@ -1431,6 +1475,111 @@ router.post('/:orderId/status', async (req, res) => {
             success: false,
             error: 'Failed to update order status'
         });
+    }
+});
+
+// POST /api/orders/:orderId/notify - Send email notification for order status update
+router.post('/:orderId/notify', async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const { status, notifyType = 'status_update' } = req.body;
+
+        console.log('📧 [ORDER NOTIFY] Request received:', {
+            orderId,
+            status,
+            notifyType,
+            timestamp: new Date().toISOString()
+        });
+
+        // Validate required parameters
+        if (!status) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required parameter: status',
+                emailSent: false
+            });
+        }
+
+        // Find order
+        const findResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
+        });
+
+        if (!findResult.success || !findResult.data) {
+            console.log('❌ [ORDER NOTIFY] Order not found:', orderId);
+            return res.status(404).json({
+                success: false,
+                error: 'Order not found',
+                emailSent: false
+            });
+        }
+
+        const order = Array.isArray(findResult.data) ? findResult.data[0] : findResult.data;
+
+        // Get customer email
+        const customerEmail = order.customer?.email || order.customerEmail || order.email;
+        if (!customerEmail) {
+            console.log('❌ [ORDER NOTIFY] Order does not have email address:', orderId);
+            return res.status(400).json({
+                success: false,
+                error: 'Order does not have an email address',
+                emailSent: false
+            });
+        }
+
+        console.log('📧 [ORDER NOTIFY] Sending email notification:', {
+            orderId,
+            email: customerEmail,
+            status
+        });
+
+        // Send email notification
+        const emailResult = await emailService.sendOrderStatusUpdateEmail(order, status);
+
+        if (emailResult.success) {
+            console.log('✅ [ORDER NOTIFY] Email sent successfully:', {
+                orderId,
+                email: customerEmail,
+                status
+            });
+            return res.json({
+                success: true,
+                message: 'Email notification sent successfully',
+                emailSent: true,
+                emailTo: customerEmail
+            });
+        } else {
+            console.error('❌ [ORDER NOTIFY] Email send failed:', {
+                orderId,
+                email: customerEmail,
+                error: emailResult.error || emailResult.details
+            });
+            return res.status(500).json({
+                success: false,
+                error: emailResult.error || 'Failed to send email notification',
+                emailSent: false,
+                details: emailResult.details
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ [ORDER NOTIFY] Unhandled error:', {
+            message: error.message,
+            stack: error.stack,
+            orderId: req.params.orderId
+        });
+        
+        if (!res.headersSent) {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to send email notification',
+                emailSent: false,
+                message: error.message
+            });
+        }
     }
 });
 
