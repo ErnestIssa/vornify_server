@@ -2,13 +2,43 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
+const logAdminActivity = require('../utils/auditLogger');
 
 const router = express.Router();
 const db = getDBInstance();
+
+/**
+ * Enhanced password validation
+ * Requirements: min 12 chars, uppercase, lowercase, number, special character
+ */
+function validatePassword(password) {
+    if (!password || password.length < 12) {
+        return { valid: false, error: 'Password must be at least 12 characters long' };
+    }
+    
+    if (!/[A-Z]/.test(password)) {
+        return { valid: false, error: 'Password must contain at least one uppercase letter' };
+    }
+    
+    if (!/[a-z]/.test(password)) {
+        return { valid: false, error: 'Password must contain at least one lowercase letter' };
+    }
+    
+    if (!/[0-9]/.test(password)) {
+        return { valid: false, error: 'Password must contain at least one number' };
+    }
+    
+    if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+        return { valid: false, error: 'Password must contain at least one special character' };
+    }
+    
+    return { valid: true };
+}
 
 // JWT secret from environment variable (required)
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET;
@@ -19,6 +49,24 @@ const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d'; // Re
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 
+// Rate limiting for login endpoint (IP-based brute force protection)
+const loginRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // 5 attempts per IP per 15 minutes
+    message: {
+        success: false,
+        message: 'Too many login attempts from this IP, please try again later',
+        errorCode: 'RATE_LIMIT_EXCEEDED'
+    },
+    standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+    legacyHeaders: false,
+    skip: (req) => {
+        // Skip rate limiting for whitelisted IPs (optional)
+        const whitelistedIPs = process.env.ADMIN_IP_WHITELIST ? process.env.ADMIN_IP_WHITELIST.split(',') : [];
+        return whitelistedIPs.includes(req.ip);
+    }
+});
+
 if (!JWT_SECRET) {
     console.warn('⚠️  [ADMIN AUTH] JWT_SECRET not set. Admin authentication will fail.');
     console.warn('⚠️  [ADMIN AUTH] Please set JWT_SECRET or ADMIN_JWT_SECRET environment variable.');
@@ -28,9 +76,10 @@ if (!JWT_SECRET) {
  * POST /api/admin/auth/login
  * Admin login endpoint
  * Accepts: { email, password } (also supports legacy { username, password })
- * Returns: { success: true, data: { admin: {...}, token: "...", refreshToken: "..." } }
+ * Returns: { success: true, data: { admin: {...}, token: "..." } }
+ * Sets refresh token in httpOnly cookie
  */
-router.post('/login', async (req, res) => {
+router.post('/login', loginRateLimit, async (req, res) => {
     try {
         // Support both 'email' and 'username' for backward compatibility
         const { email, username, password } = req.body;
@@ -292,7 +341,28 @@ router.post('/login', async (req, res) => {
 
         console.log('✅ [ADMIN AUTH LOGIN] Login successful, tokens generated');
         
-        // Return success response in new format
+        // Log successful login
+        await logAdminActivity({
+            adminId: adminId,
+            adminEmail: admin.email || normalizedEmail,
+            action: 'login',
+            details: { role: admin.role || 'admin' },
+            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+            userAgent: req.get('user-agent') || 'unknown',
+            success: true
+        });
+        
+        // Set refresh token in httpOnly cookie (secure, not accessible via JavaScript)
+        const isProduction = process.env.NODE_ENV === 'production';
+        res.cookie('refreshToken', refreshToken, {
+            httpOnly: true, // Not accessible via JavaScript (XSS protection)
+            secure: isProduction, // Only send over HTTPS in production
+            sameSite: 'strict', // CSRF protection
+            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            path: '/api/admin/auth' // Only sent for admin auth routes
+        });
+        
+        // Return success response (access token only, refresh token in cookie)
         res.json({
             success: true,
             data: {
@@ -303,8 +373,8 @@ router.post('/login', async (req, res) => {
                     role: admin.role || 'admin',
                     status: admin.status || 'active'
                 },
-                token: accessToken,
-                refreshToken: refreshToken
+                token: accessToken
+                // refreshToken is in httpOnly cookie, not in response
             }
         });
 
@@ -427,15 +497,16 @@ router.post('/verify', async (req, res) => {
  * POST /api/admin/auth/logout
  * Logout endpoint - revokes refresh token
  * Authentication: Optional (can revoke specific refresh token)
- * Request Body: { refreshToken?: string } (optional, will revoke from Authorization header if not provided)
+ * Reads refresh token from httpOnly cookie (fallback to body for backward compatibility)
  * Returns: { success: true, message: "Logged out successfully" }
+ * Clears refresh token cookie
  */
 router.post('/logout', async (req, res) => {
     try {
-        const { refreshToken } = req.body;
-        let tokenToRevoke = refreshToken;
+        // Read refresh token from cookie (preferred) or body (backward compatibility)
+        let tokenToRevoke = req.cookies.refreshToken || req.body.refreshToken;
 
-        // If refresh token not in body, try to get from Authorization header
+        // If refresh token not in cookie/body, try to get from Authorization header (access token)
         if (!tokenToRevoke) {
             const authHeader = req.headers.authorization;
             if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -514,6 +585,26 @@ router.post('/logout', async (req, res) => {
 
             console.log(`✅ [LOGOUT] Refresh token revoked for admin ${decoded.email || decoded.username}`);
         }
+
+        // Log logout if we have admin info
+        if (decoded && decoded.adminId) {
+            await logAdminActivity({
+                adminId: decoded.adminId,
+                adminEmail: decoded.email,
+                action: 'logout',
+                ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+                userAgent: req.get('user-agent') || 'unknown',
+                success: true
+            });
+        }
+
+        // Clear refresh token cookie
+        res.clearCookie('refreshToken', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'strict',
+            path: '/api/admin/auth'
+        });
 
         res.json({
             success: true,
@@ -951,6 +1042,17 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
         // Frontend will handle the base URL, but we'll provide a full link for email/display
         const inviteLink = `${process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se'}/accept-invite?token=${inviteToken}`;
 
+        // Log invite sent
+        await logAdminActivity({
+            adminId: req.admin.id,
+            adminEmail: req.admin.email,
+            action: 'invite_sent',
+            details: { invitedEmail: normalizedEmail, invitedName: name.trim() },
+            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+            userAgent: req.get('user-agent') || 'unknown',
+            success: true
+        });
+
         console.log('✅ [ADMIN INVITE] Invite created successfully:', {
             email: normalizedEmail,
             expiresAt: expiresAt.toISOString()
@@ -1026,12 +1128,13 @@ router.post('/accept-invite', async (req, res) => {
             });
         }
 
-        // Validate password requirements (min 8 characters)
-        if (password.length < 8) {
+        // Enhanced password validation (min 12 characters with complexity)
+        const passwordValidation = validatePassword(password);
+        if (!passwordValidation.valid) {
             return res.status(400).json({
                 success: false,
-                message: 'Password must be at least 8 characters long',
-                errorCode: 'PASSWORD_TOO_SHORT'
+                message: passwordValidation.error,
+                errorCode: 'PASSWORD_VALIDATION_FAILED'
             });
         }
 
@@ -1069,6 +1172,42 @@ router.post('/accept-invite', async (req, res) => {
             email: admin.email,
             inviteExpiresAt: admin.inviteExpiresAt
         });
+
+        // Email domain validation: Only @peakmode.se emails allowed
+        if (!admin.email || !admin.email.endsWith('@peakmode.se')) {
+            console.log('❌ [ACCEPT INVITE] Invalid email domain:', admin.email);
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid email domain. Only @peakmode.se emails are allowed.',
+                errorCode: 'INVALID_EMAIL_DOMAIN'
+            });
+        }
+
+        // Check max admin limit before accepting invite
+        const allAdminsResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: {}
+        });
+
+        const allAdminsData = allAdminsResult && allAdminsResult.success ? allAdminsResult.data : null;
+        const allAdmins = Array.isArray(allAdminsData) ? allAdminsData : (allAdminsData ? [allAdminsData] : []);
+
+        // Count active and pending admins (exclude this pending invite)
+        const activeAdmins = allAdmins.filter(a => 
+            (a.status === 'active' || a.status === 'pending') && 
+            (a._id?.toString() !== (admin._id || admin.id)?.toString())
+        );
+
+        if (activeAdmins.length >= 2) {
+            console.log('❌ [ACCEPT INVITE] Max admin limit reached');
+            return res.status(400).json({
+                success: false,
+                message: 'Maximum admin limit reached (2 admins)',
+                errorCode: 'MAX_ADMINS_REACHED'
+            });
+        }
 
         // Check if token is expired
         if (!admin.inviteExpiresAt) {
@@ -1161,12 +1300,33 @@ router.post('/accept-invite', async (req, res) => {
             });
         }
 
+        // Log invite accepted
+        await logAdminActivity({
+            adminId: adminId,
+            adminEmail: admin.email,
+            action: 'invite_accepted',
+            details: { role: admin.role || 'admin' },
+            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+            userAgent: req.get('user-agent') || 'unknown',
+            success: true
+        });
+
         console.log('✅ [ACCEPT INVITE] Invite accepted successfully:', {
             email: admin.email,
             role: admin.role
         });
 
-        // Return success response with tokens
+        // Set refresh token in httpOnly cookie
+        const isProduction = process.env.NODE_ENV === 'production';
+        res.cookie('refreshToken', refreshToken, {
+            httpOnly: true,
+            secure: isProduction,
+            sameSite: 'strict',
+            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            path: '/api/admin/auth'
+        });
+
+        // Return success response (access token only, refresh token in cookie)
         res.json({
             success: true,
             data: {
@@ -1177,8 +1337,8 @@ router.post('/accept-invite', async (req, res) => {
                     role: admin.role || 'admin',
                     status: 'active'
                 },
-                token: accessToken,
-                refreshToken: refreshToken
+                token: accessToken
+                // refreshToken is in httpOnly cookie, not in response
             }
         });
 
@@ -1196,12 +1356,14 @@ router.post('/accept-invite', async (req, res) => {
  * POST /api/admin/auth/refresh
  * Refresh access token using refresh token
  * Public endpoint (no authentication required, but requires refresh token)
- * Request Body: { refreshToken: string }
- * Returns: { success: true, data: { token: "...", refreshToken: "..." } }
+ * Reads refresh token from httpOnly cookie (fallback to body for backward compatibility)
+ * Returns: { success: true, data: { token: "..." } }
+ * Sets new refresh token in httpOnly cookie
  */
 router.post('/refresh', async (req, res) => {
     try {
-        const { refreshToken } = req.body;
+        // Read refresh token from cookie (preferred) or body (backward compatibility)
+        const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
 
         console.log('🔄 [REFRESH TOKEN] Request received');
 
@@ -1380,12 +1542,22 @@ router.post('/refresh', async (req, res) => {
             email: admin.email
         });
 
-        // Return new tokens
+        // Set new refresh token in httpOnly cookie
+        const isProduction = process.env.NODE_ENV === 'production';
+        res.cookie('refreshToken', newRefreshToken, {
+            httpOnly: true,
+            secure: isProduction,
+            sameSite: 'strict',
+            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            path: '/api/admin/auth'
+        });
+
+        // Return new access token (refresh token in cookie)
         res.json({
             success: true,
             data: {
-                token: newAccessToken,
-                refreshToken: newRefreshToken
+                token: newAccessToken
+                // refreshToken is in httpOnly cookie, not in response
             }
         });
 
@@ -1394,6 +1566,302 @@ router.post('/refresh', async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Internal server error during token refresh',
+            errorCode: 'INTERNAL_SERVER_ERROR'
+        });
+    }
+});
+
+/**
+ * POST /api/admin/auth/forgot-password
+ * Request password reset
+ * Public endpoint (no authentication required)
+ * Request Body: { email: string }
+ * Returns: { success: true, message: "Password reset email sent" }
+ */
+router.post('/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        const normalizedEmail = String(email || '').toLowerCase().trim();
+
+        console.log('🔐 [FORGOT PASSWORD] Request received:', {
+            email: normalizedEmail,
+            timestamp: new Date().toISOString()
+        });
+
+        if (!normalizedEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'Email is required',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
+
+        // Email domain validation: Only @peakmode.se emails allowed
+        if (!normalizedEmail.endsWith('@peakmode.se')) {
+            // Return generic message to prevent email enumeration
+            return res.json({
+                success: true,
+                message: 'If an account exists with this email, a password reset link has been sent.'
+            });
+        }
+
+        // Find admin by email
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: { email: normalizedEmail }
+        });
+
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+        // Return success even if admin not found (prevent email enumeration)
+        if (!adminResult.success || !admin) {
+            console.log('⚠️ [FORGOT PASSWORD] Admin not found (returning generic success)');
+            return res.json({
+                success: true,
+                message: 'If an account exists with this email, a password reset link has been sent.'
+            });
+        }
+
+        // Check if admin is active
+        if (admin.status && admin.status !== 'active') {
+            return res.json({
+                success: true,
+                message: 'If an account exists with this email, a password reset link has been sent.'
+            });
+        }
+
+        // Generate secure reset token (32 bytes = 64 hex characters)
+        const resetToken = crypto.randomBytes(32).toString('hex');
+        const resetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
+
+        // Update admin with reset token
+        const adminId = admin._id || admin.id;
+        const updateFilter = ObjectId.isValid(adminId)
+            ? { _id: new ObjectId(adminId) }
+            : { email: normalizedEmail };
+
+        await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--update',
+            data: {
+                filter: updateFilter,
+                update: {
+                    resetPasswordToken: resetToken,
+                    resetPasswordExpires: resetExpires.toISOString(),
+                    updatedAt: new Date().toISOString()
+                }
+            }
+        });
+
+        // Generate reset link
+        const resetLink = `${process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se'}/reset-password?token=${resetToken}`;
+
+        // Log password reset request
+        await logAdminActivity({
+            adminId: adminId,
+            adminEmail: normalizedEmail,
+            action: 'password_reset_requested',
+            details: { resetTokenGenerated: true },
+            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+            userAgent: req.get('user-agent') || 'unknown',
+            success: true
+        });
+
+        console.log('✅ [FORGOT PASSWORD] Reset token generated:', {
+            email: normalizedEmail,
+            expiresAt: resetExpires.toISOString()
+        });
+
+        // Return reset link (in production, send via email instead)
+        res.json({
+            success: true,
+            message: 'If an account exists with this email, a password reset link has been sent.',
+            data: {
+                resetLink: resetLink, // For development/testing - remove in production
+                expiresAt: resetExpires.toISOString()
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [FORGOT PASSWORD] Error:', error);
+        // Return generic success even on error (prevent information leakage)
+        res.json({
+            success: true,
+            message: 'If an account exists with this email, a password reset link has been sent.'
+        });
+    }
+});
+
+/**
+ * POST /api/admin/auth/reset-password
+ * Reset password using reset token
+ * Public endpoint (no authentication required)
+ * Request Body: { token: string, newPassword: string, confirmPassword: string }
+ * Returns: { success: true, message: "Password reset successful" }
+ */
+router.post('/reset-password', async (req, res) => {
+    try {
+        const { token, newPassword, confirmPassword } = req.body;
+
+        console.log('🔐 [RESET PASSWORD] Request received:', {
+            tokenLength: token ? token.length : 0,
+            hasPassword: !!newPassword,
+            timestamp: new Date().toISOString()
+        });
+
+        // Validate required fields
+        if (!token || !token.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Reset token is required',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
+
+        if (!newPassword || !newPassword.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: 'New password is required',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
+
+        if (!confirmPassword || !confirmPassword.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Password confirmation is required',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
+
+        // Validate password match
+        if (newPassword !== confirmPassword) {
+            return res.status(400).json({
+                success: false,
+                message: 'Passwords do not match',
+                errorCode: 'PASSWORD_MISMATCH'
+            });
+        }
+
+        // Enhanced password validation (min 12 characters with complexity)
+        const passwordValidation = validatePassword(newPassword);
+        if (!passwordValidation.valid) {
+            return res.status(400).json({
+                success: false,
+                message: passwordValidation.error,
+                errorCode: 'PASSWORD_VALIDATION_FAILED'
+            });
+        }
+
+        // Find admin by reset token
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: { resetPasswordToken: token.trim() }
+        });
+
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+        if (!adminResult.success || !admin) {
+            console.log('❌ [RESET PASSWORD] Admin not found for token');
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or expired reset token',
+                errorCode: 'INVALID_RESET_TOKEN'
+            });
+        }
+
+        // Check if token is expired
+        if (!admin.resetPasswordExpires) {
+            console.log('❌ [RESET PASSWORD] No expiry date found');
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or expired reset token',
+                errorCode: 'INVALID_RESET_TOKEN'
+            });
+        }
+
+        const expiresAt = new Date(admin.resetPasswordExpires);
+        const now = new Date();
+
+        if (expiresAt <= now) {
+            console.log('❌ [RESET PASSWORD] Token expired:', {
+                expiresAt: expiresAt.toISOString(),
+                now: now.toISOString()
+            });
+            return res.status(400).json({
+                success: false,
+                message: 'Reset token has expired. Please request a new password reset.',
+                errorCode: 'RESET_TOKEN_EXPIRED'
+            });
+        }
+
+        // Hash new password
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+        // Update admin: set new password, clear reset token
+        const adminId = admin._id || admin.id;
+        const updateFilter = ObjectId.isValid(adminId)
+            ? { _id: new ObjectId(adminId) }
+            : { resetPasswordToken: token.trim() };
+
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--update',
+            data: {
+                filter: updateFilter,
+                update: {
+                    password: hashedPassword,
+                    resetPasswordToken: null,
+                    resetPasswordExpires: null,
+                    failedLoginAttempts: 0, // Reset failed attempts
+                    lockedUntil: null, // Clear any lock
+                    updatedAt: new Date().toISOString()
+                }
+            }
+        });
+
+        if (!updateResult.success) {
+            console.error('❌ [RESET PASSWORD] Failed to update admin:', updateResult);
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to reset password',
+                errorCode: 'UPDATE_FAILED'
+            });
+        }
+
+        // Log password reset
+        await logAdminActivity({
+            adminId: adminId,
+            adminEmail: admin.email,
+            action: 'password_reset',
+            details: { resetViaToken: true },
+            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+            userAgent: req.get('user-agent') || 'unknown',
+            success: true
+        });
+
+        console.log('✅ [RESET PASSWORD] Password reset successfully:', {
+            email: admin.email
+        });
+
+        res.json({
+            success: true,
+            message: 'Password reset successful. You can now login with your new password.'
+        });
+
+    } catch (error) {
+        console.error('❌ [RESET PASSWORD] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error during password reset',
             errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }

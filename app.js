@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const path = require('path');
 const fs = require('fs');
 const dbRoutes = require('./routes/db');
@@ -103,14 +104,57 @@ process.on('SIGINT', () => {
     gracefulShutdown('SIGINT');
 });
 
+// Cookie parser (required for httpOnly cookies)
+app.use(cookieParser());
+
+// Security Headers Middleware (Defense in Depth)
+app.use((req, res, next) => {
+    // Content Security Policy - Prevents XSS
+    res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:;"
+    );
+    
+    // Prevent clickjacking
+    res.setHeader('X-Frame-Options', 'DENY');
+    
+    // Prevent MIME sniffing
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    
+    // Privacy protection
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    
+    // Force HTTPS in production
+    if (process.env.NODE_ENV === 'production') {
+        res.setHeader(
+            'Strict-Transport-Security',
+            'max-age=31536000; includeSubDomains; preload'
+        );
+    }
+    
+    // Prevent XSS (legacy browsers)
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    
+    next();
+});
+
 // CORS configuration for production
 app.use(cors({
-    origin: '*', // Allow all origins
+    origin: '*', // Allow all origins (general routes)
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
     credentials: true,
     maxAge: 86400 // 24 hours
 }));
+
+// CORS configuration for admin routes (restricted to admin domain)
+const adminCors = cors({
+    origin: process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    credentials: true, // Required for httpOnly cookies
+    maxAge: 86400
+});
 
 // Increase payload size limit for video uploads (set to 200MB)
 app.use(express.json({ limit: '200mb' }));
@@ -314,9 +358,9 @@ app.use('/api/tracking', trackingRoutes); // Package tracking
 app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
 app.use('/api', currencyRoutes); // Currency conversion and settings
-app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication (login, verify, logout)
-app.use('/api/admin', adminContentRoutes); // Admin content management (public read, protected write)
-app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
+app.use('/api/admin/auth', adminCors, adminAuthRoutes); // Admin authentication (login, verify, logout)
+app.use('/api/admin', adminCors, adminContentRoutes); // Admin content management (public read, protected write)
+app.use('/api/admin', adminCors, adminRoutes); // Admin utilities (cleanup, maintenance)
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
