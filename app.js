@@ -139,15 +139,23 @@ app.use((req, res, next) => {
 });
 
 // CORS configuration for production (general routes)
-// Note: Using wildcard origin, so credentials must be false
-// Admin routes use adminCors below with explicit origins and credentials: true
-app.use(cors({
-    origin: '*', // Allow all origins (general routes)
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-    credentials: false, // Must be false when using wildcard origin
-    maxAge: 86400 // 24 hours
-}));
+// Note: Exclude admin routes - they use adminCors below
+// Using wildcard origin, so credentials must be false
+app.use((req, res, next) => {
+    // Skip CORS for admin routes - they use adminCors middleware
+    if (req.path.startsWith('/api/admin')) {
+        return next();
+    }
+    
+    // Apply general CORS for non-admin routes
+    cors({
+        origin: '*', // Allow all origins (general routes)
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+        credentials: false, // Must be false when using wildcard origin
+        maxAge: 86400 // 24 hours
+    })(req, res, next);
+});
 
 // CORS configuration for admin routes (restricted to admin domain)
 // Allow both production and development origins
@@ -180,7 +188,9 @@ const adminCors = cors({
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
     credentials: true, // Required for httpOnly cookies
-    maxAge: 86400
+    maxAge: 86400,
+    preflightContinue: false, // Let CORS middleware handle OPTIONS requests
+    optionsSuccessStatus: 200 // Some legacy browsers (IE11) choke on 204
 });
 
 // Increase payload size limit for video uploads (set to 200MB)
