@@ -138,12 +138,14 @@ app.use((req, res, next) => {
     next();
 });
 
-// CORS configuration for production
+// CORS configuration for production (general routes)
+// Note: Using wildcard origin, so credentials must be false
+// Admin routes use adminCors below with explicit origins and credentials: true
 app.use(cors({
     origin: '*', // Allow all origins (general routes)
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-    credentials: true,
+    credentials: false, // Must be false when using wildcard origin
     maxAge: 86400 // 24 hours
 }));
 
@@ -161,15 +163,18 @@ const adminCors = cors({
     origin: function (origin, callback) {
         // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) {
+            console.log('⚠️ [CORS] Request with no origin - allowing (may be mobile app or curl)');
             return callback(null, true);
         }
         
         // Check if origin is in allowed list
         if (allowedAdminOrigins.includes(origin)) {
+            console.log(`✅ [CORS] Allowed origin: ${origin}`);
             callback(null, true);
         } else {
-            console.warn(`⚠️ [CORS] Blocked origin: ${origin}. Allowed origins: ${allowedAdminOrigins.join(', ')}`);
-            callback(new Error('Not allowed by CORS'));
+            console.warn(`❌ [CORS] Blocked origin: ${origin}`);
+            console.warn(`❌ [CORS] Allowed origins: ${allowedAdminOrigins.join(', ')}`);
+            callback(new Error(`Not allowed by CORS. Origin ${origin} is not in allowed list.`));
         }
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
