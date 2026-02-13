@@ -1,9 +1,14 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
+const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 
 const router = express.Router();
 const db = getDBInstance();
+
+// JWT secret from environment variable
+const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET;
 
 /**
  * DELETE /api/admin/cleanup-newsletter-subscribers
@@ -109,6 +114,58 @@ router.get('/check-newsletter-subscribers', authenticateAdmin, async (req, res) 
             success: false,
             error: 'Failed to check collection',
             details: error.message
+        });
+    }
+});
+
+/**
+ * GET /api/admin/me
+ * Get current admin profile from JWT token
+ * Authentication: Requires JWT token in Authorization header
+ * Returns: { success: true, data: { id, name, email, role, status } }
+ */
+router.get('/me', authenticateAdmin, async (req, res) => {
+    try {
+        // Admin info is already attached by authenticateAdmin middleware
+        const adminId = req.admin.id;
+
+        // Fetch full admin data from database
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: ObjectId.isValid(adminId) ? { _id: new ObjectId(adminId) } : { _id: adminId }
+        });
+
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+        if (!adminResult.success || !admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin account not found',
+                errorCode: 'ADMIN_NOT_FOUND'
+            });
+        }
+
+        // Return admin data
+        res.json({
+            success: true,
+            data: {
+                id: admin._id || admin.id,
+                name: admin.name || admin.email,
+                email: admin.email,
+                role: admin.role || 'admin',
+                status: admin.status || 'active'
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [ADMIN ME] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
 });
