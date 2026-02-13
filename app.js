@@ -148,8 +148,30 @@ app.use(cors({
 }));
 
 // CORS configuration for admin routes (restricted to admin domain)
+// Allow both production and development origins
+const allowedAdminOrigins = [
+    process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se',
+    'http://localhost:5180',  // Local development (Vite default)
+    'http://localhost:5173',  // Vite alternative port
+    'http://localhost:3000',  // Alternative dev port
+    process.env.ADMIN_FRONTEND_DEV_URL  // Optional env var for custom dev URL
+].filter(Boolean); // Remove undefined values
+
 const adminCors = cors({
-    origin: process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se',
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) {
+            return callback(null, true);
+        }
+        
+        // Check if origin is in allowed list
+        if (allowedAdminOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.warn(`⚠️ [CORS] Blocked origin: ${origin}. Allowed origins: ${allowedAdminOrigins.join(', ')}`);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
     credentials: true, // Required for httpOnly cookies
