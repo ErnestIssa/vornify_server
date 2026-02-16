@@ -138,60 +138,36 @@ app.use((req, res, next) => {
     next();
 });
 
-// CORS configuration for production (general routes)
-// Note: Exclude admin routes - they use adminCors below
-// Using wildcard origin, so credentials must be false
-app.use((req, res, next) => {
-    // Skip CORS for admin routes - they use adminCors middleware
-    if (req.path.startsWith('/api/admin')) {
-        return next();
-    }
-    
-    // Apply general CORS for non-admin routes
-    cors({
-        origin: '*', // Allow all origins (general routes)
-        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-        credentials: false, // Must be false when using wildcard origin
-        maxAge: 86400 // 24 hours
-    })(req, res, next);
-});
-
-// CORS configuration for admin routes (restricted to admin domain)
-// Allow both production and development origins
-const allowedAdminOrigins = [
+// Single CORS configuration for ALL /api routes (auth, vornifydb, support, etc.)
+// Required: frontend uses credentials: 'include' → server must NOT use origin: '*'
+// One config ensures login, refresh, vornifydb, and support all get explicit origin + credentials.
+const allowedApiOrigins = [
     process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se',
-    'http://localhost:5180',  // Local development (Vite default)
-    'http://localhost:5173',  // Vite alternative port
-    'http://localhost:3000',  // Alternative dev port
-    process.env.ADMIN_FRONTEND_DEV_URL  // Optional env var for custom dev URL
-].filter(Boolean); // Remove undefined values
+    process.env.FRONTEND_URL || process.env.BASE_URL || 'https://peakmode.se',
+    'https://www.peakmode.se',
+    'http://localhost:5175',  // Vite dev (current)
+    'http://localhost:5180',
+    'http://localhost:5173',
+    'http://localhost:3000',
+    process.env.ADMIN_FRONTEND_DEV_URL
+].filter(Boolean);
 
-const adminCors = cors({
+const apiCorsOptions = {
     origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests)
-        if (!origin) {
-            console.log('⚠️ [CORS] Request with no origin - allowing (may be mobile app or curl)');
-            return callback(null, true);
-        }
-        
-        // Check if origin is in allowed list
-        if (allowedAdminOrigins.includes(origin)) {
-            console.log(`✅ [CORS] Allowed origin: ${origin}`);
-            callback(null, true);
-        } else {
-            console.warn(`❌ [CORS] Blocked origin: ${origin}`);
-            console.warn(`❌ [CORS] Allowed origins: ${allowedAdminOrigins.join(', ')}`);
-            callback(new Error(`Not allowed by CORS. Origin ${origin} is not in allowed list.`));
-        }
+        if (!origin) return callback(null, true);
+        if (allowedApiOrigins.includes(origin)) return callback(null, true);
+        console.warn('[CORS] Blocked origin:', origin);
+        callback(new Error('Not allowed by CORS'));
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-    credentials: true, // Required for httpOnly cookies
+    credentials: true,
     maxAge: 86400,
-    preflightContinue: false, // Let CORS middleware handle OPTIONS requests
-    optionsSuccessStatus: 200 // Some legacy browsers (IE11) choke on 204
-});
+    preflightContinue: false,
+    optionsSuccessStatus: 200
+};
+
+app.use('/api', cors(apiCorsOptions));
 
 // Increase payload size limit for video uploads (set to 200MB)
 app.use(express.json({ limit: '200mb' }));
@@ -395,9 +371,9 @@ app.use('/api/tracking', trackingRoutes); // Package tracking
 app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
 app.use('/api', currencyRoutes); // Currency conversion and settings
-app.use('/api/admin/auth', adminCors, adminAuthRoutes); // Admin authentication (login, verify, logout)
-app.use('/api/admin', adminCors, adminContentRoutes); // Admin content management (public read, protected write)
-app.use('/api/admin', adminCors, adminRoutes); // Admin utilities (cleanup, maintenance)
+app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication (login, verify, logout)
+app.use('/api/admin', adminContentRoutes); // Admin content management (public read, protected write)
+app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
