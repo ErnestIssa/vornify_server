@@ -143,9 +143,10 @@ app.use((req, res, next) => {
 // One config ensures login, refresh, vornifydb, and support all get explicit origin + credentials.
 const allowedApiOrigins = [
     process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se',
+    'https://peakmode-admin.onrender.com',  // Deployed admin (Render)
     process.env.FRONTEND_URL || process.env.BASE_URL || 'https://peakmode.se',
     'https://www.peakmode.se',
-    'http://localhost:5175',  // Vite dev (current)
+    'http://localhost:5175',
     'http://localhost:5180',
     'http://localhost:5173',
     'http://localhost:3000',
@@ -160,7 +161,7 @@ const apiCorsOptions = {
         callback(new Error('Not allowed by CORS'));
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'api-key'],
     credentials: true,
     maxAge: 86400,
     preflightContinue: false,
