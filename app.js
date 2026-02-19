@@ -373,6 +373,7 @@ app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
 app.use('/api', currencyRoutes); // Currency conversion and settings
 app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication (login, verify, logout)
+app.use('/api/admin', adminAuthRoutes); // Also expose invite + accept-invite at /api/admin/invite, /api/admin/accept-invite (frontend expects these paths)
 app.use('/api/admin', adminContentRoutes); // Admin content management (public read, protected write)
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 
