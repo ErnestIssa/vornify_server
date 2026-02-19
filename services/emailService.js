@@ -1604,6 +1604,7 @@ class EmailService {
         const templateId = this.getAdminInviteTemplateId();
         const subject = "You've Been Invited to Join Peak Mode Admin";
         const dynamicData = {
+            subject,
             admin_name: data.admin_name || '',
             admin_email: data.admin_email || to,
             invited_by: data.invited_by || 'Peak Mode',
@@ -1627,6 +1628,7 @@ class EmailService {
         const templateId = this.getSuperAdminInviteNotificationTemplateId();
         const subject = `Admin Invite Sent – ${data.admin_email || ''}`;
         const dynamicData = {
+            subject,
             admin_name: data.admin_name || '',
             admin_email: data.admin_email || '',
             invite_link: data.invite_link || '',
@@ -1648,6 +1650,7 @@ class EmailService {
         const templateId = this.getAdminActivatedTemplateId();
         const subject = `Admin Account Activated – ${data.admin_name || ''}`;
         const dynamicData = {
+            subject,
             admin_name: data.admin_name || '',
             admin_email: data.admin_email || '',
             activated_at: data.activated_at || new Date().toISOString(),

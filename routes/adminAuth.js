@@ -46,6 +46,12 @@ const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '15m'; // Access token: 15 minutes
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d'; // Refresh token: 7 days
 
+// Admin app base URL for invite and reset links (admin panel, not backend or main store)
+const getAdminAppBaseUrl = () => {
+    const url = (process.env.ADMIN_APP_BASE_URL || process.env.FRONTEND_ADMIN_URL || process.env.ADMIN_FRONTEND_URL || 'https://peakmode-admin.onrender.com').trim();
+    return url.replace(/\/$/, '');
+};
+
 // Account lock configuration
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MS = 30 * 60 * 1000; // 30 minutes
@@ -1046,8 +1052,8 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
             });
         }
 
-        // Generate invite link
-        const inviteLink = `${process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se'}/accept-invite?token=${inviteToken}`;
+        // Generate invite link (must point to admin panel, e.g. peakmode-admin.onrender.com)
+        const inviteLink = `${getAdminAppBaseUrl()}/accept-invite?token=${inviteToken}`;
         const expiryHours = 24;
         const year = new Date().getFullYear();
 
@@ -1714,8 +1720,8 @@ router.post('/forgot-password', async (req, res) => {
             }
         });
 
-        // Generate reset link
-        const resetLink = `${process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se'}/reset-password?token=${resetToken}`;
+        // Generate reset link (admin panel URL)
+        const resetLink = `${getAdminAppBaseUrl()}/reset-password?token=${resetToken}`;
 
         // Log password reset request
         await logAdminActivity({
