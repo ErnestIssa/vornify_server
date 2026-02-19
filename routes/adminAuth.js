@@ -157,7 +157,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
         if (admin.lockedUntil && new Date(admin.lockedUntil) > now) {
             const lockExpiresAt = new Date(admin.lockedUntil);
             const minutesRemaining = Math.ceil((lockExpiresAt - now) / (1000 * 60));
-            console.log('❌ [ADMIN AUTH LOGIN] Account is locked until:', lockExpiresAt);
+            console.log('❌ [ADMIN AUTH LOGIN] 403 ACCOUNT_LOCKED until:', lockExpiresAt.toISOString(), 'Origin:', req.get('origin'));
             return res.status(403).json({
                 success: false,
                 message: `Account is locked. Please try again in ${minutesRemaining} minute(s).`,
@@ -267,7 +267,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
 
         // Check if admin status is active
         if (admin.status && admin.status !== 'active') {
-            console.log('❌ [ADMIN AUTH LOGIN] Admin account status is not active:', admin.status);
+            console.log('❌ [ADMIN AUTH LOGIN] 403 ADMIN_DISABLED status:', admin.status, 'Origin:', req.get('origin'));
             return res.status(403).json({
                 success: false,
                 message: 'Admin account is not active',
@@ -277,7 +277,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
 
         // Also check legacy 'active' field for backward compatibility
         if (admin.active === false) {
-            console.log('❌ [ADMIN AUTH LOGIN] Admin account is disabled (legacy field)');
+            console.log('❌ [ADMIN AUTH LOGIN] 403 ADMIN_DISABLED (legacy active=false) Origin:', req.get('origin'));
             return res.status(403).json({
                 success: false,
                 message: 'Admin account is disabled',
@@ -353,13 +353,15 @@ router.post('/login', loginRateLimit, async (req, res) => {
         });
         
         // Set refresh token in httpOnly cookie (secure, not accessible via JavaScript)
+        // Cross-origin: admin app (e.g. peakmode-admin.onrender.com) and API (vornify-server.onrender.com)
+        // are different origins, so cookie must use sameSite: 'none' and secure: true to be sent.
         const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('refreshToken', refreshToken, {
-            httpOnly: true, // Not accessible via JavaScript (XSS protection)
-            secure: isProduction, // Only send over HTTPS in production
-            sameSite: 'strict', // CSRF protection
+            httpOnly: true,
+            secure: isProduction,
+            sameSite: isProduction ? 'none' : 'lax', // 'none' required for cross-origin (deployed admin → API)
             maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-            path: '/api/admin/auth' // Only sent for admin auth routes
+            path: '/api/admin/auth'
         });
         
         // Return success response (access token only, refresh token in cookie)
@@ -598,11 +600,12 @@ router.post('/logout', async (req, res) => {
             });
         }
 
-        // Clear refresh token cookie
+        // Clear refresh token cookie (same options as when it was set)
+        const isProduction = process.env.NODE_ENV === 'production';
         res.clearCookie('refreshToken', {
             httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
+            secure: isProduction,
+            sameSite: isProduction ? 'none' : 'lax',
             path: '/api/admin/auth'
         });
 
@@ -1316,12 +1319,12 @@ router.post('/accept-invite', async (req, res) => {
             role: admin.role
         });
 
-        // Set refresh token in httpOnly cookie
+        // Set refresh token in httpOnly cookie (sameSite: 'none' in prod for cross-origin)
         const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('refreshToken', refreshToken, {
             httpOnly: true,
             secure: isProduction,
-            sameSite: 'strict',
+            sameSite: isProduction ? 'none' : 'lax',
             maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
             path: '/api/admin/auth'
         });
@@ -1368,10 +1371,11 @@ router.post('/refresh', async (req, res) => {
         console.log('🔄 [REFRESH TOKEN] Request received');
 
         if (!refreshToken || !refreshToken.trim()) {
-            return res.status(400).json({
+            // No session (e.g. first load, or cookie not sent cross-origin). Use 401 so frontend shows login.
+            return res.status(401).json({
                 success: false,
-                message: 'Refresh token is required',
-                errorCode: 'VALIDATION_ERROR'
+                message: 'No refresh token. Please log in.',
+                errorCode: 'NO_REFRESH_TOKEN'
             });
         }
 
@@ -1542,12 +1546,12 @@ router.post('/refresh', async (req, res) => {
             email: admin.email
         });
 
-        // Set new refresh token in httpOnly cookie
+        // Set new refresh token in httpOnly cookie (sameSite: 'none' in prod for cross-origin)
         const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('refreshToken', newRefreshToken, {
             httpOnly: true,
             secure: isProduction,
-            sameSite: 'strict',
+            sameSite: isProduction ? 'none' : 'lax',
             maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
             path: '/api/admin/auth'
         });
