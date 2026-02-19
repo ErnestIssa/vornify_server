@@ -1577,6 +1577,88 @@ class EmailService {
             // Don't throw - logging failures shouldn't break email sending
         }
     }
+
+    // --- Admin Invite Email Notifications (SendGrid dynamic templates) ---
+
+    /** Template ID: email to invited admin when invite is created */
+    getAdminInviteTemplateId() {
+        return process.env.SENDGRID_ADMIN_INVITE_TEMPLATE_ID || 'd-d62edc6fd56841ca906a438abea625be';
+    }
+
+    /** Template ID: email to super admin confirming invite was sent */
+    getSuperAdminInviteNotificationTemplateId() {
+        return process.env.SENDGRID_SUPER_ADMIN_INVITE_TEMPLATE_ID || 'd-ec3c519de90a4af697e8a49f1fd36e73';
+    }
+
+    /** Template ID: email to both when admin account is activated */
+    getAdminActivatedTemplateId() {
+        return process.env.SENDGRID_ADMIN_ACTIVATED_TEMPLATE_ID || 'd-8cf19fba11dd4ff7bd34fcf9a8149ff3';
+    }
+
+    /**
+     * 1. Admin Invite Email – to the invited admin (after POST /api/admin/invite succeeds)
+     * @param {string} to - Invited admin email
+     * @param {object} data - { admin_name, admin_email, invited_by, invite_link, expiry_hours, year }
+     */
+    async sendAdminInviteEmail(to, data) {
+        const templateId = this.getAdminInviteTemplateId();
+        const subject = "You've Been Invited to Join Peak Mode Admin";
+        const dynamicData = {
+            admin_name: data.admin_name || '',
+            admin_email: data.admin_email || to,
+            invited_by: data.invited_by || 'Peak Mode',
+            invite_link: data.invite_link || '',
+            expiry_hours: data.expiry_hours != null ? data.expiry_hours : 24,
+            year: data.year != null ? data.year : new Date().getFullYear()
+        };
+        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        if (!result.success) {
+            console.error('❌ [ADMIN INVITE EMAIL] Failed to send to invited admin:', to, result.error);
+        }
+        return result;
+    }
+
+    /**
+     * 2. Super Admin Notification – to the super admin who sent the invite (after invite created)
+     * @param {string} to - Super admin email
+     * @param {object} data - { admin_name, admin_email, invite_link, year }
+     */
+    async sendSuperAdminInviteNotification(to, data) {
+        const templateId = this.getSuperAdminInviteNotificationTemplateId();
+        const subject = `Admin Invite Sent – ${data.admin_email || ''}`;
+        const dynamicData = {
+            admin_name: data.admin_name || '',
+            admin_email: data.admin_email || '',
+            invite_link: data.invite_link || '',
+            year: data.year != null ? data.year : new Date().getFullYear()
+        };
+        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        if (!result.success) {
+            console.error('❌ [ADMIN INVITE EMAIL] Failed to send super admin notification:', to, result.error);
+        }
+        return result;
+    }
+
+    /**
+     * 3. Admin Account Activated – to the activated admin and to the super admin (after accept-invite succeeds)
+     * @param {string} to - Recipient email (admin or super admin)
+     * @param {object} data - { admin_name, admin_email, activated_at, year }
+     */
+    async sendAdminActivatedEmail(to, data) {
+        const templateId = this.getAdminActivatedTemplateId();
+        const subject = `Admin Account Activated – ${data.admin_name || ''}`;
+        const dynamicData = {
+            admin_name: data.admin_name || '',
+            admin_email: data.admin_email || '',
+            activated_at: data.activated_at || new Date().toISOString(),
+            year: data.year != null ? data.year : new Date().getFullYear()
+        };
+        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        if (!result.success) {
+            console.error('❌ [ADMIN INVITE EMAIL] Failed to send activation notification:', to, result.error);
+        }
+        return result;
+    }
 }
 
 // Export singleton instance

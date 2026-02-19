@@ -8,6 +8,7 @@ const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 const logAdminActivity = require('../utils/auditLogger');
+const emailService = require('../services/emailService');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -1008,6 +1009,8 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
 
         // Create admin record with invite token (status: 'pending' until invite is accepted)
+        const invitedByEmail = req.admin.email || req.admin.username || null;
+        const invitedByName = req.admin.name || req.admin.email || req.admin.username || 'Super Admin';
         const newAdmin = {
             name: name.trim(),
             email: normalizedEmail,
@@ -1016,6 +1019,8 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
             status: 'pending', // Will be set to 'active' when invite is accepted
             inviteToken: inviteToken,
             inviteExpiresAt: expiresAt.toISOString(),
+            invitedByEmail,
+            invitedByName,
             failedLoginAttempts: 0,
             lockedUntil: null,
             lastLoginAt: null,
@@ -1042,8 +1047,31 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
         }
 
         // Generate invite link
-        // Frontend will handle the base URL, but we'll provide a full link for email/display
         const inviteLink = `${process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se'}/accept-invite?token=${inviteToken}`;
+        const expiryHours = 24;
+        const year = new Date().getFullYear();
+
+        // Send emails (after invite created; do not block response on email failure)
+        try {
+            await emailService.sendAdminInviteEmail(normalizedEmail, {
+                admin_name: name.trim(),
+                admin_email: normalizedEmail,
+                invited_by: invitedByName,
+                invite_link: inviteLink,
+                expiry_hours: expiryHours,
+                year
+            });
+            if (invitedByEmail) {
+                await emailService.sendSuperAdminInviteNotification(invitedByEmail, {
+                    admin_name: name.trim(),
+                    admin_email: normalizedEmail,
+                    invite_link: inviteLink,
+                    year
+                });
+            }
+        } catch (emailErr) {
+            console.error('❌ [ADMIN INVITE] Email send error (invite still created):', emailErr.message);
+        }
 
         // Log invite sent
         await logAdminActivity({
@@ -1301,6 +1329,31 @@ router.post('/accept-invite', async (req, res) => {
                 message: 'Failed to accept invite',
                 errorCode: 'UPDATE_FAILED'
             });
+        }
+
+        // Send "Admin Account Activated" email to the activated admin and to the super admin who invited
+        const activatedAt = new Date();
+        const activatedAtFormatted = activatedAt.toLocaleString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZoneName: 'short'
+        });
+        const activationData = {
+            admin_name: admin.name || admin.email,
+            admin_email: admin.email,
+            activated_at: activatedAtFormatted,
+            year: activatedAt.getFullYear()
+        };
+        try {
+            await emailService.sendAdminActivatedEmail(admin.email, activationData);
+            if (admin.invitedByEmail && admin.invitedByEmail !== admin.email) {
+                await emailService.sendAdminActivatedEmail(admin.invitedByEmail, activationData);
+            }
+        } catch (emailErr) {
+            console.error('❌ [ACCEPT INVITE] Activation email send error (account still activated):', emailErr.message);
         }
 
         // Log invite accepted
