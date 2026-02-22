@@ -1720,8 +1720,24 @@ router.post('/forgot-password', async (req, res) => {
             }
         });
 
-        // Generate reset link (admin panel URL)
+        // Generate reset link (admin panel URL) – same base as accept-invite
         const resetLink = `${getAdminAppBaseUrl()}/reset-password?token=${resetToken}`;
+        const year = new Date().getFullYear();
+        const adminName = (admin.name || admin.displayName || '').trim() || normalizedEmail;
+
+        // Send "Set Password (Admin)" email via SendGrid
+        try {
+            await emailService.sendSetPasswordAdminEmail(normalizedEmail, {
+                reset_link: resetLink,
+                admin_email: normalizedEmail,
+                admin_name: adminName,
+                expiry_hours: 1,
+                year
+            });
+        } catch (emailErr) {
+            console.error('❌ [FORGOT PASSWORD] Email send error:', emailErr.message);
+            // Still return generic success to avoid enumeration
+        }
 
         // Log password reset request
         await logAdminActivity({
@@ -1734,19 +1750,14 @@ router.post('/forgot-password', async (req, res) => {
             success: true
         });
 
-        console.log('✅ [FORGOT PASSWORD] Reset token generated:', {
+        console.log('✅ [FORGOT PASSWORD] Reset token generated and email sent:', {
             email: normalizedEmail,
             expiresAt: resetExpires.toISOString()
         });
 
-        // Return reset link (in production, send via email instead)
         res.json({
             success: true,
-            message: 'If an account exists with this email, a password reset link has been sent.',
-            data: {
-                resetLink: resetLink, // For development/testing - remove in production
-                expiresAt: resetExpires.toISOString()
-            }
+            message: 'If an account exists with this email, a password reset link has been sent.'
         });
 
     } catch (error) {
@@ -1898,6 +1909,21 @@ router.post('/reset-password', async (req, res) => {
                 message: 'Failed to reset password',
                 errorCode: 'UPDATE_FAILED'
             });
+        }
+
+        // Send "Password Set Successfully (admin)" email via SendGrid
+        const loginUrl = `${getAdminAppBaseUrl()}/login`;
+        const adminName = (admin.name || admin.displayName || '').trim() || admin.email;
+        const year = new Date().getFullYear();
+        try {
+            await emailService.sendPasswordSetSuccessfullyAdminEmail(admin.email, {
+                admin_email: admin.email,
+                admin_name: adminName,
+                login_url: loginUrl,
+                year
+            });
+        } catch (emailErr) {
+            console.error('❌ [RESET PASSWORD] Success email send error:', emailErr.message);
         }
 
         // Log password reset

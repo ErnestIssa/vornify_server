@@ -1595,6 +1595,16 @@ class EmailService {
         return process.env.SENDGRID_ADMIN_ACTIVATED_TEMPLATE_ID || 'd-8cf19fba11dd4ff7bd34fcf9a8149ff3';
     }
 
+    /** Template ID: Set Password (Admin) – reset link email */
+    getSetPasswordAdminTemplateId() {
+        return process.env.SENDGRID_SET_PASSWORD_ADMIN_TEMPLATE_ID || 'd-5b9b2995a206496987fa55ba5f130422';
+    }
+
+    /** Template ID: Password Set Successfully (admin) – after reset */
+    getPasswordSetSuccessfullyAdminTemplateId() {
+        return process.env.SENDGRID_PASSWORD_SET_SUCCESS_ADMIN_TEMPLATE_ID || 'd-f8b9dc0ff1d14d92b0f7e42ce3c0102e';
+    }
+
     /**
      * 1. Admin Invite Email – to the invited admin (after POST /api/admin/invite succeeds)
      * @param {string} to - Invited admin email
@@ -1659,6 +1669,51 @@ class EmailService {
         const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
         if (!result.success) {
             console.error('❌ [ADMIN INVITE EMAIL] Failed to send activation notification:', to, result.error);
+        }
+        return result;
+    }
+
+    /**
+     * 4. Set Password (Admin) – sent when admin requests password reset (forgot-password)
+     * @param {string} to - Admin email
+     * @param {object} data - { reset_link, admin_email, admin_name?, expiry_hours?, year }
+     */
+    async sendSetPasswordAdminEmail(to, data) {
+        const templateId = this.getSetPasswordAdminTemplateId();
+        const subject = 'Set Your Peak Mode Admin Password';
+        const dynamicData = {
+            subject,
+            reset_link: data.reset_link || '',
+            admin_email: data.admin_email || to,
+            admin_name: data.admin_name || '',
+            expiry_hours: data.expiry_hours != null ? data.expiry_hours : 1,
+            year: data.year != null ? data.year : new Date().getFullYear()
+        };
+        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        if (!result.success) {
+            console.error('❌ [SET PASSWORD ADMIN] Failed to send reset link:', to, result.error);
+        }
+        return result;
+    }
+
+    /**
+     * 5. Password Set Successfully (admin) – sent after password is reset
+     * @param {string} to - Admin email
+     * @param {object} data - { admin_email, admin_name?, login_url?, year }
+     */
+    async sendPasswordSetSuccessfullyAdminEmail(to, data) {
+        const templateId = this.getPasswordSetSuccessfullyAdminTemplateId();
+        const subject = 'Password Set Successfully – Peak Mode Admin';
+        const dynamicData = {
+            subject,
+            admin_email: data.admin_email || to,
+            admin_name: data.admin_name || '',
+            login_url: data.login_url || '',
+            year: data.year != null ? data.year : new Date().getFullYear()
+        };
+        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        if (!result.success) {
+            console.error('❌ [PASSWORD SET SUCCESS ADMIN] Failed to send confirmation:', to, result.error);
         }
         return result;
     }
