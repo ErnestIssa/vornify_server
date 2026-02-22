@@ -1720,8 +1720,9 @@ router.post('/forgot-password', async (req, res) => {
             }
         });
 
-        // Generate reset link (admin panel URL) – same base as accept-invite
-        const resetLink = `${getAdminAppBaseUrl()}/reset-password?token=${resetToken}`;
+        // Generate reset link (admin panel URL) – same base as accept-invite.
+        // Token must be URL-encoded so &, =, + etc. don't break the link or get cut off in email clients.
+        const resetLink = `${getAdminAppBaseUrl()}/reset-password?token=${encodeURIComponent(resetToken)}`.trim();
         const year = new Date().getFullYear();
         const adminName = (admin.name || admin.displayName || '').trim() || normalizedEmail;
 
@@ -1754,6 +1755,8 @@ router.post('/forgot-password', async (req, res) => {
             email: normalizedEmail,
             expiresAt: resetExpires.toISOString()
         });
+        // Verification: open this URL in a browser to confirm reset page loads (reset_link is single full URL, token URL-encoded)
+        console.log('[FORGOT PASSWORD] reset_link sent in email:', resetLink);
 
         res.json({
             success: true,
