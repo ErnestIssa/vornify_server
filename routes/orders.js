@@ -668,7 +668,13 @@ router.post('/create', async (req, res) => {
     }
 });
 
-// Update order status
+/**
+ * POST /api/orders/update-status
+ * Admin endpoint: single source of truth for order status.
+ * Body: { orderId, status, changedBy?, trackingNumber?, shippingProvider?, estimatedDelivery? }
+ * Valid statuses: pending | processing | packed | shipped | in_transit | out_for_delivery | delivered | cancelled
+ * Valid transitions: forward along 7 steps or to cancelled. Rejects invalid transitions with INVALID_STATUS_TRANSITION.
+ */
 router.post('/update-status', async (req, res) => {
     try {
         const { orderId, status, shippingProvider, trackingNumber, trackingUrl, estimatedDelivery, changedBy } = req.body;
@@ -885,7 +891,8 @@ router.post('/update-status', async (req, res) => {
  * - orderId (REQUIRED) - Order ID to track
  * - email (REQUIRED) - Customer email for verification
  * 
- * Returns normalized order data matching frontend OrderStatus interface
+ * Returns normalized order data matching frontend OrderStatus interface.
+ * Response includes: status (API value), statusText (display label), statusTimestamps: { [status]: "ISO date", ... }
  * 
  * IMPORTANT: This route must be defined BEFORE /:orderId to avoid route conflicts
  */
@@ -958,7 +965,7 @@ router.get('/track', async (req, res) => {
         }
 
         if (!orderResult || !orderResult.success || !orderResult.data) {
-            console.log('❌ [ORDER TRACK] Order not found:', normalizedOrderId);
+            console.log('❌ [ORDER TRACK] Order not found:', identifier);
             return res.status(404).json({
                 error: 'Order not found',
                 message: 'Order not found'

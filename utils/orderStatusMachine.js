@@ -5,6 +5,11 @@
  * Prevents timeline bugs, random admin updates, and broken animations
  */
 
+/** Canonical API status values (single source of truth for admin & client) */
+const CANONICAL_STATUSES = [
+    'pending', 'processing', 'packed', 'shipped', 'in_transit', 'out_for_delivery', 'delivered', 'cancelled'
+];
+
 /**
  * Valid status transitions
  * Each status can only transition to the next status in sequence, or to cancelled
@@ -35,17 +40,18 @@ const STATUS_ORDER = {
 };
 
 /**
- * Human-readable status text
+ * Human-readable status text (aligned with admin & client "Track my order" labels)
+ * API value → Display label
  */
 const STATUS_TEXT = {
-    pending: 'Payment Received',
-    processing: 'Order Processing',
-    packed: 'Order Packed',
-    shipped: 'Order Shipped',
+    pending: 'Paid',
+    processing: 'Processing',
+    packed: 'Packed',
+    shipped: 'Shipped',
     in_transit: 'In Transit',
     out_for_delivery: 'Out for Delivery',
     delivered: 'Delivered',
-    cancelled: 'Order Cancelled'
+    cancelled: 'Cancelled'
 };
 
 /**
@@ -240,6 +246,7 @@ function isCancelled(status) {
 }
 
 module.exports = {
+    CANONICAL_STATUSES,
     VALID_TRANSITIONS,
     STATUS_ORDER,
     STATUS_TEXT,
