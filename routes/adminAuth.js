@@ -827,21 +827,139 @@ router.get('/diagnostic', async (req, res) => {
 
 /**
  * POST /api/admin/auth/reset-password
- * Reset admin password (requires reset secret or no admins exist)
- * Body: { username, newPassword, resetSecret? }
+ * Two flows:
+ * 1. Admin (forgot-password) flow: Body { token, newPassword, confirmPassword } – token from email link.
+ * 2. Legacy flow: Body { username, newPassword, resetSecret? } – requires reset secret if env set.
  */
 router.post('/reset-password', async (req, res) => {
     try {
-        const { username, newPassword, resetSecret } = req.body;
+        const { token, newPassword, confirmPassword, username, resetSecret } = req.body;
 
-        if (!username || !newPassword) {
-            return res.status(400).json({
-                success: false,
-                message: 'Username and newPassword are required',
-                errorCode: 'VALIDATION_ERROR'
+        // --- Flow 1: Token from email link (admin frontend) ---
+        if (token !== undefined && token !== null && String(token).trim() !== '') {
+            const resetToken = String(token).trim();
+
+            if (!newPassword || !newPassword.trim()) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'New password is required',
+                    errorCode: 'VALIDATION_ERROR'
+                });
+            }
+            if (!confirmPassword || !confirmPassword.trim()) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Password confirmation is required',
+                    errorCode: 'VALIDATION_ERROR'
+                });
+            }
+            if (newPassword !== confirmPassword) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Passwords do not match',
+                    errorCode: 'PASSWORD_MISMATCH'
+                });
+            }
+            const passwordValidation = validatePassword(newPassword);
+            if (!passwordValidation.valid) {
+                return res.status(400).json({
+                    success: false,
+                    message: passwordValidation.error,
+                    errorCode: 'PASSWORD_VALIDATION_FAILED'
+                });
+            }
+
+            const adminResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'admins',
+                command: '--read',
+                data: { resetPasswordToken: resetToken }
+            });
+            const adminData = adminResult && adminResult.success ? adminResult.data : null;
+            const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+
+            if (!adminResult.success || !admin) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid or expired reset token',
+                    errorCode: 'INVALID_RESET_TOKEN'
+                });
+            }
+            if (!admin.resetPasswordExpires) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid or expired reset token',
+                    errorCode: 'INVALID_RESET_TOKEN'
+                });
+            }
+            const expiresAt = new Date(admin.resetPasswordExpires);
+            if (expiresAt <= new Date()) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Reset token has expired. Please request a new password reset.',
+                    errorCode: 'RESET_TOKEN_EXPIRED'
+                });
+            }
+
+            const hashedPassword = await bcrypt.hash(newPassword, 10);
+            const adminId = admin._id || admin.id;
+            const updateFilter = ObjectId.isValid(adminId) ? { _id: new ObjectId(adminId) } : { resetPasswordToken: resetToken };
+
+            const updateResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'admins',
+                command: '--update',
+                data: {
+                    filter: updateFilter,
+                    update: {
+                        password: hashedPassword,
+                        resetPasswordToken: null,
+                        resetPasswordExpires: null,
+                        failedLoginAttempts: 0,
+                        lockedUntil: null,
+                        updatedAt: new Date().toISOString()
+                    }
+                }
+            });
+
+            if (!updateResult.success) {
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to reset password',
+                    errorCode: 'UPDATE_FAILED'
+                });
+            }
+
+            try {
+                await emailService.sendPasswordSetSuccessfullyAdminEmail(admin.email, {
+                    admin_email: admin.email,
+                    admin_name: (admin.name || admin.displayName || '').trim() || admin.email,
+                    login_url: `${getAdminAppBaseUrl()}/login`,
+                    year: new Date().getFullYear()
+                });
+            } catch (emailErr) {
+                console.error('❌ [RESET PASSWORD] Success email send error:', emailErr.message);
+            }
+            await logAdminActivity({
+                adminId, adminEmail: admin.email, action: 'password_reset',
+                details: { resetViaToken: true },
+                ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+                userAgent: req.get('user-agent') || 'unknown', success: true
+            });
+            return res.json({
+                success: true,
+                message: 'Password reset successful. You can now login with your new password.'
             });
         }
 
+        // --- Flow 2: Legacy username + newPassword (optional resetSecret) ---
+        if (!username || !newPassword) {
+            return res.status(400).json({
+                success: false,
+                message: 'Either token (from reset link) or username and newPassword are required',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
         if (newPassword.length < 6) {
             return res.status(400).json({
                 success: false,
@@ -849,8 +967,6 @@ router.post('/reset-password', async (req, res) => {
                 errorCode: 'VALIDATION_ERROR'
             });
         }
-
-        // Check reset secret if set in env (optional security)
         const requiredSecret = process.env.ADMIN_RESET_SECRET;
         if (requiredSecret && resetSecret !== requiredSecret) {
             return res.status(403).json({
@@ -861,15 +977,12 @@ router.post('/reset-password', async (req, res) => {
         }
 
         const normalizedUsername = String(username).toLowerCase().trim();
-
-        // Find admin
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--read',
             data: { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] }
         });
-
         const adminData = adminResult && adminResult.success ? adminResult.data : null;
         const admin = Array.isArray(adminData) ? adminData[0] : adminData;
 
@@ -881,10 +994,7 @@ router.post('/reset-password', async (req, res) => {
             });
         }
 
-        // Hash new password
         const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-        // Update password
         const filter = (admin._id && ObjectId.isValid(admin._id))
             ? { _id: new ObjectId(admin._id) }
             : { $or: [{ username: normalizedUsername }, { email: normalizedUsername }] };
@@ -904,11 +1014,7 @@ router.post('/reset-password', async (req, res) => {
         });
 
         if (updateResult.success) {
-            console.log(`✅ [ADMIN AUTH RESET] Password reset for ${normalizedUsername}`);
-            res.json({
-                success: true,
-                message: 'Password reset successfully'
-            });
+            res.json({ success: true, message: 'Password reset successfully' });
         } else {
             res.status(500).json({
                 success: false,
@@ -1769,192 +1875,6 @@ router.post('/forgot-password', async (req, res) => {
         res.json({
             success: true,
             message: 'If an account exists with this email, a password reset link has been sent.'
-        });
-    }
-});
-
-/**
- * POST /api/admin/auth/reset-password
- * Reset password using reset token
- * Public endpoint (no authentication required)
- * Request Body: { token: string, newPassword: string, confirmPassword: string }
- * Returns: { success: true, message: "Password reset successful" }
- */
-router.post('/reset-password', async (req, res) => {
-    try {
-        const { token, newPassword, confirmPassword } = req.body;
-
-        console.log('🔐 [RESET PASSWORD] Request received:', {
-            tokenLength: token ? token.length : 0,
-            hasPassword: !!newPassword,
-            timestamp: new Date().toISOString()
-        });
-
-        // Validate required fields
-        if (!token || !token.trim()) {
-            return res.status(400).json({
-                success: false,
-                message: 'Reset token is required',
-                errorCode: 'VALIDATION_ERROR'
-            });
-        }
-
-        if (!newPassword || !newPassword.trim()) {
-            return res.status(400).json({
-                success: false,
-                message: 'New password is required',
-                errorCode: 'VALIDATION_ERROR'
-            });
-        }
-
-        if (!confirmPassword || !confirmPassword.trim()) {
-            return res.status(400).json({
-                success: false,
-                message: 'Password confirmation is required',
-                errorCode: 'VALIDATION_ERROR'
-            });
-        }
-
-        // Validate password match
-        if (newPassword !== confirmPassword) {
-            return res.status(400).json({
-                success: false,
-                message: 'Passwords do not match',
-                errorCode: 'PASSWORD_MISMATCH'
-            });
-        }
-
-        // Enhanced password validation (min 12 characters with complexity)
-        const passwordValidation = validatePassword(newPassword);
-        if (!passwordValidation.valid) {
-            return res.status(400).json({
-                success: false,
-                message: passwordValidation.error,
-                errorCode: 'PASSWORD_VALIDATION_FAILED'
-            });
-        }
-
-        // Find admin by reset token
-        const adminResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--read',
-            data: { resetPasswordToken: token.trim() }
-        });
-
-        const adminData = adminResult && adminResult.success ? adminResult.data : null;
-        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
-
-        if (!adminResult.success || !admin) {
-            console.log('❌ [RESET PASSWORD] Admin not found for token');
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid or expired reset token',
-                errorCode: 'INVALID_RESET_TOKEN'
-            });
-        }
-
-        // Check if token is expired
-        if (!admin.resetPasswordExpires) {
-            console.log('❌ [RESET PASSWORD] No expiry date found');
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid or expired reset token',
-                errorCode: 'INVALID_RESET_TOKEN'
-            });
-        }
-
-        const expiresAt = new Date(admin.resetPasswordExpires);
-        const now = new Date();
-
-        if (expiresAt <= now) {
-            console.log('❌ [RESET PASSWORD] Token expired:', {
-                expiresAt: expiresAt.toISOString(),
-                now: now.toISOString()
-            });
-            return res.status(400).json({
-                success: false,
-                message: 'Reset token has expired. Please request a new password reset.',
-                errorCode: 'RESET_TOKEN_EXPIRED'
-            });
-        }
-
-        // Hash new password
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-        // Update admin: set new password, clear reset token
-        const adminId = admin._id || admin.id;
-        const updateFilter = ObjectId.isValid(adminId)
-            ? { _id: new ObjectId(adminId) }
-            : { resetPasswordToken: token.trim() };
-
-        const updateResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--update',
-            data: {
-                filter: updateFilter,
-                update: {
-                    password: hashedPassword,
-                    resetPasswordToken: null,
-                    resetPasswordExpires: null,
-                    failedLoginAttempts: 0, // Reset failed attempts
-                    lockedUntil: null, // Clear any lock
-                    updatedAt: new Date().toISOString()
-                }
-            }
-        });
-
-        if (!updateResult.success) {
-            console.error('❌ [RESET PASSWORD] Failed to update admin:', updateResult);
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to reset password',
-                errorCode: 'UPDATE_FAILED'
-            });
-        }
-
-        // Send "Password Set Successfully (admin)" email via SendGrid
-        const loginUrl = `${getAdminAppBaseUrl()}/login`;
-        const adminName = (admin.name || admin.displayName || '').trim() || admin.email;
-        const year = new Date().getFullYear();
-        try {
-            await emailService.sendPasswordSetSuccessfullyAdminEmail(admin.email, {
-                admin_email: admin.email,
-                admin_name: adminName,
-                login_url: loginUrl,
-                year
-            });
-        } catch (emailErr) {
-            console.error('❌ [RESET PASSWORD] Success email send error:', emailErr.message);
-        }
-
-        // Log password reset
-        await logAdminActivity({
-            adminId: adminId,
-            adminEmail: admin.email,
-            action: 'password_reset',
-            details: { resetViaToken: true },
-            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
-            userAgent: req.get('user-agent') || 'unknown',
-            success: true
-        });
-
-        console.log('✅ [RESET PASSWORD] Password reset successfully:', {
-            email: admin.email
-        });
-
-        res.json({
-            success: true,
-            message: 'Password reset successful. You can now login with your new password.'
-        });
-
-    } catch (error) {
-        console.error('❌ [RESET PASSWORD] Error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error during password reset',
-            errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
 });
