@@ -865,19 +865,29 @@ router.post('/update-status', async (req, res) => {
                 // Don't fail the status update if email fails
             }
 
+            // Admin-compatible response: success, message, and data with orderId/status so admin can show toast and refetch
             res.json({
                 success: true,
                 message: 'Order status updated',
-                data: updateResult.data
+                data: {
+                    message: 'Order status updated',
+                    orderId,
+                    status: newStatus,
+                    ...updateResult.data
+                }
             });
         } else {
-            res.status(400).json(updateResult);
+            res.status(400).json({
+                success: false,
+                error: updateResult.error || 'Update failed',
+                ...updateResult
+            });
         }
     } catch (error) {
         console.error('Order status update error:', error);
         res.status(500).json({
             success: false,
-            error: 'Failed to update order status'
+            error: error.message || 'Failed to update order status'
         });
     }
 });
