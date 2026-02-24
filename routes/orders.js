@@ -4,6 +4,7 @@ const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 const currencyService = require('../services/currencyService');
 const {
+    CANONICAL_STATUSES,
     validateTransition,
     getStatusText,
     createStatusHistoryEntry,
@@ -671,13 +672,14 @@ router.post('/create', async (req, res) => {
 /**
  * POST /api/orders/update-status
  * Admin endpoint: single source of truth for order status.
- * Body: { orderId, status, changedBy?, trackingNumber?, shippingProvider?, estimatedDelivery? }
+ * Body: { orderId, status, changedBy?, allowAnyTransition?, trackingNumber?, shippingProvider?, estimatedDelivery? }
  * Valid statuses: pending | processing | packed | shipped | in_transit | out_for_delivery | delivered | cancelled
- * Valid transitions: forward along 7 steps or to cancelled. Rejects invalid transitions with INVALID_STATUS_TRANSITION.
+ * When allowAnyTransition !== true: valid transitions are forward along 7 steps or to cancelled (INVALID_STATUS_TRANSITION otherwise).
+ * When allowAnyTransition === true: any transition is allowed; only status value and orderId are validated.
  */
 router.post('/update-status', async (req, res) => {
     try {
-        const { orderId, status, shippingProvider, trackingNumber, trackingUrl, estimatedDelivery, changedBy } = req.body;
+        const { orderId, status, shippingProvider, trackingNumber, trackingUrl, estimatedDelivery, changedBy, allowAnyTransition } = req.body;
         
         if (!orderId || !status) {
             return res.status(400).json({
@@ -707,25 +709,34 @@ router.post('/update-status', async (req, res) => {
         const currentStatus = order.status || 'pending';
         const newStatus = String(status).toLowerCase().trim();
         
-        // Validate status transition
-        const validation = validateTransition(currentStatus, newStatus);
-        if (!validation.valid) {
+        // Always validate that requested status is canonical
+        if (!CANONICAL_STATUSES.includes(newStatus)) {
             return res.status(400).json({
                 success: false,
-                error: validation.error,
-                errorCode: 'INVALID_STATUS_TRANSITION',
-                currentStatus,
-                requestedStatus: newStatus
+                error: `Invalid status: "${newStatus}". Must be one of: ${CANONICAL_STATUSES.join(', ')}`,
+                errorCode: 'INVALID_STATUS'
             });
         }
         
-        // Check if order is in final state
-        if (isFinalState(currentStatus) && currentStatus !== newStatus) {
-            return res.status(400).json({
-                success: false,
-                error: `Cannot update order status. Order is in final state: ${currentStatus}`,
-                errorCode: 'FINAL_STATE_REACHED'
-            });
+        // When allowAnyTransition is not true, enforce allowed transitions and final-state rules
+        if (!allowAnyTransition) {
+            const validation = validateTransition(currentStatus, newStatus);
+            if (!validation.valid) {
+                return res.status(400).json({
+                    success: false,
+                    error: validation.error,
+                    errorCode: 'INVALID_STATUS_TRANSITION',
+                    currentStatus,
+                    requestedStatus: newStatus
+                });
+            }
+            if (isFinalState(currentStatus) && currentStatus !== newStatus) {
+                return res.status(400).json({
+                    success: false,
+                    error: `Cannot update order status. Order is in final state: ${currentStatus}`,
+                    errorCode: 'FINAL_STATE_REACHED'
+                });
+            }
         }
         
         // Create status history entry
