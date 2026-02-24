@@ -118,23 +118,48 @@ router.get('/check-newsletter-subscribers', authenticateAdmin, async (req, res) 
     }
 });
 
+/** Normalize admin id to string for API responses */
+function adminIdString(admin) {
+    if (!admin) return null;
+    const raw = admin._id || admin.id;
+    return raw && typeof raw.toString === 'function' ? raw.toString() : String(raw);
+}
+
+/** Build profile payload for GET /me and PATCH /me responses */
+function toProfileData(admin) {
+    if (!admin) return null;
+    return {
+        id: adminIdString(admin),
+        name: admin.name || admin.username || admin.email,
+        email: admin.email,
+        role: admin.role || 'admin',
+        status: admin.status || 'active',
+        avatar: admin.avatar || null,
+        timezone: admin.timezone || null,
+        notificationPreference: admin.notificationPreference || null,
+        theme: admin.theme || null
+    };
+}
+
+/** Resolve admin filter by req.admin.id */
+function adminFilter(req) {
+    const adminId = req.admin.id;
+    return ObjectId.isValid(adminId) ? { _id: new ObjectId(adminId) } : { _id: adminId };
+}
+
 /**
  * GET /api/admin/me
  * Get current admin profile from JWT token
  * Authentication: Requires JWT token in Authorization header
- * Returns: { success: true, data: { id, name, email, role, status } }
+ * Returns: { success: true, data: { id, name, email, role, status, avatar?, timezone?, notificationPreference?, theme? } }
  */
 router.get('/me', authenticateAdmin, async (req, res) => {
     try {
-        // Admin info is already attached by authenticateAdmin middleware
-        const adminId = req.admin.id;
-
-        // Fetch full admin data from database
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
             command: '--read',
-            data: ObjectId.isValid(adminId) ? { _id: new ObjectId(adminId) } : { _id: adminId }
+            data: adminFilter(req)
         });
 
         const adminData = adminResult && adminResult.success ? adminResult.data : null;
@@ -148,20 +173,208 @@ router.get('/me', authenticateAdmin, async (req, res) => {
             });
         }
 
-        // Return admin data
         res.json({
             success: true,
+            data: toProfileData(admin)
+        });
+    } catch (error) {
+        console.error('❌ [ADMIN ME] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            errorCode: 'INTERNAL_SERVER_ERROR'
+        });
+    }
+});
+
+/** Allowed keys for PATCH /api/admin/me (profile update) */
+const PROFILE_UPDATE_KEYS = ['name', 'avatar', 'timezone', 'notificationPreference', 'theme'];
+
+/**
+ * PATCH /api/admin/me
+ * Update current admin profile (name, avatar URL, and optional settings)
+ * Body: { name?, avatar?, timezone?, notificationPreference?, theme? }
+ * Returns: { success: true, data: admin } (same shape as GET /me)
+ */
+router.patch('/me', authenticateAdmin, async (req, res) => {
+    try {
+        const body = req.body || {};
+        const update = {};
+        for (const key of PROFILE_UPDATE_KEYS) {
+            if (body[key] !== undefined) {
+                update[key] = body[key] === null || body[key] === '' ? null : String(body[key]).trim();
+            }
+        }
+        if (Object.keys(update).length === 0) {
+            const adminResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'admins',
+                command: '--read',
+                data: adminFilter(req)
+            });
+            const adminData = adminResult && adminResult.success ? adminResult.data : null;
+            const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+            if (!admin) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Admin account not found',
+                    errorCode: 'ADMIN_NOT_FOUND'
+                });
+            }
+            return res.json({ success: true, data: toProfileData(admin) });
+        }
+
+        update.updatedAt = new Date().toISOString();
+
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--update',
             data: {
-                id: admin._id || admin.id,
-                name: admin.name || admin.email,
-                email: admin.email,
-                role: admin.role || 'admin',
-                status: admin.status || 'active'
+                filter: adminFilter(req),
+                update
             }
         });
 
+        if (!updateResult.success) {
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to update profile',
+                errorCode: 'UPDATE_FAILED'
+            });
+        }
+
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: adminFilter(req)
+        });
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+        if (!admin) {
+            return res.status(500).json({
+                success: false,
+                message: 'Profile updated but could not load updated data',
+                errorCode: 'INTERNAL_SERVER_ERROR'
+            });
+        }
+
+        res.json({
+            success: true,
+            data: toProfileData(admin)
+        });
     } catch (error) {
-        console.error('❌ [ADMIN ME] Error:', error);
+        console.error('❌ [ADMIN PATCH ME] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            errorCode: 'INTERNAL_SERVER_ERROR'
+        });
+    }
+});
+
+const ACTIVITY_LOG_MAX = 50;
+
+/**
+ * GET /api/admin/me/activity
+ * Return last N activity entries (path, label, timestamp) for the logged-in admin
+ */
+router.get('/me/activity', authenticateAdmin, async (req, res) => {
+    try {
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: adminFilter(req)
+        });
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+        if (!admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin account not found',
+                errorCode: 'ADMIN_NOT_FOUND'
+            });
+        }
+        const log = Array.isArray(admin.activityLog) ? admin.activityLog : [];
+        const entries = log.slice(0, ACTIVITY_LOG_MAX).map((e) => ({
+            path: e.path,
+            label: e.label,
+            timestamp: e.timestamp
+        }));
+        res.json({ success: true, data: entries });
+    } catch (error) {
+        console.error('❌ [ADMIN ME ACTIVITY] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            errorCode: 'INTERNAL_SERVER_ERROR'
+        });
+    }
+});
+
+/**
+ * POST /api/admin/me/activity
+ * Append one activity entry (path, label) with current timestamp
+ */
+router.post('/me/activity', authenticateAdmin, async (req, res) => {
+    try {
+        const { path, label } = req.body || {};
+        const pathStr = path != null ? String(path).trim() : '';
+        const labelStr = label != null ? String(label).trim() : '';
+
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: adminFilter(req)
+        });
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+        if (!admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin account not found',
+                errorCode: 'ADMIN_NOT_FOUND'
+            });
+        }
+
+        const existingLog = Array.isArray(admin.activityLog) ? admin.activityLog : [];
+        const newEntry = {
+            path: pathStr,
+            label: labelStr,
+            timestamp: new Date().toISOString()
+        };
+        const newLog = [newEntry, ...existingLog].slice(0, ACTIVITY_LOG_MAX);
+
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--update',
+            data: {
+                filter: adminFilter(req),
+                update: {
+                    activityLog: newLog,
+                    updatedAt: new Date().toISOString()
+                }
+            }
+        });
+
+        if (!updateResult.success) {
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to record activity',
+                errorCode: 'UPDATE_FAILED'
+            });
+        }
+
+        res.json({
+            success: true,
+            data: newEntry
+        });
+    } catch (error) {
+        console.error('❌ [ADMIN ME ACTIVITY POST] Error:', error);
         res.status(500).json({
             success: false,
             message: 'Internal server error',
