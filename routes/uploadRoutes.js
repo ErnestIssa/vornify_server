@@ -15,6 +15,30 @@ const authenticateAdmin = require('../middleware/authenticateAdmin');
 
 const router = express.Router();
 
+/** Return true if Cloudinary env is set and non-empty */
+function isCloudinaryConfigured() {
+  return !!(
+    process.env.CLOUDINARY_CLOUD_NAME &&
+    process.env.CLOUDINARY_API_KEY &&
+    process.env.CLOUDINARY_API_SECRET
+  );
+}
+
+/** Middleware: return 503 if Cloudinary is not configured (for upload routes that need it) */
+function requireCloudinaryConfig(req, res, next) {
+  if (isCloudinaryConfigured()) return next();
+  console.warn('[UPLOAD] Cloudinary not configured: missing CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, or CLOUDINARY_API_SECRET');
+  return res.status(503).json({
+    success: false,
+    message: 'Upload service is not configured. Please try again later.',
+    error: 'Upload service unavailable',
+    errorCode: 'SERVICE_UNAVAILABLE',
+    status: 503,
+    files: [],
+    count: 0,
+  });
+}
+
 // Multer error handler middleware
 const handleMulterError = (err, req, res, next) => {
   // Determine if this is a support route
@@ -87,8 +111,8 @@ router.post(
 
 // POST /api/uploads/review
 // Upload review images/videos (single or multiple files)
-router.post('/review', uploadReview.single('file'), handleMulterError, uploadReviewController);
-router.post('/review/multiple', uploadReview.array('files', 10), handleMulterError, uploadReviewController);
+router.post('/review', requireCloudinaryConfig, uploadReview.single('file'), handleMulterError, uploadReviewController);
+router.post('/review/multiple', requireCloudinaryConfig, uploadReview.array('files', 10), handleMulterError, uploadReviewController);
 
 // POST /api/uploads/message
 // Upload message attachments (single or multiple files)

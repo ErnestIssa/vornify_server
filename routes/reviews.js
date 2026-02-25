@@ -567,23 +567,25 @@ router.post('/', async (req, res) => {
         }
 
         // 3. Purchase verification (backend-only authority)
+        // When productId is "general", skip purchase verification and set verifiedPurchase = false (general feedback).
         let orderInfo = null;
-        if (reviewData.orderId) {
-            orderInfo = await verifyPurchaseByOrder(reviewData.orderId, reviewData.customerEmail, reviewData.productId);
-        } else {
-            orderInfo = await verifyPurchase(reviewData.customerEmail, reviewData.productId);
+        let verifiedPurchase = false;
+        if (reviewData.productId !== 'general') {
+            if (reviewData.orderId) {
+                orderInfo = await verifyPurchaseByOrder(reviewData.orderId, reviewData.customerEmail, reviewData.productId);
+            } else {
+                orderInfo = await verifyPurchase(reviewData.customerEmail, reviewData.productId);
+            }
+            if (!orderInfo) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'You must have purchased this product to submit a review. We could not verify a purchase for this email and product.',
+                    error: 'Purchase not verified',
+                    code: 'PURCHASE_NOT_VERIFIED'
+                });
+            }
+            verifiedPurchase = true;
         }
-        if (!orderInfo) {
-            return res.status(403).json({
-                success: false,
-                message: 'You must have purchased this product to submit a review. We could not verify a purchase for this email and product.',
-                error: 'Purchase not verified',
-                code: 'PURCHASE_NOT_VERIFIED'
-            });
-        }
-
-        // Backend sets verifiedPurchase from verification result only (never from body)
-        const verifiedPurchase = true;
 
         const reviewId = await generateUniqueReviewId();
         const now = new Date().toISOString();
