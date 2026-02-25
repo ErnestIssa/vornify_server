@@ -39,6 +39,34 @@ function requireCloudinaryConfig(req, res, next) {
   });
 }
 
+/** Log review upload request after multer (only runs when multer succeeded). Expects field "files" for multiple. */
+function logReviewUploadAfterMulter(req, res, next) {
+  console.log('[REVIEW UPLOAD] After multer:', {
+    path: req.path,
+    hasFiles: !!req.files,
+    filesLength: req.files ? (Array.isArray(req.files) ? req.files.length : 'not-array') : 0,
+    hasFile: !!req.file,
+    bodyKeys: req.body ? Object.keys(req.body) : [],
+    body: req.body ? JSON.stringify(req.body) : '{}',
+  });
+  if (req.files && Array.isArray(req.files) && req.files.length > 0) {
+    console.log('[REVIEW UPLOAD] First file keys:', Object.keys(req.files[0] || {}));
+  }
+  next();
+}
+
+/** Log when request first hits review upload (before multer). */
+function logReviewUploadIncoming(req, res, next) {
+  console.log('[REVIEW UPLOAD] Incoming request:', {
+    path: req.path,
+    method: req.method,
+    contentType: req.get('Content-Type'),
+    contentLength: req.get('Content-Length'),
+    cloudinaryConfigured: isCloudinaryConfigured(),
+  });
+  next();
+}
+
 // Multer error handler middleware
 const handleMulterError = (err, req, res, next) => {
   // Determine if this is a support route
@@ -65,12 +93,33 @@ const handleMulterError = (err, req, res, next) => {
     return res.status(400).json(response);
   }
   if (err) {
-    console.error('❌ [UPLOAD] Middleware error:', err);
-    console.error('❌ [UPLOAD] Error details:', {
-      message: err.message,
-      stack: err.stack,
-      code: err.code
-    });
+    // Full error logging for debugging 500 on review upload
+    console.error('❌ [UPLOAD] Middleware error (exact error):', err);
+    console.error('❌ [UPLOAD] Error message:', err && err.message);
+    console.error('❌ [UPLOAD] Error name:', err && err.name);
+    console.error('❌ [UPLOAD] Error code:', err && err.code);
+    console.error('❌ [UPLOAD] Full stack trace:', err && err.stack);
+    console.error('❌ [UPLOAD] Request path:', req && req.path);
+    console.error('❌ [UPLOAD] Request method:', req && req.method);
+    console.error('❌ [UPLOAD] Content-Type:', req && req.get('Content-Type'));
+    // Cloudinary / multer context
+    if (req && req.body) {
+      console.error('❌ [UPLOAD] req.body (parsed by multer):', JSON.stringify(req.body));
+    }
+    if (req && (req.files || req.file)) {
+      console.error('❌ [UPLOAD] req.files:', req.files);
+      console.error('❌ [UPLOAD] req.file:', req.file);
+    }
+    // Check if this is a review route: backend expects field "files" for /review/multiple, "file" for /review
+    const isReviewRoute = req && (req.path || '').includes('/review');
+    if (isReviewRoute) {
+      console.error('❌ [REVIEW UPLOAD] Backend uses: upload.array("files", 10) for /review/multiple, .single("file") for /review. Frontend must send FormData field "files" (multiple) or "file" (single).');
+      console.error('❌ [REVIEW UPLOAD] Cloudinary configured:', !!(
+        process.env.CLOUDINARY_CLOUD_NAME &&
+        process.env.CLOUDINARY_API_KEY &&
+        process.env.CLOUDINARY_API_SECRET
+      ));
+    }
     // Check if it's a Cloudinary format error
     if (err.message && err.message.includes('format') && err.message.includes('not allowed')) {
       const response = { 
@@ -95,6 +144,12 @@ const handleMulterError = (err, req, res, next) => {
     if (isSupportRoute) {
       response.attachments = [];
     }
+    // Include stack in response for debugging (server logs have it too)
+    if (process.env.NODE_ENV === 'development' && err && err.stack) {
+      response.stack = err.stack;
+      response.errorName = err.name;
+      response.errorCodeDetail = err.code;
+    }
     return res.status(500).json(response);
   }
   next();
@@ -110,9 +165,16 @@ router.post(
 );
 
 // POST /api/uploads/review
-// Upload review images/videos (single or multiple files)
-router.post('/review', requireCloudinaryConfig, uploadReview.single('file'), handleMulterError, uploadReviewController);
-router.post('/review/multiple', requireCloudinaryConfig, uploadReview.array('files', 10), handleMulterError, uploadReviewController);
+// --- Review upload checklist ---
+// 1. Multer field: .array('files', 10) for /review/multiple, .single('file') for /review
+// 2. We use upload.array('files', 10) for multiple and .single('file') for single
+// 3. Frontend must send FormData with key "files" (multiple) or "file" (single)
+// 4. File size limit: 20MB (uploadProductImage.js uploadReview limits)
+// 5. allowed_formats in cloudinaryStorage: jpg, jpeg, png, webp, mp4, mov, webm
+// 6. If req.files undefined: logReviewUploadAfterMulter + controller log req.files/req.file
+// 7. Cloudinary: requireCloudinaryConfig returns 503 if env missing; errors logged in handleMulterError
+router.post('/review', logReviewUploadIncoming, requireCloudinaryConfig, uploadReview.single('file'), logReviewUploadAfterMulter, handleMulterError, uploadReviewController);
+router.post('/review/multiple', logReviewUploadIncoming, requireCloudinaryConfig, uploadReview.array('files', 10), logReviewUploadAfterMulter, handleMulterError, uploadReviewController);
 
 // POST /api/uploads/message
 // Upload message attachments (single or multiple files)

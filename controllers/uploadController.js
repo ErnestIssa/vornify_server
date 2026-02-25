@@ -47,12 +47,29 @@ exports.uploadProductImage = async (req, res) => {
 /**
  * Upload review images/videos
  * Handles single file or multiple files
+ * Route uses: .array('files', 10) for /review/multiple, .single('file') for /review
  */
 exports.uploadReview = async (req, res) => {
   try {
+    // Diagnostic logging: what did multer give us?
+    console.log('[REVIEW UPLOAD] Controller received:', {
+      hasFiles: !!req.files,
+      filesIsArray: Array.isArray(req.files),
+      filesLength: req.files ? (Array.isArray(req.files) ? req.files.length : 'n/a') : 0,
+      hasFile: !!req.file,
+      bodyKeys: req.body ? Object.keys(req.body) : [],
+      body: req.body,
+    });
+    if (req.files && Array.isArray(req.files) && req.files.length > 0) {
+      req.files.forEach((f, i) => {
+        console.log(`[REVIEW UPLOAD] File ${i}:`, { path: !!f.path, filename: !!f.filename, keys: Object.keys(f || {}) });
+      });
+    }
+
     const files = req.files || (req.file ? [req.file] : []);
 
     if (!files.length) {
+      console.warn('[REVIEW UPLOAD] No files: req.files and req.file are both empty. Frontend must send FormData field "files" (multiple) or "file" (single).');
       return res.status(400).json({
         success: false,
         message: 'No file uploaded',
@@ -90,7 +107,12 @@ exports.uploadReview = async (req, res) => {
       count: uploaded.length,
     });
   } catch (error) {
-    console.error('Review upload error:', error);
+    console.error('[REVIEW UPLOAD] Controller error (exact):', error);
+    console.error('[REVIEW UPLOAD] Controller error message:', error && error.message);
+    console.error('[REVIEW UPLOAD] Controller error name:', error && error.name);
+    console.error('[REVIEW UPLOAD] Controller full stack trace:', error && error.stack);
+    console.error('[REVIEW UPLOAD] req.files at error:', req.files);
+    console.error('[REVIEW UPLOAD] req.body at error:', req.body);
     res.status(500).json({
       success: false,
       message: 'Review upload failed',
@@ -99,6 +121,7 @@ exports.uploadReview = async (req, res) => {
       status: 500,
       files: [],
       count: 0,
+      ...(process.env.NODE_ENV === 'development' && error && error.stack ? { stack: error.stack } : {}),
     });
   }
 };

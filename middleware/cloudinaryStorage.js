@@ -46,6 +46,13 @@ const reviewStorage = new CloudinaryStorage({
   cloudinary,
   params: (req, file) => {
     try {
+      console.log('[REVIEW UPLOAD] Cloudinary storage params called:', {
+        mimetype: file.mimetype,
+        originalname: file.originalname,
+        size: file.size,
+        fieldname: file.fieldname,
+        allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
+      });
       req._reviewUploadIndex = (req._reviewUploadIndex || 0) + 1;
       const body = req && req.body || {};
       const id = body.reviewId || body.review_id || Date.now();
@@ -58,7 +65,8 @@ const reviewStorage = new CloudinaryStorage({
         transformation: [{ width: 1200, crop: 'limit' }],
       };
     } catch (e) {
-      console.error('Review storage params error:', e);
+      console.error('[REVIEW UPLOAD] Cloudinary storage params error:', e);
+      console.error('[REVIEW UPLOAD] Params error stack:', e && e.stack);
       return {
         folder: 'peakmode/reviews',
         public_id: `review-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
