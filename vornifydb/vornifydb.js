@@ -736,10 +736,14 @@ class VortexDB {
     // Delete Record
     async deleteRecord(collection, query) {
         try {
-            const result = await collection.deleteOne(query);
-            
+            // Normalize _id so deleteOne matches: MongoDB stores _id as ObjectId, admin/VornifyDB often sends string
+            let normalizedQuery = query;
+            if (query && query._id != null && typeof query._id === 'string' && ObjectId.isValid(query._id)) {
+                normalizedQuery = { ...query, _id: new ObjectId(query._id) };
+            }
+            const result = await collection.deleteOne(normalizedQuery);
             return {
-                success: true,
+                success: result.deletedCount > 0,
                 data: result
             };
         } catch (error) {
