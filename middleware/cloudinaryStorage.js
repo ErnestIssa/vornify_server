@@ -45,16 +45,27 @@ const productImageStorage = new CloudinaryStorage({
 const reviewStorage = new CloudinaryStorage({
   cloudinary,
   params: (req, file) => {
-    req._reviewUploadIndex = (req._reviewUploadIndex || 0) + 1;
-    const id = req.body?.reviewId || req.body?.review_id || Date.now();
-    const index = req._reviewUploadIndex;
-    const public_id = `review-${id}-${index}`;
-    return {
-      folder: 'peakmode/reviews',
-      public_id,
-      allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
-      transformation: [{ width: 1200, crop: 'limit' }],
-    };
+    try {
+      req._reviewUploadIndex = (req._reviewUploadIndex || 0) + 1;
+      const body = req && req.body || {};
+      const id = body.reviewId || body.review_id || Date.now();
+      const index = req._reviewUploadIndex;
+      const public_id = `review-${id}-${index}`;
+      return {
+        folder: 'peakmode/reviews',
+        public_id,
+        allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
+        transformation: [{ width: 1200, crop: 'limit' }],
+      };
+    } catch (e) {
+      console.error('Review storage params error:', e);
+      return {
+        folder: 'peakmode/reviews',
+        public_id: `review-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
+        transformation: [{ width: 1200, crop: 'limit' }],
+      };
+    }
   },
 });
 

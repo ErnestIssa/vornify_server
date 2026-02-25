@@ -60,10 +60,13 @@ const handleMulterError = (err, req, res, next) => {
       return res.status(400).json(response);
     }
     const response = { 
+      success: false,
       message: 'Upload failed',
       files: [],
       count: 0,
-      error: err.message
+      error: err.message,
+      errorCode: 'INTERNAL_SERVER_ERROR',
+      status: 500
     };
     if (isSupportRoute) {
       response.attachments = [];
@@ -84,8 +87,8 @@ router.post(
 
 // POST /api/uploads/review
 // Upload review images/videos (single or multiple files)
-router.post('/review', uploadReview.single('file'), uploadReviewController);
-router.post('/review/multiple', uploadReview.array('files', 10), uploadReviewController);
+router.post('/review', uploadReview.single('file'), handleMulterError, uploadReviewController);
+router.post('/review/multiple', uploadReview.array('files', 10), handleMulterError, uploadReviewController);
 
 // POST /api/uploads/message
 // Upload message attachments (single or multiple files)

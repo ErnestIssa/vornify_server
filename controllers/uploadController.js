@@ -52,22 +52,54 @@ exports.uploadReview = async (req, res) => {
   try {
     const files = req.files || (req.file ? [req.file] : []);
 
-    if (files.length === 0) {
-      return res.status(400).json({ message: 'No file uploaded' });
+    if (!files.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded',
+        files: [],
+        count: 0,
+      });
     }
 
-    const uploaded = files.map(file => ({
-      url: file.path,
-      public_id: file.filename,
-    }));
+    const uploaded = [];
+    for (const file of files) {
+      const url = file.path || file.secure_url;
+      const public_id = file.filename || file.public_id;
+      if (!url || !public_id) {
+        console.error('Review upload: file missing path/filename', {
+          hasPath: !!file.path,
+          hasFilename: !!file.filename,
+          keys: Object.keys(file || {}),
+        });
+        return res.status(500).json({
+          success: false,
+          message: 'Upload produced invalid file data. Please try again.',
+          error: 'Invalid file data from upload',
+          errorCode: 'INTERNAL_SERVER_ERROR',
+          status: 500,
+          files: [],
+          count: 0,
+        });
+      }
+      uploaded.push({ url, public_id });
+    }
 
     return res.status(201).json({
+      success: true,
       files: uploaded,
       count: uploaded.length,
     });
   } catch (error) {
     console.error('Review upload error:', error);
-    res.status(500).json({ message: 'Review upload failed' });
+    res.status(500).json({
+      success: false,
+      message: 'Review upload failed',
+      error: error.message || 'Internal server error',
+      errorCode: 'INTERNAL_SERVER_ERROR',
+      status: 500,
+      files: [],
+      count: 0,
+    });
   }
 };
 
