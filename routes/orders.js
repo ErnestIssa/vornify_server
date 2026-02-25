@@ -20,6 +20,14 @@ const {
 
 const db = getDBInstance();
 
+/** Filter to exclude soft-deleted orders from list queries */
+const NOT_DELETED_FILTER = { $or: [ { deletedAt: { $exists: false } }, { deletedAt: null } ] };
+
+/** True if order has been soft-deleted */
+function isOrderDeleted(order) {
+    return !!(order && (order.deletedAt != null || order.deleted === true));
+}
+
 // Helper function to create or update customer record
 async function createOrUpdateCustomer(order) {
     try {
@@ -706,6 +714,13 @@ router.post('/update-status', async (req, res) => {
         }
         
         const order = findResult.data;
+        if (isOrderDeleted(order)) {
+            return res.status(404).json({
+                success: false,
+                error: 'Order not found',
+                errorCode: 'ORDER_NOT_FOUND'
+            });
+        }
         const currentStatus = order.status || 'pending';
         const newStatus = String(status).toLowerCase().trim();
         
@@ -920,14 +935,19 @@ router.post('/update-status', async (req, res) => {
  * GET /api/orders/track
  * Public endpoint to track order by orderId and email
  * No authentication required - email acts as verification
- * 
+ *
  * Query Parameters:
- * - orderId (REQUIRED) - Order ID to track
+ * - orderId (REQUIRED) - Order ID to track (or use trackingCode)
  * - email (REQUIRED) - Customer email for verification
- * 
- * Returns normalized order data matching frontend OrderStatus interface.
- * Response includes: status (API value), statusText (display label), statusTimestamps: { [status]: "ISO date", ... }
- * 
+ *
+ * Success (200): Normal order data (status, statusTimestamps, items, etc.) for active orders.
+ *
+ * Order unavailable – cancelled (200): Body has orderUnavailable: true, reason: 'cancelled',
+ * orderId, message, supportEmail. Client should show "Order cancelled" page with support CTA.
+ *
+ * Order not found / deleted (404): Body has error, message, reason: 'not_found', supportEmail.
+ * Client should show "Order not available" page with support CTA.
+ *
  * IMPORTANT: This route must be defined BEFORE /:orderId to avoid route conflicts
  */
 router.get('/track', async (req, res) => {
@@ -1002,7 +1022,9 @@ router.get('/track', async (req, res) => {
             console.log('❌ [ORDER TRACK] Order not found:', identifier);
             return res.status(404).json({
                 error: 'Order not found',
-                message: 'Order not found'
+                message: 'This order is not available for tracking. If you have not been notified, please contact support.',
+                reason: 'not_found',
+                supportEmail: 'support@peakmode.se'
             });
         }
 
@@ -1012,7 +1034,9 @@ router.get('/track', async (req, res) => {
             console.log('❌ [ORDER TRACK] Order not found:', identifier);
             return res.status(404).json({
                 error: 'Order not found',
-                message: 'Order not found'
+                message: 'This order is not available for tracking. If you have not been notified, please contact support.',
+                reason: 'not_found',
+                supportEmail: 'support@peakmode.se'
             });
         }
 
@@ -1024,12 +1048,15 @@ router.get('/track', async (req, res) => {
             hasCustomerEmail: !!order.customerEmail
         });
 
-        // Check if order is cancelled - exclude from tracking
+        // Order cancelled: return structured response so client can show dedicated "cancelled" page with support info
         if (isCancelled(order.status)) {
             console.log('❌ [ORDER TRACK] Order is cancelled:', identifier);
-            return res.status(404).json({
-                error: 'Order not found',
-                message: 'Order not found'
+            return res.status(200).json({
+                orderUnavailable: true,
+                reason: 'cancelled',
+                orderId: order.orderId || identifier,
+                message: 'This order has been cancelled.',
+                supportEmail: 'support@peakmode.se'
             });
         }
 
@@ -1053,7 +1080,20 @@ router.get('/track', async (req, res) => {
             });
             return res.status(403).json({
                 error: 'Email mismatch',
-                message: 'Email does not match this order'
+                message: 'Email does not match this order',
+                supportEmail: 'support@peakmode.se'
+            });
+        }
+
+        // Order soft-deleted: return structured response so client can show dedicated "deleted" view with support info
+        if (isOrderDeleted(order)) {
+            console.log('❌ [ORDER TRACK] Order is deleted:', identifier);
+            return res.status(200).json({
+                orderUnavailable: true,
+                reason: 'deleted',
+                orderId: order.orderId || identifier,
+                message: 'This order is no longer available for tracking.',
+                supportEmail: 'support@peakmode.se'
             });
         }
 
@@ -1217,13 +1257,13 @@ router.get('/all', async (req, res) => {
     try {
         const { email } = req.query;
         
-        // If email query parameter is provided, filter by email
+        // If email query parameter is provided, filter by email (exclude soft-deleted)
         if (email) {
             const result = await db.executeOperation({
                 database_name: 'peakmode',
                 collection_name: 'orders',
                 command: '--read',
-                data: { 'customer.email': email }
+                data: { $and: [ { 'customer.email': email }, NOT_DELETED_FILTER ] }
             });
             
             if (result.success) {
@@ -1261,12 +1301,12 @@ router.get('/all', async (req, res) => {
             }
         }
         
-        // Get all orders
+        // Get all orders (exclude soft-deleted)
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
             command: '--read',
-            data: {}
+            data: NOT_DELETED_FILTER
         });
         
         res.json(result);
@@ -1279,7 +1319,7 @@ router.get('/all', async (req, res) => {
     }
 });
 
-// Get orders by customer email (path parameter - for backward compatibility)
+// Get orders by customer email (path parameter - for backward compatibility; excludes soft-deleted)
 router.get('/customer/:email', async (req, res) => {
     try {
         const { email } = req.params;
@@ -1288,7 +1328,7 @@ router.get('/customer/:email', async (req, res) => {
             database_name: 'peakmode',
             collection_name: 'orders',
             command: '--read',
-            data: { 'customer.email': email }
+            data: { $and: [ { 'customer.email': email }, NOT_DELETED_FILTER ] }
         });
         
         res.json(result);
@@ -1301,13 +1341,12 @@ router.get('/customer/:email', async (req, res) => {
     }
 });
 
-// PUT /api/orders/:orderId - Update order (admin)
+// PUT /api/orders/:orderId - Update order (admin); 404 if order is soft-deleted
 router.put('/:orderId', async (req, res) => {
     try {
         const { orderId } = req.params;
         const updateData = req.body;
         
-        // Find the order first
         const findResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
@@ -1321,8 +1360,13 @@ router.put('/:orderId', async (req, res) => {
                 error: 'Order not found'
             });
         }
-        
-        const order = findResult.data;
+        const order = Array.isArray(findResult.data) ? findResult.data[0] : findResult.data;
+        if (!order || isOrderDeleted(order)) {
+            return res.status(404).json({
+                success: false,
+                error: 'Order not found'
+            });
+        }
         
         // Prepare update data with timeline if status changed
         const finalUpdateData = {
@@ -1370,7 +1414,7 @@ router.put('/:orderId', async (req, res) => {
     }
 });
 
-// POST /api/orders/:orderId/status - Update order status with email trigger
+// POST /api/orders/:orderId/status - Update order status with email trigger; 404 if order is soft-deleted
 router.post('/:orderId/status', async (req, res) => {
     try {
         const { orderId } = req.params;
@@ -1384,7 +1428,6 @@ router.post('/:orderId/status', async (req, res) => {
             });
         }
         
-        // Find the order first
         const findResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
@@ -1399,8 +1442,14 @@ router.post('/:orderId/status', async (req, res) => {
                 errorCode: 'ORDER_NOT_FOUND'
             });
         }
-        
-        const order = findResult.data;
+        const order = Array.isArray(findResult.data) ? findResult.data[0] : findResult.data;
+        if (!order || isOrderDeleted(order)) {
+            return res.status(404).json({
+                success: false,
+                error: 'Order not found',
+                errorCode: 'ORDER_NOT_FOUND'
+            });
+        }
         const currentStatus = order.status || 'pending';
         const newStatus = String(status).toLowerCase().trim();
         
@@ -1559,6 +1608,13 @@ router.post('/:orderId/notify', async (req, res) => {
         }
 
         const order = Array.isArray(findResult.data) ? findResult.data[0] : findResult.data;
+        if (!order || isOrderDeleted(order)) {
+            return res.status(404).json({
+                success: false,
+                error: 'Order not found',
+                emailSent: false
+            });
+        }
 
         // Get customer email
         const customerEmail = order.customer?.email || order.customerEmail || order.email;
@@ -1624,7 +1680,7 @@ router.post('/:orderId/notify', async (req, res) => {
     }
 });
 
-// GET /api/orders/:orderId - Get single order by ID (admin)
+// GET /api/orders/:orderId - Get single order by ID (admin); 404 if order is soft-deleted
 router.get('/:orderId', async (req, res) => {
     try {
         const { orderId } = req.params;
@@ -1636,17 +1692,23 @@ router.get('/:orderId', async (req, res) => {
             data: { orderId }
         });
         
-        if (result.success && result.data) {
-            res.json({
-                success: true,
-                data: result.data
-            });
-        } else {
-            res.status(404).json({
+        if (!result.success || !result.data) {
+            return res.status(404).json({
                 success: false,
                 error: 'Order not found'
             });
         }
+        const order = Array.isArray(result.data) ? result.data[0] : result.data;
+        if (!order || isOrderDeleted(order)) {
+            return res.status(404).json({
+                success: false,
+                error: 'Order not found'
+            });
+        }
+        res.json({
+            success: true,
+            data: order
+        });
     } catch (error) {
         console.error('Get order error:', error);
         res.status(500).json({
@@ -1657,29 +1719,55 @@ router.get('/:orderId', async (req, res) => {
 });
 
 /**
- * DELETE /api/orders/:orderId - Permanently delete order (admin)
- * Order is removed from the database. It will not appear in list orders (GET /all)
- * and GET /api/orders/:orderId will return 404. Idempotent: deleting an already-deleted
- * or non-existent order returns success so the admin UI can treat it as "no longer there".
+ * DELETE /api/orders/:orderId - Soft-delete order (admin)
+ * Sets deletedAt on the order so it no longer appears in list (GET /all) or get-by-id.
+ * Track (GET /track) returns 200 with orderUnavailable reason 'deleted' after email verification.
+ * Idempotent: deleting an already-deleted or non-existent order returns success.
  */
 router.delete('/:orderId', async (req, res) => {
     try {
         const { orderId } = req.params;
         
-        const result = await db.executeOperation({
+        const findResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
-            command: '--delete',
+            command: '--read',
             data: { orderId }
         });
         
-        if (result.success) {
+        if (!findResult.success || !findResult.data) {
+            return res.json({ success: true, message: 'Order deleted successfully' });
+        }
+        
+        const order = Array.isArray(findResult.data) ? findResult.data[0] : findResult.data;
+        if (!order) {
+            return res.json({ success: true, message: 'Order deleted successfully' });
+        }
+        
+        if (isOrderDeleted(order)) {
+            return res.json({ success: true, message: 'Order deleted successfully' });
+        }
+        
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--update',
+            data: {
+                filter: { orderId },
+                update: {
+                    deletedAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                }
+            }
+        });
+        
+        if (updateResult.success) {
             res.json({
                 success: true,
                 message: 'Order deleted successfully'
             });
         } else {
-            res.status(400).json(result);
+            res.status(400).json(updateResult);
         }
     } catch (error) {
         console.error('Delete order error:', error);
