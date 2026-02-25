@@ -151,6 +151,10 @@ const allowedApiOrigins = [
     'http://localhost:5180',
     'http://localhost:5173',
     'http://localhost:3000',
+    'http://localhost:8085',   // Vite dev server (client frontend)
+    'http://127.0.0.1:8085',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:3000',
     process.env.ADMIN_FRONTEND_DEV_URL
 ].filter(Boolean);
 
