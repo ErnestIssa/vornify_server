@@ -76,20 +76,26 @@ async function getProductInfo(productId) {
     }
 }
 
-// Helper function to verify purchase
-async function verifyPurchase(customerId, productId) {
+// Exclude soft-deleted orders (align with orders.js)
+const NOT_DELETED_ORDER = { $or: [ { deletedAt: { $exists: false } }, { deletedAt: null } ] };
+
+// Helper function to verify purchase by email + productId (excludes soft-deleted orders)
+async function verifyPurchase(customerEmail, productId) {
     try {
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
             command: '--read',
-            data: { 
-                'customer.email': customerId,
-                'items.productId': productId,
-                'status': { $in: ['delivered', 'completed'] }
+            data: {
+                $and: [
+                    { 'customer.email': customerEmail },
+                    { 'items.productId': productId },
+                    { status: { $in: ['delivered', 'completed'] } },
+                    NOT_DELETED_ORDER
+                ]
             }
         });
-        
+
         if (result.success && result.data) {
             const orders = Array.isArray(result.data) ? result.data : [result.data];
             if (orders.length > 0) {
@@ -105,6 +111,58 @@ async function verifyPurchase(customerId, productId) {
     } catch (error) {
         console.error('Error verifying purchase:', error);
         return null;
+    }
+}
+
+// Helper: verify purchase when frontend sends orderId (order must exist, belong to email, contain productId)
+async function verifyPurchaseByOrder(orderId, customerEmail, productId) {
+    if (!orderId || !customerEmail || !productId) return null;
+    try {
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
+        });
+        if (!result.success || !result.data) return null;
+        const orders = Array.isArray(result.data) ? result.data : [result.data];
+        const order = orders[0];
+        if (!order) return null;
+        if (order.deletedAt != null || order.deleted === true) return null;
+        const status = (order.status || '').toLowerCase();
+        if (!['delivered', 'completed'].includes(status)) return null;
+        const orderEmail = (order.customer && order.customer.email) || order.customerEmail || '';
+        if (orderEmail.toLowerCase() !== String(customerEmail).toLowerCase()) return null;
+        const items = order.items || [];
+        const hasProduct = items.some(item => (item.productId || item.id) === productId);
+        if (!hasProduct) return null;
+        return {
+            orderId: order.orderId,
+            orderDate: order.createdAt || order.orderDate,
+            purchaseDate: order.createdAt || order.orderDate
+        };
+    } catch (error) {
+        console.error('Error verifying purchase by order:', error);
+        return null;
+    }
+}
+
+// Helper: one review per (customerEmail + productId)
+async function hasDuplicateReview(customerEmail, productId) {
+    try {
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'reviews',
+            command: '--read',
+            data: { customerEmail, productId }
+        });
+        if (!result.success) return false;
+        const list = result.data;
+        const count = Array.isArray(list) ? list.length : (list ? 1 : 0);
+        return count > 0;
+    } catch (error) {
+        console.error('Error checking duplicate review:', error);
+        return false;
     }
 }
 
@@ -398,104 +456,92 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/reviews - Create new review
+// Backend is the single authority: purchase verification, duplicate prevention, verifiedPurchase flag.
+// Frontend must NOT send verifiedPurchase; backend sets it from order verification.
 router.post('/', async (req, res) => {
     try {
         const reviewData = req.body;
-        
-        // DEBUG: Log incoming request data (especially images field)
-        console.log('📥 POST /api/reviews - Received request:', {
-            hasImages: 'images' in reviewData,
-            imagesType: typeof reviewData.images,
-            imagesValue: reviewData.images,
-            imagesIsArray: Array.isArray(reviewData.images),
-            imagesLength: Array.isArray(reviewData.images) ? reviewData.images.length : 'N/A',
-            productId: reviewData.productId,
-            customerEmail: reviewData.customerEmail
-        });
-        
-        // Helper function to validate email format
-        const isValidEmail = (email) => {
-            return email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-        };
-        
-        // Validate required fields (customerId is now optional)
-        // Note: verifiedPurchase can be false (boolean), so we need to check for undefined/null
-        const requiredFields = {
-            'productId': reviewData.productId,
-            'rating': reviewData.rating,
-            'comment': reviewData.comment,
-            'reviewSource': reviewData.reviewSource,
-            'verifiedPurchase': reviewData.verifiedPurchase, // Can be false!
-            'customerName': reviewData.customerName,
-            'customerEmail': reviewData.customerEmail,
-            'createdAt': reviewData.createdAt,
-            'updatedAt': reviewData.updatedAt
-        };
-        
-        // Find missing fields (undefined or null, but NOT false or empty string)
-        const missingFields = Object.keys(requiredFields).filter(field => {
-            const value = requiredFields[field];
-            return value === undefined || value === null;
-        });
-        
-        if (missingFields.length > 0) {
+
+        const isValidEmail = (email) => email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+        // Required: productId, rating, comment, customerEmail. Optional: customerName, images, orderId, reviewSource.
+        // Backend sets: verifiedPurchase, createdAt, updatedAt. Do not accept verifiedPurchase from body.
+        const missing = [];
+        if (reviewData.productId == null) missing.push('productId');
+        if (reviewData.rating == null) missing.push('rating');
+        if (reviewData.comment == null) missing.push('comment');
+        if (reviewData.customerEmail == null) missing.push('customerEmail');
+        if (missing.length > 0) {
             return res.status(400).json({
                 success: false,
-                message: `Missing required fields: ${missingFields.join(', ')}`,
-                error: 'validation_error'
+                message: `Missing required fields: ${missing.join(', ')}`,
+                error: 'validation_error',
+                code: 'VALIDATION_ERROR'
             });
         }
 
-        // Validate rating
         if (reviewData.rating < 1 || reviewData.rating > 5) {
             return res.status(400).json({
                 success: false,
                 message: 'Rating must be between 1 and 5',
-                error: 'invalid_rating'
+                error: 'invalid_rating',
+                code: 'INVALID_RATING'
             });
         }
-
-        // Validate email format
         if (!isValidEmail(reviewData.customerEmail)) {
             return res.status(400).json({
                 success: false,
                 message: 'Invalid email format',
-                error: 'invalid_email'
+                error: 'invalid_email',
+                code: 'INVALID_EMAIL'
             });
         }
 
-        // Validate reviewSource
         const validSources = ['product_page', 'email_request', 'post_purchase', 'manual', 'imported'];
-        if (!validSources.includes(reviewData.reviewSource)) {
-            return res.status(400).json({
+        const reviewSource = (reviewData.reviewSource && validSources.includes(reviewData.reviewSource))
+            ? reviewData.reviewSource
+            : (reviewData.orderId ? 'post_purchase' : 'product_page');
+
+        // 1. Duplicate: one review per (customerEmail + productId)
+        const duplicate = await hasDuplicateReview(reviewData.customerEmail, reviewData.productId);
+        if (duplicate) {
+            return res.status(409).json({
                 success: false,
-                message: `Invalid reviewSource. Must be one of: ${validSources.join(', ')}`,
-                error: 'invalid_review_source'
+                message: 'You have already submitted a review for this product.',
+                error: 'Duplicate review',
+                code: 'DUPLICATE_REVIEW'
             });
         }
 
-        // Generate unique review ID
-        const reviewId = await generateUniqueReviewId();
-        
-        // Get customer info (optional - only if customerId is provided and not undefined)
-        let customerInfo = null;
-        if (reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null') {
-            customerInfo = await getCustomerInfo(reviewData.customerId);
+        // 2. Purchase verification (backend-only authority)
+        let orderInfo = null;
+        if (reviewData.orderId) {
+            orderInfo = await verifyPurchaseByOrder(reviewData.orderId, reviewData.customerEmail, reviewData.productId);
+        } else {
+            orderInfo = await verifyPurchase(reviewData.customerEmail, reviewData.productId);
         }
-        
-        // Get product info (handle 'general' productId)
+        if (!orderInfo) {
+            return res.status(403).json({
+                success: false,
+                message: 'You must have purchased this product to submit a review. We could not verify a purchase for this email and product.',
+                error: 'Purchase not verified',
+                code: 'PURCHASE_NOT_VERIFIED'
+            });
+        }
+
+        // Backend sets verifiedPurchase from verification result only (never from body)
+        const verifiedPurchase = true;
+
+        const reviewId = await generateUniqueReviewId();
+        const now = new Date().toISOString();
+
+        let customerInfo = null;
+        if (reviewData.customerEmail) {
+            customerInfo = await getCustomerInfo(reviewData.customerEmail);
+        }
         let productInfo = null;
         if (reviewData.productId !== 'general') {
             productInfo = await getProductInfo(reviewData.productId);
-        }
-        
-        // Verify purchase if needed (only if customerId is provided)
-        let orderInfo = null;
-        if (reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null') {
-            // Only verify purchase if reviewSource is post_purchase OR verifiedPurchase is explicitly true
-            if (reviewData.reviewSource === 'post_purchase' || reviewData.verifiedPurchase === true) {
-                orderInfo = await verifyPurchase(reviewData.customerId, reviewData.productId);
-            }
         }
 
         // Process images field - always include it, handle null explicitly
@@ -545,29 +591,24 @@ router.post('/', async (req, res) => {
             return processed;
         })();
 
-        // Prepare review data with proper handling of optional fields
+        // Prepare review: verifiedPurchase and reviewSource set by backend only
         const review = {
             id: reviewId,
             productId: reviewData.productId,
             rating: reviewData.rating,
             comment: reviewData.comment,
-            reviewSource: reviewData.reviewSource,
-            verifiedPurchase: orderInfo ? true : reviewData.verifiedPurchase, // Use orderInfo to determine verification if available
-            customerName: reviewData.customerName,
+            reviewSource,
+            verifiedPurchase,
+            customerName: reviewData.customerName != null ? reviewData.customerName : '',
             customerEmail: reviewData.customerEmail,
-            status: 'pending', // Always default to pending for moderation
-            createdAt: reviewData.createdAt,
-            updatedAt: reviewData.updatedAt,
-            images: processedImages, // Always include images field (empty array if none)
-            
-            // Optional fields (only include if provided and not undefined/null)
-            ...(reviewData.customerId && reviewData.customerId !== 'undefined' && reviewData.customerId !== 'null' ? { customerId: reviewData.customerId } : {}),
+            status: 'pending',
+            createdAt: now,
+            updatedAt: now,
+            images: processedImages,
+            ...(reviewData.customerEmail ? { customerId: reviewData.customerEmail } : {}),
             ...(reviewData.orderId ? { orderId: reviewData.orderId } : {}),
             ...(reviewData.title ? { title: reviewData.title } : {}),
-            // Always include location field (null if not provided) - frontend expects this field
             location: reviewData.location || null,
-            
-            // Metadata fields
             customer: customerInfo,
             product: productInfo,
             orderInfo: orderInfo,
@@ -642,7 +683,7 @@ router.post('/', async (req, res) => {
                 // Don't fail the request if email fails
             }
             
-            res.json({
+            res.status(201).json({
                 success: true,
                 message: 'Review received! Our team will verify it before publishing.',
                 data: {
@@ -658,14 +699,15 @@ router.post('/', async (req, res) => {
                     createdAt: review.createdAt,
                     updatedAt: review.updatedAt,
                     ...(review.location ? { location: review.location } : {}),
-                    images: Array.isArray(review.images) ? review.images : [] // Always include images field, ensure it's an array
+                    images: Array.isArray(review.images) ? review.images : []
                 }
             });
         } else {
             res.status(400).json({
                 success: false,
                 message: 'Failed to create review',
-                error: result.error || 'unknown_error'
+                error: result.error || 'unknown_error',
+                code: 'CREATE_FAILED'
             });
         }
     } catch (error) {
