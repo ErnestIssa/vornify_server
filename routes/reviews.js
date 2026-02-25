@@ -166,6 +166,47 @@ async function hasDuplicateReview(customerEmail, productId) {
     }
 }
 
+// Helper: count non-deleted orders for an email (for review limit)
+async function countOrdersForEmail(customerEmail) {
+    try {
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: {
+                $and: [
+                    NOT_DELETED_ORDER,
+                    { $or: [ { 'customer.email': customerEmail }, { customerEmail: customerEmail } ] }
+                ]
+            }
+        });
+        if (!result.success || !result.data) return 0;
+        const list = result.data;
+        return Array.isArray(list) ? list.length : (list ? 1 : 0);
+    } catch (error) {
+        console.error('Error counting orders for email:', error);
+        return 0;
+    }
+}
+
+// Helper: count existing reviews for an email (for review limit)
+async function countReviewsForEmail(customerEmail) {
+    try {
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'reviews',
+            command: '--read',
+            data: { customerEmail }
+        });
+        if (!result.success || !result.data) return 0;
+        const list = result.data;
+        return Array.isArray(list) ? list.length : (list ? 1 : 0);
+    } catch (error) {
+        console.error('Error counting reviews for email:', error);
+        return 0;
+    }
+}
+
 // GET /api/reviews - Get all reviews with filtering
 router.get('/', async (req, res) => {
     try {
@@ -513,7 +554,19 @@ router.post('/', async (req, res) => {
             });
         }
 
-        // 2. Purchase verification (backend-only authority)
+        // 2. Review limit: max reviews per email = number of orders linked to that email
+        const orderCount = await countOrdersForEmail(reviewData.customerEmail);
+        const existingReviewCount = await countReviewsForEmail(reviewData.customerEmail);
+        if (orderCount > 0 && existingReviewCount >= orderCount) {
+            return res.status(403).json({
+                success: false,
+                message: 'You have reached the maximum number of reviews allowed for your purchases. You can submit one review per order.',
+                error: 'Review limit reached',
+                code: 'REVIEW_LIMIT_REACHED'
+            });
+        }
+
+        // 3. Purchase verification (backend-only authority)
         let orderInfo = null;
         if (reviewData.orderId) {
             orderInfo = await verifyPurchaseByOrder(reviewData.orderId, reviewData.customerEmail, reviewData.productId);

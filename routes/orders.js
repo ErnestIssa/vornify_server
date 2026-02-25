@@ -931,6 +931,84 @@ router.post('/update-status', async (req, res) => {
     }
 });
 
+/** MongoDB case-insensitive email match for orders */
+function emailRegex(email) {
+    const escaped = (email || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return { $regex: '^' + escaped + '$', $options: 'i' };
+}
+
+/**
+ * GET /api/orders/verify-email
+ * Public endpoint for email verification before review form.
+ * Returns whether the email has at least one order (hasPurchase) and optionally review limit info.
+ *
+ * Query: email (required)
+ * Response: { hasPurchase: boolean, orderCount: number, reviewCount?: number, maxReviewsAllowed?: number, canSubmitMoreReviews?: boolean }
+ */
+router.get('/verify-email', async (req, res) => {
+    try {
+        const emailRaw = (req.query.email || '').toString().trim();
+        if (!emailRaw) {
+            return res.status(400).json({
+                success: false,
+                hasPurchase: false,
+                error: 'Email is required',
+                message: 'Query parameter "email" is required'
+            });
+        }
+        const email = emailRaw.toLowerCase();
+
+        const orderResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: {
+                $and: [
+                    NOT_DELETED_FILTER,
+                    { $or: [ { 'customer.email': emailRegex(emailRaw) }, { customerEmail: emailRegex(emailRaw) } ] }
+                ]
+            }
+        });
+
+        const orders = orderResult.success && orderResult.data
+            ? (Array.isArray(orderResult.data) ? orderResult.data : [orderResult.data])
+            : [];
+        const orderCount = orders.length;
+        const hasPurchase = orderCount > 0;
+
+        const reviewResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'reviews',
+            command: '--read',
+            data: { customerEmail: email }
+        });
+
+        const reviews = reviewResult.success && reviewResult.data
+            ? (Array.isArray(reviewResult.data) ? reviewResult.data : [reviewResult.data])
+            : [];
+        const reviewCount = reviews.length;
+        const maxReviewsAllowed = orderCount;
+        const canSubmitMoreReviews = hasPurchase && reviewCount < orderCount;
+
+        return res.json({
+            success: true,
+            hasPurchase,
+            orderCount,
+            reviewCount,
+            maxReviewsAllowed,
+            canSubmitMoreReviews
+        });
+    } catch (error) {
+        console.error('Verify-email error:', error);
+        return res.status(500).json({
+            success: false,
+            hasPurchase: false,
+            error: 'Internal server error',
+            message: 'Could not verify email. Please try again later.'
+        });
+    }
+});
+
 /**
  * GET /api/orders/track
  * Public endpoint to track order by orderId and email
