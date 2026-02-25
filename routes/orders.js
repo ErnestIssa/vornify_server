@@ -718,6 +718,19 @@ router.post('/update-status', async (req, res) => {
             });
         }
         
+        // Idempotent cancel: already-cancelled order set to cancelled again is a no-op success
+        if (currentStatus === 'cancelled' && newStatus === 'cancelled') {
+            return res.json({
+                success: true,
+                message: 'Order status updated',
+                data: {
+                    message: 'Order status updated',
+                    orderId,
+                    status: newStatus
+                }
+            });
+        }
+        
         // When allowAnyTransition is not true, enforce allowed transitions and final-state rules
         if (!allowAnyTransition) {
             const validation = validateTransition(currentStatus, newStatus);
@@ -1643,7 +1656,12 @@ router.get('/:orderId', async (req, res) => {
     }
 });
 
-// DELETE /api/orders/:orderId - Delete order (admin)
+/**
+ * DELETE /api/orders/:orderId - Permanently delete order (admin)
+ * Order is removed from the database. It will not appear in list orders (GET /all)
+ * and GET /api/orders/:orderId will return 404. Idempotent: deleting an already-deleted
+ * or non-existent order returns success so the admin UI can treat it as "no longer there".
+ */
 router.delete('/:orderId', async (req, res) => {
     try {
         const { orderId } = req.params;
