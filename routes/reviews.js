@@ -543,27 +543,30 @@ router.post('/', async (req, res) => {
             ? reviewData.reviewSource
             : (reviewData.orderId ? 'post_purchase' : 'product_page');
 
-        // 1. Duplicate: one review per (customerEmail + productId)
-        const duplicate = await hasDuplicateReview(reviewData.customerEmail, reviewData.productId);
-        if (duplicate) {
-            return res.status(409).json({
-                success: false,
-                message: 'You have already submitted a review for this product.',
-                error: 'Duplicate review',
-                code: 'DUPLICATE_REVIEW'
-            });
-        }
+        // For productId === 'general': skip duplicate check and review-limit check (allow multiple reviews per email).
+        if (reviewData.productId !== 'general') {
+            // 1. Duplicate: one review per (customerEmail + productId)
+            const duplicate = await hasDuplicateReview(reviewData.customerEmail, reviewData.productId);
+            if (duplicate) {
+                return res.status(409).json({
+                    success: false,
+                    message: 'You have already submitted a review for this product.',
+                    error: 'Duplicate review',
+                    code: 'DUPLICATE_REVIEW'
+                });
+            }
 
-        // 2. Review limit: max reviews per email = number of orders linked to that email
-        const orderCount = await countOrdersForEmail(reviewData.customerEmail);
-        const existingReviewCount = await countReviewsForEmail(reviewData.customerEmail);
-        if (orderCount > 0 && existingReviewCount >= orderCount) {
-            return res.status(403).json({
-                success: false,
-                message: 'You have reached the maximum number of reviews allowed for your purchases. You can submit one review per order.',
-                error: 'Review limit reached',
-                code: 'REVIEW_LIMIT_REACHED'
-            });
+            // 2. Review limit: max reviews per email = number of orders linked to that email
+            const orderCount = await countOrdersForEmail(reviewData.customerEmail);
+            const existingReviewCount = await countReviewsForEmail(reviewData.customerEmail);
+            if (orderCount > 0 && existingReviewCount >= orderCount) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'You have reached the maximum number of reviews allowed for your purchases. You can submit one review per order.',
+                    error: 'Review limit reached',
+                    code: 'REVIEW_LIMIT_REACHED'
+                });
+            }
         }
 
         // 3. Purchase verification (backend-only authority)

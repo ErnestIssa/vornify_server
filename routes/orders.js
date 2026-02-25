@@ -940,7 +940,8 @@ function emailRegex(email) {
 /**
  * GET /api/orders/verify-email
  * Public endpoint for email verification before review form.
- * Returns whether the email has at least one order (hasPurchase) and optionally review limit info.
+ * For general Reviews: hasPurchase = true if email exists in ANY relevant collection (orders, customers, reviews, subscribers).
+ * Same endpoint and response shape; optional fields (orderCount, reviewCount, etc.) still returned.
  *
  * Query: email (required)
  * Response: { hasPurchase: boolean, orderCount: number, reviewCount?: number, maxReviewsAllowed?: number, canSubmitMoreReviews?: boolean }
@@ -957,38 +958,57 @@ router.get('/verify-email', async (req, res) => {
             });
         }
         const email = emailRaw.toLowerCase();
+        const regex = emailRegex(emailRaw);
 
-        const orderResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'orders',
-            command: '--read',
-            data: {
-                $and: [
-                    NOT_DELETED_FILTER,
-                    { $or: [ { 'customer.email': emailRegex(emailRaw) }, { customerEmail: emailRegex(emailRaw) } ] }
-                ]
-            }
-        });
+        // Check all relevant collections: email "exists in system" if found in any
+        const [orderResult, customerResult, reviewResult, subscriberResult] = await Promise.all([
+            db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'orders',
+                command: '--read',
+                data: {
+                    $and: [
+                        NOT_DELETED_FILTER,
+                        { $or: [ { 'customer.email': regex }, { customerEmail: regex } ] }
+                    ]
+                }
+            }),
+            db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'customers',
+                command: '--read',
+                data: { email: regex }
+            }),
+            db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'reviews',
+                command: '--read',
+                data: { customerEmail: regex }
+            }),
+            db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'subscribers',
+                command: '--read',
+                data: { email: regex }
+            })
+        ]);
 
-        const orders = orderResult.success && orderResult.data
-            ? (Array.isArray(orderResult.data) ? orderResult.data : [orderResult.data])
-            : [];
+        const toList = (result) => {
+            if (!result.success || !result.data) return [];
+            const d = result.data;
+            return Array.isArray(d) ? d : (d ? [d] : []);
+        };
+
+        const orders = toList(orderResult);
+        const customers = toList(customerResult);
+        const reviews = toList(reviewResult);
+        const subscribers = toList(subscriberResult);
+
         const orderCount = orders.length;
-        const hasPurchase = orderCount > 0;
-
-        const reviewResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'reviews',
-            command: '--read',
-            data: { customerEmail: email }
-        });
-
-        const reviews = reviewResult.success && reviewResult.data
-            ? (Array.isArray(reviewResult.data) ? reviewResult.data : [reviewResult.data])
-            : [];
         const reviewCount = reviews.length;
+        const hasPurchase = orderCount > 0 || customers.length > 0 || reviews.length > 0 || subscribers.length > 0;
         const maxReviewsAllowed = orderCount;
-        const canSubmitMoreReviews = hasPurchase && reviewCount < orderCount;
+        const canSubmitMoreReviews = orderCount > 0 && reviewCount < orderCount;
 
         return res.json({
             success: true,
