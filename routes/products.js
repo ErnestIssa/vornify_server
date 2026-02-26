@@ -89,6 +89,50 @@ function validateCloudinaryMedia(media, imagePublicIds) {
     return { valid: true, error: null };
 }
 
+/**
+ * Normalize product for API response: ensure id (from _id if missing), ensure variants have quantity (storefront contract).
+ * @param {Object} product - Raw product from DB
+ * @returns {Object} - Same object with id and variant.quantity guaranteed
+ */
+function normalizeProductForResponse(product) {
+    if (!product) return product;
+    if (!product.id && product._id) {
+        product.id = typeof product._id === 'string' ? product._id : product._id.toString();
+    }
+    const inv = product.inventory;
+    if (inv && inv.variants && Array.isArray(inv.variants)) {
+        inv.variants = inv.variants.map(v => ({
+            ...v,
+            quantity: v.quantity !== undefined ? v.quantity : (v.stock !== undefined ? v.stock : 0)
+        }));
+    }
+    if (product.variants && Array.isArray(product.variants)) {
+        product.variants = product.variants.map(v => ({
+            ...v,
+            quantity: v.quantity !== undefined ? v.quantity : (v.stock !== undefined ? v.stock : 0)
+        }));
+    }
+    return product;
+}
+
+/**
+ * Collect all image URLs from product (media, images, image, imageUrl, etc.) into a single array.
+ * Used to normalize incoming payloads into media[] only.
+ */
+function normalizeImagesToMedia(payload) {
+    const media = Array.isArray(payload.media) ? [...payload.media] : [];
+    if (media.length > 0) return media;
+    if (Array.isArray(payload.images) && payload.images.length > 0) return payload.images;
+    if (payload.image) return [payload.image];
+    if (payload.imageUrl) return [payload.imageUrl];
+    if (Array.isArray(payload.imageUrls) && payload.imageUrls.length > 0) return payload.imageUrls;
+    if (Array.isArray(payload.photos) && payload.photos.length > 0) return payload.photos;
+    if (payload.photo) return [payload.photo];
+    if (payload.picture) return [payload.picture];
+    if (Array.isArray(payload.pictures) && payload.pictures.length > 0) return payload.pictures;
+    return [];
+}
+
 // GET /api/products/most-viewed - Get most viewed products (last 7 days)
 // This route must be defined before /:id to avoid route conflicts
 router.get('/most-viewed', async (req, res) => {
@@ -358,7 +402,7 @@ router.get('/:id', async (req, res) => {
                     }));
                 }
                 
-                // Process variants
+                // Process variants (storefront expects quantity; backend stores quantity)
                 if (product.inventory.variants && Array.isArray(product.inventory.variants)) {
                     product.inventory.variants = product.inventory.variants.map((variant, index) => ({
                         id: variant.id || `variant_${Date.now()}_${index}`,
@@ -366,13 +410,15 @@ router.get('/:id', async (req, res) => {
                         sizeId: variant.sizeId,
                         sku: variant.sku || '',
                         price: variant.price || product.price,
-                        stock: variant.stock || 0,
+                        quantity: variant.quantity !== undefined ? variant.quantity : (variant.stock !== undefined ? variant.stock : 0),
+                        stock: variant.stock !== undefined ? variant.stock : (variant.quantity !== undefined ? variant.quantity : 0),
                         available: variant.available !== undefined ? variant.available : true,
                         images: variant.images || [],
                         sortOrder: variant.sortOrder !== undefined ? variant.sortOrder : index
                     }));
                 }
             }
+            normalizeProductForResponse(product);
             
             // Translate product content based on language
             const translatedProduct = translationService.translateProduct(product, language);
@@ -655,7 +701,7 @@ router.get('/', async (req, res) => {
                         }));
                     }
                     
-                    // Process variants
+                    // Process variants (storefront expects quantity; backend stores quantity)
                     if (product.inventory.variants && Array.isArray(product.inventory.variants)) {
                         product.inventory.variants = product.inventory.variants.map((variant, index) => ({
                             id: variant.id || `variant_${Date.now()}_${index}`,
@@ -663,13 +709,15 @@ router.get('/', async (req, res) => {
                             sizeId: variant.sizeId,
                             sku: variant.sku || '',
                             price: variant.price || product.price,
-                            stock: variant.stock || 0,
+                            quantity: variant.quantity !== undefined ? variant.quantity : (variant.stock !== undefined ? variant.stock : 0),
+                            stock: variant.stock !== undefined ? variant.stock : (variant.quantity !== undefined ? variant.quantity : 0),
                             available: variant.available !== undefined ? variant.available : true,
                             images: variant.images || [],
                             sortOrder: variant.sortOrder !== undefined ? variant.sortOrder : index
                         }));
                     }
                 }
+                normalizeProductForResponse(product);
                 
                 // Translate product content based on language
                 return translationService.translateProduct(product, language);
@@ -722,23 +770,64 @@ router.post('/', authenticateAdmin, async (req, res) => {
     try {
         const productData = req.body;
         
-        // Validate required fields
-        const requiredFields = ['name', 'price', 'description'];
-        const missingFields = requiredFields.filter(field => !productData[field]);
-        
+        // Required fields (storefront contract)
+        const requiredFields = ['name', 'price', 'category'];
+        const missingFields = requiredFields.filter(field => {
+            const v = productData[field];
+            return v === undefined || v === null || (typeof v === 'string' && !v.trim());
+        });
         if (missingFields.length > 0) {
             return res.status(400).json({
                 success: false,
-                error: `Missing required fields: ${missingFields.join(', ')}`
+                error: `Missing required fields: ${missingFields.join(', ')}`,
+                code: 'VALIDATION_ERROR'
+            });
+        }
+        if (typeof productData.price !== 'number' || productData.price <= 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'price must be a positive number',
+                code: 'VALIDATION_ERROR'
             });
         }
         
-        // Validate Cloudinary media fields
+        // Normalize images into media[] only (accept media, images, image, imageUrl, etc.)
+        const media = normalizeImagesToMedia(productData);
+        productData.media = media;
+        if (productData.imagePublicIds === undefined || !Array.isArray(productData.imagePublicIds)) {
+            productData.imagePublicIds = [];
+        }
+        if (productData.media.length !== productData.imagePublicIds.length) {
+            productData.imagePublicIds = productData.media.map((_, i) => productData.imagePublicIds[i] || '');
+        }
+        
+        // At least one image required
+        if (!productData.media || productData.media.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'At least one image is required (media or images/image/imageUrl)',
+                code: 'VALIDATION_ERROR'
+            });
+        }
+        
+        // Validate Cloudinary media fields (length match)
         const mediaValidation = validateCloudinaryMedia(productData.media, productData.imagePublicIds);
         if (!mediaValidation.valid) {
             return res.status(400).json({
                 success: false,
-                error: mediaValidation.error
+                error: mediaValidation.error,
+                code: 'VALIDATION_ERROR'
+            });
+        }
+        
+        // At least one variant with quantity > 0 (inventory.variants or top-level variants)
+        const variants = productData.inventory?.variants || productData.variants || [];
+        const hasVariantWithStock = Array.isArray(variants) && variants.some(v => (v.quantity ?? v.stock ?? 0) > 0);
+        if (!hasVariantWithStock) {
+            return res.status(400).json({
+                success: false,
+                error: 'At least one variant with quantity > 0 is required',
+                code: 'VALIDATION_ERROR'
             });
         }
         
@@ -747,25 +836,21 @@ router.post('/', authenticateAdmin, async (req, res) => {
             productData.id = 'prod_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         }
         
-        // Set default values
+        // Set default values (published: false by default for new products)
         productData.createdAt = new Date().toISOString();
         productData.updatedAt = new Date().toISOString();
         productData.active = productData.active !== undefined ? productData.active : true;
         productData.featured = productData.featured !== undefined ? productData.featured : false;
+        productData.published = productData.published !== undefined ? productData.published : false;
         
-        // Set Cloudinary media fields (default to empty arrays if not provided)
-        productData.media = Array.isArray(productData.media) ? productData.media : [];
-        productData.imagePublicIds = Array.isArray(productData.imagePublicIds) ? productData.imagePublicIds : [];
-        
-        // Process inventory data if provided
+        // Process inventory data if provided (returns full document with inventory normalized)
         if (productData.inventory) {
-            productData.inventory = db.processInventoryData(productData);
+            productData = db.processInventoryData(productData);
         }
         
         // Automatically generate Swedish translations for new product
         const swedishTranslations = productTranslationHelper.generateSwedishTranslations(productData);
         if (Object.keys(swedishTranslations).length > 0) {
-            // Merge Swedish translations into product data
             Object.assign(productData, swedishTranslations);
             console.log(`🌐 [Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for new product`);
         }
@@ -777,15 +862,26 @@ router.post('/', authenticateAdmin, async (req, res) => {
             data: productData
         });
         
-        if (result.success) {
-            res.json({
-                success: true,
-                message: 'Product created successfully',
-                data: result.data
-            });
-        } else {
-            res.status(400).json(result);
+        if (!result.success) {
+            return res.status(400).json(result);
         }
+        
+        // Return full product document (create returns insert result, so re-fetch by id)
+        const readResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: { id: productData.id }
+        });
+        let created = readResult.success && readResult.data ? readResult.data : productData;
+        if (!created.id) created.id = productData.id;
+        normalizeProductForResponse(created);
+        
+        res.status(201).json({
+            success: true,
+            message: 'Product created successfully',
+            data: created
+        });
     } catch (error) {
         console.error('Create product error:', error);
         res.status(500).json({
@@ -823,12 +919,7 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
         // Add updated timestamp
         updateData.updatedAt = new Date().toISOString();
         
-        // Process inventory data if provided
-        if (updateData.inventory) {
-            updateData.inventory = db.processInventoryData(updateData);
-        }
-        
-        // Get existing product to check for existing translations
+        // Get existing product (needed for inventory processing and translations)
         const existingProductResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
@@ -836,10 +927,17 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
             data: { id }
         });
         
+        const existingProduct = existingProductResult.success && existingProductResult.data ? existingProductResult.data : {};
+        
+        // Process inventory if provided (processInventoryData returns full doc; we only set .inventory)
+        if (updateData.inventory) {
+            const mergedForInventory = { ...existingProduct, ...updateData };
+            const processed = db.processInventoryData(mergedForInventory);
+            updateData.inventory = processed.inventory;
+        }
+        
         // Merge existing product data with update data to check for translations
-        const mergedProduct = existingProductResult.success && existingProductResult.data
-            ? { ...existingProductResult.data, ...updateData }
-            : updateData;
+        const mergedProduct = { ...existingProduct, ...updateData };
         
         // Automatically generate Swedish translations for updated fields (if missing)
         const swedishTranslations = productTranslationHelper.generateSwedishTranslations(mergedProduct);
