@@ -133,6 +133,54 @@ function normalizeImagesToMedia(payload) {
     return [];
 }
 
+/** Ensure a "list" field (string or string[]) has at least one non-empty entry; return true if valid */
+function hasNonEmptyList(value) {
+    if (value == null) return false;
+    if (Array.isArray(value)) return value.some(item => String(item).trim().length > 0);
+    return String(value).trim().length > 0;
+}
+
+/** Ensure a string field is non-empty after trim */
+function hasNonEmptyString(value) {
+    return value != null && String(value).trim().length > 0;
+}
+
+/**
+ * Validate product-detail content fields required for the storefront detail page (Size & Fit, Materials & Care, Shipping & Returns).
+ * Returns { valid: boolean, missing: string[] }. Use on create (require all) or on update (only validate fields that are present).
+ * @param {Object} data - Product payload
+ * @param {boolean} onlyIfPresent - If true, only validate fields that exist in data; if false, require all compulsory fields.
+ */
+function validateProductDetailContent(data, onlyIfPresent = false) {
+    const missing = [];
+    const check = (name, ok) => { if (!ok) missing.push(name); };
+
+    if (!onlyIfPresent || data.sizeFitDescription !== undefined) {
+        check('sizeFitDescription', hasNonEmptyString(data.sizeFitDescription));
+    }
+    if (!onlyIfPresent || data.fitGuide !== undefined) {
+        check('fitGuide', hasNonEmptyList(data.fitGuide));
+    }
+    if (!onlyIfPresent || data.sizeRecommendations !== undefined) {
+        check('sizeRecommendations', hasNonEmptyList(data.sizeRecommendations));
+    }
+    const hasMaterials = hasNonEmptyString(data.materials) || (Array.isArray(data.materials) && data.materials.some(m => String(m).trim().length > 0)) || hasNonEmptyString(data.materialComposition);
+    if (!onlyIfPresent || data.materials !== undefined || data.materialComposition !== undefined) {
+        check('materials or materialComposition', hasMaterials);
+    }
+    if (!onlyIfPresent || data.careInstructions !== undefined) {
+        check('careInstructions', hasNonEmptyList(data.careInstructions));
+    }
+    if (!onlyIfPresent || data.shippingInfo !== undefined) {
+        check('shippingInfo', hasNonEmptyList(data.shippingInfo));
+    }
+    if (!onlyIfPresent || data.returnPolicy !== undefined) {
+        check('returnPolicy', hasNonEmptyList(data.returnPolicy));
+    }
+
+    return { valid: missing.length === 0, missing };
+}
+
 // GET /api/products/most-viewed - Get most viewed products (last 7 days)
 // This route must be defined before /:id to avoid route conflicts
 router.get('/most-viewed', async (req, res) => {
@@ -831,6 +879,17 @@ router.post('/', authenticateAdmin, async (req, res) => {
             });
         }
         
+        // Product detail content (Size & Fit, Materials, Shipping & Returns) – required for complete product
+        const detailValidation = validateProductDetailContent(productData, false);
+        if (!detailValidation.valid) {
+            return res.status(400).json({
+                success: false,
+                error: `Missing or empty product detail fields required for the storefront: ${detailValidation.missing.join(', ')}. See product-detail-content-guide in docs.`,
+                code: 'VALIDATION_ERROR',
+                missingFields: detailValidation.missing
+            });
+        }
+        
         // Generate product ID if not provided
         if (!productData.id) {
             productData.id = 'prod_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -896,6 +955,17 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
+        
+        // Product detail content: when any of these fields are sent, validate they are non-empty (partial update)
+        const detailValidation = validateProductDetailContent(updateData, true);
+        if (!detailValidation.valid) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid or empty product detail fields: ${detailValidation.missing.join(', ')}. See product-detail-content-guide in docs.`,
+                code: 'VALIDATION_ERROR',
+                missingFields: detailValidation.missing
+            });
+        }
         
         // Validate Cloudinary media fields if provided
         if (updateData.media !== undefined || updateData.imagePublicIds !== undefined) {
