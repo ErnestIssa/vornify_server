@@ -189,6 +189,24 @@ async function countOrdersForEmail(customerEmail) {
     }
 }
 
+/** Fetch full review by id and normalize (images array, location, isVerified) for API response */
+async function fetchReviewById(id) {
+    const result = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'reviews',
+        command: '--read',
+        data: { id: id }
+    });
+    if (!result.success || !result.data) return null;
+    const review = result.data;
+    return {
+        ...review,
+        location: review.location || null,
+        images: Array.isArray(review.images) ? review.images : (review.images ? [review.images] : []),
+        isVerified: review.verifiedPurchase || false
+    };
+}
+
 // Helper: count existing reviews for an email (for review limit)
 async function countReviewsForEmail(customerEmail) {
     try {
@@ -816,6 +834,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // POST /api/reviews/:id/approve - Approve review
+// Returns full review document (including images) so frontend does not lose images after approve
 router.post('/:id/approve', async (req, res) => {
     try {
         const { id } = req.params;
@@ -839,10 +858,11 @@ router.post('/:id/approve', async (req, res) => {
         });
         
         if (result.success) {
+            const review = await fetchReviewById(id);
             res.json({
                 success: true,
                 message: 'Review approved successfully',
-                data: result.data
+                data: review || result.data
             });
         } else {
             res.status(400).json(result);
@@ -857,6 +877,7 @@ router.post('/:id/approve', async (req, res) => {
 });
 
 // POST /api/reviews/:id/reject - Reject review
+// Returns full review document (including images) so frontend does not lose images after reject
 router.post('/:id/reject', async (req, res) => {
     try {
         const { id } = req.params;
@@ -880,10 +901,11 @@ router.post('/:id/reject', async (req, res) => {
         });
         
         if (result.success) {
+            const review = await fetchReviewById(id);
             res.json({
                 success: true,
                 message: 'Review rejected successfully',
-                data: result.data
+                data: review || result.data
             });
         } else {
             res.status(400).json(result);
@@ -927,10 +949,11 @@ router.post('/:id/flag', async (req, res) => {
         });
         
         if (result.success) {
+            const review = await fetchReviewById(id);
             res.json({
                 success: true,
                 message: 'Review flagged successfully',
-                data: result.data
+                data: review || result.data
             });
         } else {
             res.status(400).json(result);
@@ -975,10 +998,11 @@ router.post('/:id/response', async (req, res) => {
         });
         
         if (result.success) {
+            const review = await fetchReviewById(id);
             res.json({
                 success: true,
                 message: 'Business response added successfully',
-                data: result.data
+                data: review || result.data
             });
         } else {
             res.status(400).json(result);

@@ -62,7 +62,7 @@ const reviewStorage = new CloudinaryStorage({
         folder: 'peakmode/reviews',
         public_id,
         allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
-        transformation: [{ width: 1200, crop: 'limit' }],
+        transformation: [{ width: 1920, crop: 'limit', quality: 'auto:good' }],
       };
     } catch (e) {
       console.error('[REVIEW UPLOAD] Cloudinary storage params error:', e);
@@ -71,7 +71,7 @@ const reviewStorage = new CloudinaryStorage({
         folder: 'peakmode/reviews',
         public_id: `review-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
         allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
-        transformation: [{ width: 1200, crop: 'limit' }],
+        transformation: [{ width: 1920, crop: 'limit', quality: 'auto:good' }],
       };
     }
   },
