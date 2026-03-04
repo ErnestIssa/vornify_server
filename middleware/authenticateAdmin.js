@@ -102,5 +102,49 @@ async function authenticateAdmin(req, res, next) {
     }
 }
 
+/**
+ * Optional admin auth: does not 401. If valid Bearer token, sets req.admin and req.isAdminRequest = true.
+ * Use on storefront product endpoints so admin requests (with token) can see all products including drafts.
+ */
+async function optionalAuthenticateAdmin(req, res, next) {
+    req.isAdminRequest = false;
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ') || !JWT_SECRET) {
+            return next();
+        }
+        const token = authHeader.substring(7);
+        let decoded;
+        try {
+            decoded = jwt.verify(token, JWT_SECRET);
+        } catch (_) {
+            return next();
+        }
+        const adminLookup = (decoded && decoded.adminId && ObjectId.isValid(decoded.adminId))
+            ? { _id: new ObjectId(decoded.adminId), active: { $ne: false } }
+            : { username: decoded.username, active: { $ne: false } };
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: adminLookup
+        });
+        const adminData = adminResult && adminResult.success ? adminResult.data : null;
+        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
+        if (!admin) return next();
+        req.admin = {
+            id: admin._id || admin.id,
+            username: admin.username,
+            role: admin.role || 'admin',
+            name: admin.name || admin.username
+        };
+        req.isAdminRequest = true;
+    } catch (_) {
+        // ignore
+    }
+    next();
+}
+
 module.exports = authenticateAdmin;
+module.exports.optionalAuthenticateAdmin = optionalAuthenticateAdmin;
 

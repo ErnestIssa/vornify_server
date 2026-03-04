@@ -7,8 +7,14 @@ const productTranslationHelper = require('../services/productTranslationHelper')
 const seoHelper = require('../utils/seoHelper');
 const reviewStatsHelper = require('../utils/reviewStatsHelper');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const optionalAuthenticateAdmin = authenticateAdmin.optionalAuthenticateAdmin || (async (req, res, next) => { req.isAdminRequest = false; next(); });
 
 const db = getDBInstance();
+
+/** True if product may be shown on the storefront. Only products with published === true are returned to customers; drafts (false) and legacy (undefined) are excluded. */
+function isPublishedForStorefront(product) {
+    return product && product.published === true;
+}
 
 // Server-side throttling: track recent views by IP + product ID
 // Format: Map<"IP:PRODUCT_ID", timestamp>
@@ -183,7 +189,7 @@ function validateProductDetailContent(data, onlyIfPresent = false) {
 
 // GET /api/products/most-viewed - Get most viewed products (last 7 days)
 // This route must be defined before /:id to avoid route conflicts
-router.get('/most-viewed', async (req, res) => {
+router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
     try {
         console.log('🔍 [MOST VIEWED] Request received:', {
             limit: req.query.limit,
@@ -235,13 +241,12 @@ router.get('/most-viewed', async (req, res) => {
                 products = [products];
             }
             
-            // Filter products by published and active status only (include products with 0 views)
-            products = products.filter(product => {
-                const isPublished = product.published !== false; // Default to true if not set
-                const isActive = product.active !== false; // Default to true if not set
-                
-                return isPublished && isActive;
-            });
+            // Storefront: only published products (drafts must never appear); admin with token sees all
+            if (!req.isAdminRequest) {
+                products = products.filter(product => isPublishedForStorefront(product) && product.active !== false);
+            } else {
+                products = products.filter(product => product.active !== false);
+            }
             
             // Sort by viewsLast7Days DESC, then by views DESC (highest first)
             // Products with 0 views will be sorted to the bottom
@@ -293,7 +298,7 @@ router.get('/most-viewed', async (req, res) => {
 
 // GET /api/products/categories - Get all product categories
 // This route must be defined before /:id to avoid route conflicts
-router.get('/categories', async (req, res) => {
+router.get('/categories', optionalAuthenticateAdmin, async (req, res) => {
     try {
         // Get all products to extract unique categories
         const result = await db.executeOperation({
@@ -304,11 +309,12 @@ router.get('/categories', async (req, res) => {
         });
         
         if (result.success) {
-            const products = result.data || [];
-            
-            // Extract unique categories
+            let products = result.data || [];
+            if (!Array.isArray(products)) products = products ? [products] : [];
+            // Storefront: only categories from published products; admin with token sees all
+            const publishedProducts = req.isAdminRequest ? products : products.filter(isPublishedForStorefront);
             const categoriesSet = new Set();
-            products.forEach(product => {
+            publishedProducts.forEach(product => {
                 if (product.category) {
                     categoriesSet.add(product.category);
                 }
@@ -355,7 +361,7 @@ router.get('/categories', async (req, res) => {
 });
 
 // GET /api/products/:id - Get product by ID with complete inventory data
-router.get('/:id', async (req, res) => {
+router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         
@@ -390,10 +396,15 @@ router.get('/:id', async (req, res) => {
         }
         
         if (result.success && result.data) {
-            // Process inventory data to ensure proper structure
             const product = result.data;
-            
-            // Get requested language from query parameter
+            // Storefront: unpublished products must not be visible (treat as not found); admin with token can see draft
+            if (!req.isAdminRequest && !isPublishedForStorefront(product)) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Product not found'
+                });
+            }
+            // Process inventory data to ensure proper structure
             const language = translationService.getLanguageFromRequest(req);
             
             // Get requested currency from query parameter
@@ -507,7 +518,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/products/:id/view - Track product view
-router.post('/:id/view', async (req, res) => {
+router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         
@@ -580,6 +591,13 @@ router.post('/:id/view', async (req, res) => {
                 error: 'Product not found'
             });
         }
+        // Storefront: do not track views for unpublished products (and do not reveal they exist); admin can still track
+        if (!req.isAdminRequest && !isPublishedForStorefront(product)) {
+            return res.status(404).json({
+                success: false,
+                error: 'Product not found'
+            });
+        }
         
         // Initialize view counters if they don't exist
         const views = (product.views || 0) + 1;
@@ -645,7 +663,7 @@ router.post('/:id/view', async (req, res) => {
 });
 
 // GET /api/products - Get all products
-router.get('/', async (req, res) => {
+router.get('/', optionalAuthenticateAdmin, async (req, res) => {
     try {
         const { category, featured, limit, search } = req.query;
         
@@ -674,6 +692,12 @@ router.get('/', async (req, res) => {
         
         if (result.success) {
             let products = result.data || [];
+            // Storefront: only published products (drafts must never appear); admin with token sees all
+            if (!req.isAdminRequest) {
+                products = (Array.isArray(products) ? products : []).filter(isPublishedForStorefront);
+            } else {
+                products = Array.isArray(products) ? products : (products ? [products] : []);
+            }
             
             // Apply case-insensitive category filter if provided
             if (category) {
@@ -1075,7 +1099,7 @@ router.delete('/:id', authenticateAdmin, async (req, res) => {
 });
 
 // GET /api/products/:id/variants - Get product variants
-router.get('/:id/variants', async (req, res) => {
+router.get('/:id/variants', optionalAuthenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         
@@ -1088,8 +1112,14 @@ router.get('/:id/variants', async (req, res) => {
         
         if (result.success && result.data) {
             const product = result.data;
+            // Storefront: unpublished products must not be visible (treat as not found); admin with token can see draft
+            if (!req.isAdminRequest && !isPublishedForStorefront(product)) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Product not found'
+                });
+            }
             const variants = product.inventory?.variants || [];
-            
             res.json({
                 success: true,
                 data: variants
@@ -1111,7 +1141,7 @@ router.get('/:id/variants', async (req, res) => {
 
 // GET /api/products/sitemap - Get all products for sitemap generation
 // Returns minimal product data needed for sitemap (id, name, category, updatedAt, slug)
-// This endpoint is for SEO purposes only, no visible changes
+// This endpoint is for SEO purposes only; storefront only - only published products
 router.get('/sitemap', async (req, res) => {
     try {
         // Get all products (we'll filter active ones)
@@ -1128,9 +1158,9 @@ router.get('/sitemap', async (req, res) => {
                 products = [products];
             }
             
-            // Filter to only active products and map to sitemap format
+            // Storefront only: sitemap must not include drafts (no admin override)
             const sitemapProducts = products
-                .filter(product => product.active !== false)
+                .filter(product => isPublishedForStorefront(product) && product.active !== false)
                 .map(product => {
                     // Generate slug if not present
                     const slug = product.slug || seoHelper.generateSlug(product.name || product.id);
