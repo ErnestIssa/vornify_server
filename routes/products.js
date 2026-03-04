@@ -979,6 +979,9 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
+        // Preserve published from request so visibility (Published/Draft) always persists (partial or full update)
+        const publishedFromRequest = req.body.published;
+        const hasPublishedInBody = publishedFromRequest === true || publishedFromRequest === false;
         
         // Product detail content: when any of these fields are sent, validate they are non-empty (partial update)
         const detailValidation = validateProductDetailContent(updateData, true);
@@ -1039,6 +1042,10 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
             // Merge Swedish translations into update data
             Object.assign(updateData, swedishTranslations);
             console.log(`🌐 [Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for updated product`);
+        }
+        // Ensure published is persisted when admin sends it (list badge toggle or edit form)
+        if (hasPublishedInBody) {
+            updateData.published = publishedFromRequest;
         }
         
         const result = await db.executeOperation({
