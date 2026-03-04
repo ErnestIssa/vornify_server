@@ -712,14 +712,23 @@ class VortexDB {
                     error: 'Filter and update fields are required'
                 };
             }
-            
+            // Normalize filter._id: MongoDB stores _id as ObjectId; admin/VornifyDB often sends string (e.g. product status toggle)
+            let filter = data.filter;
+            if (filter && filter._id != null && typeof filter._id === 'string' && ObjectId.isValid(filter._id)) {
+                filter = { ...filter, _id: new ObjectId(filter._id) };
+            }
             // Process inventory data if present in update
             if (data.update.inventory) {
                 data.update = this.processInventoryData(data.update);
             }
-            
-            const result = await collection.updateOne(data.filter, { $set: data.update });
-            
+            const result = await collection.updateOne(filter, { $set: data.update });
+            if (result.matchedCount === 0) {
+                return {
+                    success: false,
+                    error: 'No document matched the filter (update not applied)',
+                    data: result
+                };
+            }
             return {
                 success: true,
                 data: result
