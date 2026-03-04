@@ -1016,15 +1016,43 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
         // Add updated timestamp
         updateData.updatedAt = new Date().toISOString();
         
-        // Get existing product (needed for inventory processing and translations)
-        const existingProductResult = await db.executeOperation({
+        // Resolve existing product by id then by _id (same as GET /:id) so admin can use either in the URL
+        let existingProductResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
             data: { id }
         });
-        
-        const existingProduct = existingProductResult.success && existingProductResult.data ? existingProductResult.data : {};
+        let existingProduct = existingProductResult.success && existingProductResult.data ? existingProductResult.data : null;
+        let updateFilter = { id };
+        if (!existingProduct) {
+            const { ObjectId } = require('mongodb');
+            try {
+                existingProductResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: new ObjectId(id) }
+                });
+            } catch (_) {
+                existingProductResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: id }
+                });
+            }
+            existingProduct = existingProductResult.success && existingProductResult.data ? existingProductResult.data : null;
+            if (existingProduct) {
+                updateFilter = { _id: typeof existingProduct._id === 'string' ? existingProduct._id : existingProduct._id };
+            }
+        }
+        if (!existingProduct) {
+            return res.status(404).json({
+                success: false,
+                error: 'Product not found'
+            });
+        }
         
         // Process inventory if provided (processInventoryData returns full doc; we only set .inventory)
         if (updateData.inventory) {
@@ -1053,7 +1081,7 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
             collection_name: 'products',
             command: '--update',
             data: {
-                filter: { id },
+                filter: updateFilter,
                 update: updateData
             }
         });
