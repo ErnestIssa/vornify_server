@@ -66,13 +66,15 @@ async function getMultipleProductReviewStats(productIds) {
             return {};
         }
         
-        // Get all approved reviews for these products
+        // Query only reviews for the requested products (avoids full collection scan)
+        const uniqueIds = [...new Set(productIds.filter(Boolean))];
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'reviews',
             command: '--read',
             data: {
-                status: 'approved'
+                status: 'approved',
+                productId: { $in: uniqueIds }
             }
         });
         

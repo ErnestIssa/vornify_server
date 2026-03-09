@@ -16,6 +16,22 @@ function isPublishedForStorefront(product) {
     return product && product.published === true;
 }
 
+/**
+ * Build product lookup query for single-query resolution by id or _id
+ * Reduces up to 3 sequential DB reads to 1 when URL contains id or MongoDB _id
+ */
+function buildProductLookupQuery(id) {
+    if (/^[a-fA-F0-9]{24}$/.test(id)) {
+        try {
+            const { ObjectId } = require('mongodb');
+            return { $or: [ { id }, { _id: new ObjectId(id) } ] };
+        } catch (e) {
+            return { id };
+        }
+    }
+    return { id };
+}
+
 // Server-side throttling: track recent views by IP + product ID
 // Format: Map<"IP:PRODUCT_ID", timestamp>
 const viewThrottleCache = new Map();
@@ -219,12 +235,13 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
         }
 
         console.log('🔍 [MOST VIEWED] Querying database for products...');
-        // Get all products
+        // Storefront: filter published at DB level; admin: all products
+        const query = req.isAdminRequest ? {} : { published: true };
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
-            data: {}
+            data: query
         });
         
         console.log('🔍 [MOST VIEWED] Database query result:', {
@@ -300,12 +317,13 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
 // This route must be defined before /:id to avoid route conflicts
 router.get('/categories', optionalAuthenticateAdmin, async (req, res) => {
     try {
-        // Get all products to extract unique categories
+        // Storefront: filter published at DB level; admin: all products
+        const query = req.isAdminRequest ? {} : { published: true };
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
-            data: {}
+            data: query
         });
         
         if (result.success) {
@@ -365,35 +383,14 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         
-        // Try to find product by id first, then by _id if not found
-        let result = await db.executeOperation({
+        // Single query resolves by id or _id (reduces up to 3 reads to 1)
+        const query = buildProductLookupQuery(id);
+        const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
-            data: { id }
+            data: query
         });
-        
-        // If not found by id, try _id (MongoDB ObjectId)
-        if (!result.success || !result.data) {
-            const { ObjectId } = require('mongodb');
-            try {
-                // Try as ObjectId
-                result = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'products',
-                    command: '--read',
-                    data: { _id: new ObjectId(id) }
-                });
-            } catch (e) {
-                // If ObjectId conversion fails, try as string
-                result = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'products',
-                    command: '--read',
-                    data: { _id: id }
-                });
-            }
-        }
         
         if (result.success && result.data) {
             const product = result.data;
@@ -412,20 +409,23 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
             const basePrice = product.price || 0;
             const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
             
+            // Per-request cache for exchange rates (avoids redundant exchange_rates reads)
+            const rateCache = {};
+            
             // Add multi-currency prices
             try {
-                const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency);
+                const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency, rateCache);
                 product.base_price = basePrice;
                 product.currency = baseCurrency;
                 product.prices = multiCurrencyPrices;
                 
-                // If specific currency requested, add converted_price field
+                // If specific currency requested, add converted_price field (reuses rateCache)
                 if (requestedCurrency && requestedCurrency !== baseCurrency) {
                     const convertedPrice = multiCurrencyPrices[requestedCurrency];
                     if (convertedPrice !== undefined) {
                         product.selected_currency = requestedCurrency;
                         product.converted_price = convertedPrice;
-                        const rate = await currencyService.getExchangeRate(baseCurrency, requestedCurrency);
+                        const rate = await currencyService.getExchangeRate(baseCurrency, requestedCurrency, rateCache);
                         product.exchange_rate = rate;
                     }
                 }
@@ -537,52 +537,23 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
         
-        // Try to find product by id first
-        let result = await db.executeOperation({
+        // Single query resolves by id or _id (reduces up to 3 reads to 1)
+        const lookupQuery = buildProductLookupQuery(id);
+        const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
-            data: { id }
+            data: lookupQuery
         });
         
         let product = null;
         let productId = null;
         let product_id = null; // MongoDB _id
-        let foundById = false; // Track which field was used to find product
         
-        // Extract product data (handle array or single object)
         if (result.success && result.data) {
             product = Array.isArray(result.data) ? result.data[0] : result.data;
             productId = product?.id;
-            product_id = product?._id;
-            foundById = true;
-        }
-        
-        // If not found by id, try _id (MongoDB ObjectId)
-        if (!product || !productId) {
-            const { ObjectId } = require('mongodb');
-            try {
-                result = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'products',
-                    command: '--read',
-                    data: { _id: new ObjectId(id) }
-                });
-            } catch (e) {
-                result = await db.executeOperation({
-                    database_name: 'peakmode',
-                    collection_name: 'products',
-                    command: '--read',
-                    data: { _id: id }
-                });
-            }
-            
-            if (result.success && result.data) {
-                product = Array.isArray(result.data) ? result.data[0] : result.data;
-                productId = product?.id;
-                product_id = product?._id || id;
-                foundById = false;
-            }
+            product_id = product?._id || (product ? product._id : null);
         }
         
         if (!product || (!productId && !product_id)) {
@@ -604,21 +575,15 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
         const viewsLast7Days = (product.viewsLast7Days || 0) + 1;
         const lastViewedAt = new Date().toISOString();
         
-        // Build filter - use whichever field was used to find the product
-        let filter = {};
-        if (foundById && productId) {
-            filter = { id: productId };
-        } else if (product_id) {
+        // Build filter from the found product
+        let filter = productId ? { id: productId } : { id: id };
+        if (!productId && product_id) {
             const { ObjectId } = require('mongodb');
-            // Try ObjectId first, fall back to string
             try {
-                filter = { _id: new ObjectId(product_id) };
+                filter = { _id: product_id instanceof ObjectId ? product_id : new ObjectId(String(product_id)) };
             } catch (e) {
                 filter = { _id: product_id };
             }
-        } else {
-            // Fallback to id field
-            filter = { id: productId || id };
         }
         
         // Update product with new view counts
@@ -671,6 +636,12 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
         const language = translationService.getLanguageFromRequest(req);
         
         let query = {};
+        
+        // Storefront: filter at DB level to avoid full scan (published: true only)
+        // Admin with token: see all products including drafts
+        if (!req.isAdminRequest) {
+            query.published = true;
+        }
         
         // Add category filter if provided
         // Note: We'll do case-insensitive matching in application layer for better compatibility
@@ -731,14 +702,17 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 products = products.slice(0, parseInt(limit));
             }
             
+            // Per-request cache for exchange rates (reduces ~180 DB reads to ~9 for product list)
+            const rateCache = {};
+            
             // Process inventory data for each product and add multi-currency prices
             products = await Promise.all(products.map(async (product) => {
-                // Add multi-currency prices
+                // Add multi-currency prices (shared rateCache avoids repeated exchange_rates reads)
                 const basePrice = product.price || 0;
                 const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
                 
                 try {
-                    const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency);
+                    const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency, rateCache);
                     product.base_price = basePrice;
                     product.currency = baseCurrency;
                     product.prices = multiCurrencyPrices;
@@ -1138,11 +1112,13 @@ router.get('/:id/variants', optionalAuthenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         
+        // Single query resolves by id or _id
+        const query = buildProductLookupQuery(id);
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
-            data: { id }
+            data: query
         });
         
         if (result.success && result.data) {
@@ -1179,12 +1155,12 @@ router.get('/:id/variants', optionalAuthenticateAdmin, async (req, res) => {
 // This endpoint is for SEO purposes only; storefront only - only published products
 router.get('/sitemap', async (req, res) => {
     try {
-        // Get all products (we'll filter active ones)
+        // Filter published at DB level (sitemap never includes drafts)
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'products',
             command: '--read',
-            data: {}
+            data: { published: true }
         });
         
         if (result.success) {

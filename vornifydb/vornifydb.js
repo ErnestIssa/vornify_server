@@ -175,6 +175,29 @@ class VortexDB {
             await chunksCollection.createIndex({ videoId: 1, index: 1 });
             await chunksCollection.createIndex({ type: 1 });
 
+            // Collection-specific indexes for performance (products, reviews, exchange_rates)
+            const peakmode = this.client.db('peakmode');
+            const productsColl = peakmode.collection('products');
+            const reviewsColl = peakmode.collection('reviews');
+            const exchangeRatesColl = peakmode.collection('exchange_rates');
+
+            for (const [coll, spec] of [
+                [productsColl, [{ key: { published: 1 }, cacheKey: 'peakmode.products.published' }, { key: { category: 1 }, cacheKey: 'peakmode.products.category' }, { key: { featured: 1 }, cacheKey: 'peakmode.products.featured' }]],
+                [reviewsColl, [{ key: { productId: 1, status: 1 }, cacheKey: 'peakmode.reviews.productId_status' }]],
+                [exchangeRatesColl, [{ key: { currency: 1, baseCurrency: 1 }, cacheKey: 'peakmode.exchange_rates.currency_baseCurrency' }]]
+            ]) {
+                for (const { key, cacheKey } of spec) {
+                    if (!this.indexCache.has(cacheKey)) {
+                        try {
+                            await coll.createIndex(key, { background: true });
+                            this.indexCache.add(cacheKey);
+                        } catch (idxErr) {
+                            console.warn(`Warning: Could not create index ${cacheKey}:`, idxErr.message);
+                        }
+                    }
+                }
+            }
+
         } catch (error) {
             console.error('Error setting up indexes:', error);
         }
@@ -561,11 +584,13 @@ class VortexDB {
             }
             
             // Determine if this is a single record query (by id/_id) or a filter query (multiple results)
-            // Single record queries have 'id' or '_id' field
-            const isSingleRecordQuery = query.hasOwnProperty('id') || query.hasOwnProperty('_id');
+            // Single record: top-level id/_id, or $or with id/_id branches (e.g. resolve by id or _id in one query)
+            const hasIdOrIdInOr = query.$or && Array.isArray(query.$or) && query.$or.length > 0 &&
+                query.$or.some(b => b && typeof b === 'object' && ('id' in b || '_id' in b));
+            const isSingleRecordQuery = query.hasOwnProperty('id') || query.hasOwnProperty('_id') || hasIdOrIdInOr;
             
             if (isSingleRecordQuery) {
-                // For single record queries (by id or _id)
+                // For single record queries (by id, _id, or $or combining both)
                 result = await collection.findOne(query);
                 
                 if (!result) {

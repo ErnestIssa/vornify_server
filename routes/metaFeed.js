@@ -62,11 +62,12 @@ router.get('/meta-feed.csv', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL || process.env.FRONTEND_URL || 'https://peakmode.se';
 
+    // Filter published at DB level (meta feed only includes active/published)
     const result = await db.executeOperation({
       database_name: 'peakmode',
       collection_name: 'products',
       command: '--read',
-      data: {}
+      data: { published: true }
     });
 
     if (!result.success) {

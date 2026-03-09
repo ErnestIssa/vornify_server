@@ -29,8 +29,11 @@ const CACHE_DURATION_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Get exchange rate from database or return default
+ * @param {string} fromCurrency - Source currency code
+ * @param {string} toCurrency - Target currency code
+ * @param {Object|null} rateCache - Optional per-request cache: { [currency]: rate }. Reduces repeated DB reads.
  */
-async function getExchangeRate(fromCurrency, toCurrency) {
+async function getExchangeRate(fromCurrency, toCurrency, rateCache = null) {
     try {
         // Same currency = 1.0
         if (fromCurrency === toCurrency) {
@@ -39,20 +42,20 @@ async function getExchangeRate(fromCurrency, toCurrency) {
 
         // If converting from base currency, get rate directly
         if (fromCurrency === BASE_CURRENCY) {
-            const rate = await getRateFromDB(toCurrency);
+            const rate = await getRateFromDB(toCurrency, rateCache);
             return rate || SUPPORTED_CURRENCIES[toCurrency]?.rate || 1.0;
         }
 
         // If converting to base currency, get inverse rate
         if (toCurrency === BASE_CURRENCY) {
-            const rate = await getRateFromDB(fromCurrency);
+            const rate = await getRateFromDB(fromCurrency, rateCache);
             return rate ? 1 / rate : (1 / (SUPPORTED_CURRENCIES[fromCurrency]?.rate || 1.0));
         }
 
         // Converting between two non-base currencies
         // Convert from -> base -> to
-        const fromRate = await getRateFromDB(fromCurrency);
-        const toRate = await getRateFromDB(toCurrency);
+        const fromRate = await getRateFromDB(fromCurrency, rateCache);
+        const toRate = await getRateFromDB(toCurrency, rateCache);
         
         if (fromRate && toRate) {
             return toRate / fromRate;
@@ -75,11 +78,18 @@ async function getExchangeRate(fromCurrency, toCurrency) {
 /**
  * Get exchange rate from database
  * Uses last stored rate even if expired (fallback behavior)
+ * @param {string} currency - Currency code (relative to BASE_CURRENCY)
+ * @param {Object|null} rateCache - Optional per-request cache. If provided and cache has currency, return cached value.
  */
-async function getRateFromDB(currency) {
+async function getRateFromDB(currency, rateCache = null) {
     try {
         if (currency === BASE_CURRENCY) {
             return 1.0;
+        }
+
+        // Per-request cache: avoid repeated DB reads for same currency within one request
+        if (rateCache && typeof rateCache === 'object' && Object.prototype.hasOwnProperty.call(rateCache, currency)) {
+            return rateCache[currency];
         }
 
         const result = await db.executeOperation({
@@ -95,6 +105,10 @@ async function getRateFromDB(currency) {
             if (rateData.rate) {
                 const rate = parseFloat(rateData.rate);
                 if (!isNaN(rate)) {
+                    // Store in per-request cache for reuse
+                    if (rateCache && typeof rateCache === 'object') {
+                        rateCache[currency] = rate;
+                    }
                     // Check if rate is still valid (not expired)
                     const lastUpdated = new Date(rateData.lastUpdated || rateData.updatedAt || 0);
                     const age = Date.now() - lastUpdated.getTime();
@@ -112,8 +126,12 @@ async function getRateFromDB(currency) {
         }
 
         // Return default rate if not in DB
+        const defaultRate = SUPPORTED_CURRENCIES[currency]?.rate || null;
+        if (rateCache && typeof rateCache === 'object' && defaultRate !== null) {
+            rateCache[currency] = defaultRate;
+        }
         console.warn(`⚠️ Rate for ${currency} not found in DB, using default rate`);
-        return SUPPORTED_CURRENCIES[currency]?.rate || null;
+        return defaultRate;
 
     } catch (error) {
         console.error(`Error fetching rate for ${currency}:`, error);
@@ -395,8 +413,11 @@ async function updateExchangeRates() {
 
 /**
  * Get multi-currency prices for a product
+ * @param {number} basePrice - Price in base currency
+ * @param {string} baseCurrency - Base currency code (default EUR)
+ * @param {Object|null} rateCache - Optional per-request cache. Pass same object across products to reuse rates (avoids 9 DB reads per product).
  */
-async function getMultiCurrencyPrices(basePrice, baseCurrency = BASE_CURRENCY) {
+async function getMultiCurrencyPrices(basePrice, baseCurrency = BASE_CURRENCY, rateCache = null) {
     try {
         const prices = {};
         const priceNum = parseFloat(basePrice) || 0;
@@ -405,7 +426,7 @@ async function getMultiCurrencyPrices(basePrice, baseCurrency = BASE_CURRENCY) {
             if (currency === baseCurrency) {
                 prices[currency] = priceNum;
             } else {
-                const rate = await getExchangeRate(baseCurrency, currency);
+                const rate = await getExchangeRate(baseCurrency, currency, rateCache);
                 prices[currency] = Math.round(priceNum * rate * 100) / 100;
             }
         }
