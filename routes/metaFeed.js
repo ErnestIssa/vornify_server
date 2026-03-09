@@ -60,6 +60,9 @@ function getMetaAvailability(product) {
 
 router.get('/meta-feed.csv', async (req, res) => {
   try {
+    if (process.env.NODE_ENV === 'development' || req.query._ping) {
+      console.log('🔔 [CRON/PING] GET /meta-feed.csv hit');
+    }
     const baseUrl = process.env.BASE_URL || process.env.FRONTEND_URL || 'https://peakmode.se';
 
     // Filter published at DB level (meta feed only includes active/published)

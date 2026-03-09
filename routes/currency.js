@@ -53,7 +53,7 @@ router.get('/convert', async (req, res) => {
 router.get('/settings/currencies', async (req, res) => {
     try {
         const result = await currencyService.getSupportedCurrencies();
-        res.json(result);
+        res.status(200).json(result);
     } catch (error) {
         console.error('Error getting supported currencies:', error);
         res.status(500).json({
@@ -66,7 +66,7 @@ router.get('/settings/currencies', async (req, res) => {
 
 /**
  * POST /api/settings/currencies/update
- * Update exchange rates (admin only - can be called by scheduled job)
+ * Update exchange rates (can be called by admin or scheduled job)
  */
 router.post('/settings/currencies/update', async (req, res) => {
     try {
@@ -76,7 +76,34 @@ router.post('/settings/currencies/update', async (req, res) => {
             return res.status(500).json(result);
         }
 
-        res.json(result);
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Error updating exchange rates:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * GET /api/settings/currencies/update
+ * Same as POST - for cron-job.org and other schedulers that only support GET.
+ * Safe to call on a schedule (e.g. daily); updates exchange_rates in DB from ECB/USD API.
+ */
+router.get('/settings/currencies/update', async (req, res) => {
+    try {
+        if (process.env.NODE_ENV === 'development' || req.query._ping) {
+            console.log('🔔 [CRON/PING] GET /api/settings/currencies/update hit');
+        }
+        const result = await currencyService.updateExchangeRates();
+        
+        if (!result.success) {
+            return res.status(500).json(result);
+        }
+
+        res.status(200).json(result);
     } catch (error) {
         console.error('Error updating exchange rates:', error);
         res.status(500).json({

@@ -13,6 +13,9 @@ const db = getDBInstance();
  */
 router.get('/content', async (req, res) => {
     try {
+        if (process.env.NODE_ENV === 'development' || req.query._ping) {
+            console.log('🔔 [CRON/PING] GET /api/admin/content hit');
+        }
         // Fetch content from database
         const contentResult = await db.executeOperation({
             database_name: 'peakmode',
@@ -58,7 +61,7 @@ router.get('/content', async (req, res) => {
             }
             : defaultContent;
 
-        res.json({
+        res.status(200).json({
             success: true,
             ...responseContent
         });

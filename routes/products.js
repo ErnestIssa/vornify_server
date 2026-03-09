@@ -378,6 +378,60 @@ router.get('/categories', optionalAuthenticateAdmin, async (req, res) => {
     }
 });
 
+// GET /api/products/sitemap - Get all products for sitemap generation (must be before /:id to avoid matching id='sitemap')
+// Returns minimal product data needed for sitemap (id, name, category, updatedAt, slug)
+router.get('/sitemap', async (req, res) => {
+    try {
+        if (process.env.NODE_ENV === 'development' || req.query._ping) {
+            console.log('🔔 [CRON/PING] GET /api/products/sitemap hit');
+        }
+        // Filter published at DB level (sitemap never includes drafts)
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: { published: true }
+        });
+        
+        if (result.success) {
+            let products = result.data || [];
+            if (!Array.isArray(products)) {
+                products = [products];
+            }
+            
+            const sitemapProducts = products
+                .filter(product => isPublishedForStorefront(product) && product.active !== false)
+                .map(product => {
+                    const slug = product.slug || seoHelper.generateSlug(product.name || product.id);
+                    return {
+                        id: product.id,
+                        name: product.name,
+                        category: product.category,
+                        updatedAt: product.updatedAt || product.updated_at || new Date().toISOString(),
+                        slug: slug
+                    };
+                });
+            
+            res.status(200).json({
+                success: true,
+                data: sitemapProducts,
+                count: sitemapProducts.length
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to retrieve products for sitemap'
+            });
+        }
+    } catch (error) {
+        console.error('Get sitemap products error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve products for sitemap'
+        });
+    }
+});
+
 // GET /api/products/:id - Get product by ID with complete inventory data
 router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
     try {
@@ -1146,61 +1200,6 @@ router.get('/:id/variants', optionalAuthenticateAdmin, async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve product variants'
-        });
-    }
-});
-
-// GET /api/products/sitemap - Get all products for sitemap generation
-// Returns minimal product data needed for sitemap (id, name, category, updatedAt, slug)
-// This endpoint is for SEO purposes only; storefront only - only published products
-router.get('/sitemap', async (req, res) => {
-    try {
-        // Filter published at DB level (sitemap never includes drafts)
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'products',
-            command: '--read',
-            data: { published: true }
-        });
-        
-        if (result.success) {
-            let products = result.data || [];
-            if (!Array.isArray(products)) {
-                products = [products];
-            }
-            
-            // Storefront only: sitemap must not include drafts (no admin override)
-            const sitemapProducts = products
-                .filter(product => isPublishedForStorefront(product) && product.active !== false)
-                .map(product => {
-                    // Generate slug if not present
-                    const slug = product.slug || seoHelper.generateSlug(product.name || product.id);
-                    
-                    return {
-                        id: product.id,
-                        name: product.name,
-                        category: product.category,
-                        updatedAt: product.updatedAt || product.updated_at || new Date().toISOString(),
-                        slug: slug
-                    };
-                });
-            
-            res.json({
-                success: true,
-                data: sitemapProducts,
-                count: sitemapProducts.length
-            });
-        } else {
-            res.status(500).json({
-                success: false,
-                error: 'Failed to retrieve products for sitemap'
-            });
-        }
-    } catch (error) {
-        console.error('Get sitemap products error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to retrieve products for sitemap'
         });
     }
 });
