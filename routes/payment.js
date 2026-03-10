@@ -39,6 +39,15 @@ try {
 
 const db = getDBInstance();
 
+/** Normalize country to ISO 2-letter code (e.g. "Sweden" -> "SE") for zone lookup. */
+function normalizeCountryCode(countryOrCode) {
+    if (!countryOrCode || typeof countryOrCode !== 'string') return '';
+    const upper = countryOrCode.toUpperCase().trim();
+    if (upper.length === 2) return upper;
+    const map = { SWEDEN: 'SE', GERMANY: 'DE', FRANCE: 'FR', DENMARK: 'DK', NORWAY: 'NO', FINLAND: 'FI', ITALY: 'IT', SPAIN: 'ES', NETHERLANDS: 'NL', POLAND: 'PL', AUSTRIA: 'AT', BELGIUM: 'BE', CROATIA: 'HR', CYPRUS: 'CY', CZECH: 'CZ', CZECHIA: 'CZ', ESTONIA: 'EE', GREECE: 'GR', HUNGARY: 'HU', IRELAND: 'IE', LATVIA: 'LV', LITHUANIA: 'LT', LUXEMBOURG: 'LU', MALTA: 'MT', PORTUGAL: 'PT', ROMANIA: 'RO', SLOVAKIA: 'SK', SLOVENIA: 'SI', BULGARIA: 'BG' };
+    return map[upper] || upper;
+}
+
 /**
  * GET /api/payments/check-payment-methods
  * Check if Apple Pay and Google Pay are available for the user's device/browser
@@ -648,7 +657,28 @@ router.post('/create-intent', async (req, res) => {
             return res.status(400).json({
                 success: false,
                 error: 'userId is required to create payment intent',
-                errorCode: 'MISSING_USER_ID'
+                errorCode: 'MISSING_USER_ID',
+                userMessage: 'Something went wrong. Please refresh the page and try again.'
+            });
+        }
+
+        // Require shipping address and method before creating payment (payment must only start when user clicks "Complete my order")
+        const hasShippingAddress = shippingAddress && (shippingAddress.country || shippingAddress.countryCode);
+        if (!hasShippingAddress) {
+            return res.status(400).json({
+                success: false,
+                error: 'Shipping address with country is required',
+                errorCode: 'MISSING_SHIPPING_ADDRESS',
+                userMessage: 'Please enter your delivery address and country before completing your order.'
+            });
+        }
+        const hasShippingMethod = shippingMethod && (shippingMethod.id || body.shippingMethodId);
+        if (!hasShippingMethod) {
+            return res.status(400).json({
+                success: false,
+                error: 'Shipping method is required',
+                errorCode: 'MISSING_SHIPPING_METHOD',
+                userMessage: 'Please select a shipping method before completing your order.'
             });
         }
 
@@ -668,7 +698,8 @@ router.post('/create-intent', async (req, res) => {
             return res.status(400).json({
                 success: false,
                 error: 'Cart not found or empty. Add items to cart before creating payment intent.',
-                errorCode: 'CART_EMPTY_OR_MISSING'
+                errorCode: 'CART_EMPTY_OR_MISSING',
+                userMessage: 'Your cart is empty. Please add items before completing your order.'
             });
         }
 
@@ -677,23 +708,30 @@ router.post('/create-intent', async (req, res) => {
         const discountService = require('../services/discountService');
         const vatService = require('../services/vatService');
 
+        // Normalize country to ISO 2-letter code (frontend may send "Sweden" or "SE") so zone lookup works
+        const countryForZone = normalizeCountryCode((shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode) : '');
+
         // Shipping country overrides IP for final VAT (checkout rule)
-        const shippingCountry = (shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode).toUpperCase().trim() : null;
+        const shippingCountry = countryForZone || vatService.getCountryFromRequest(req);
         const countryForVat = shippingCountry || vatService.getCountryFromRequest(req);
         const vatRate = vatService.getVatRate(countryForVat);
 
-        // Shipping cost from zone + selected method (backend-only; ignore any frontend-sent cost)
+        // Shipping cost from zone + selected method; must be included in payment total
         let shippingCost = 0;
         if (shippingAddress && shippingMethod) {
-            const country = (shippingAddress.country || shippingAddress.countryCode || '').toString().toUpperCase();
-            if (country) {
-                const zone = getShippingZone(country);
+            if (countryForZone) {
+                const zone = getShippingZone(countryForZone);
                 if (zone) {
                     const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
                     shippingCost = typeof validatedMethod.cost === 'number' && !isNaN(validatedMethod.cost) ? validatedMethod.cost : 0;
                 }
             }
-        } else if (cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
+            // If zone lookup failed or cost still 0, use cart's stored shipping so payment total matches cart
+            if (shippingCost <= 0 && cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
+                shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
+            }
+        }
+        if (shippingCost <= 0 && cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
             shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
         }
 
@@ -728,7 +766,8 @@ router.post('/create-intent', async (req, res) => {
             return res.status(400).json({
                 success: false,
                 error: 'Invalid payment amount calculated from cart',
-                errorCode: 'INVALID_AMOUNT'
+                errorCode: 'INVALID_AMOUNT',
+                userMessage: 'We could not calculate the order total. Please check your cart and try again.'
             });
         }
         
@@ -759,7 +798,8 @@ router.post('/create-intent', async (req, res) => {
         if (amountInCents < 1) {
             return res.status(400).json({
                 success: false,
-                error: 'Amount must be at least 0.01 in the specified currency'
+                error: 'Amount must be at least 0.01 in the specified currency',
+                userMessage: 'The order total is too low. Please add items to your cart.'
             });
         }
 
@@ -845,7 +885,8 @@ router.post('/create-intent', async (req, res) => {
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent configuration error: automatic_payment_methods must be enabled',
-                code: 'invalid_payment_intent_config'
+                code: 'invalid_payment_intent_config',
+                userMessage: 'Payment is temporarily unavailable. Please try again later.'
             });
         }
         
@@ -855,7 +896,8 @@ router.post('/create-intent', async (req, res) => {
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent configuration error: Cannot use both payment_method_types and automatic_payment_methods',
-                code: 'conflicting_payment_method_config'
+                code: 'conflicting_payment_method_config',
+                userMessage: 'Payment is temporarily unavailable. Please try again later.'
             });
         }
         
@@ -867,32 +909,33 @@ router.post('/create-intent', async (req, res) => {
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent created but client secret is missing',
-                code: 'missing_client_secret'
+                code: 'missing_client_secret',
+                userMessage: 'Something went wrong starting the payment. Please try again.'
             });
         }
         
         // CRITICAL: Validate status is requires_payment_method (required for PaymentElement)
         if (paymentIntent.status !== 'requires_payment_method') {
             console.error(`❌ [PAYMENT] CRITICAL: Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method'`);
-            console.error(`❌ [PAYMENT] PaymentElement will NOT work with status: ${paymentIntent.status}`);
             return res.status(500).json({
                 success: false,
                 error: `Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method' for PaymentElement`,
                 code: 'invalid_payment_intent_status',
                 actualStatus: paymentIntent.status,
-                expectedStatus: 'requires_payment_method'
+                expectedStatus: 'requires_payment_method',
+                userMessage: 'Something went wrong starting the payment. Please try again.'
             });
         }
         
         // CRITICAL: Validate automatic_payment_methods is enabled (required for PaymentElement)
         if (!paymentIntent.automatic_payment_methods?.enabled) {
             console.error('❌ [PAYMENT] CRITICAL: Payment intent created but automatic_payment_methods is not enabled!');
-            console.error('❌ [PAYMENT] PaymentElement will NOT render without automatic_payment_methods enabled!');
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent created but automatic_payment_methods is not enabled. PaymentElement requires this.',
                 code: 'automatic_payment_methods_not_enabled',
-                automatic_payment_methods: paymentIntent.automatic_payment_methods
+                automatic_payment_methods: paymentIntent.automatic_payment_methods,
+                userMessage: 'Something went wrong starting the payment. Please try again.'
             });
         }
         
@@ -1022,15 +1065,24 @@ router.post('/create-intent', async (req, res) => {
             statusCode: error.statusCode
         });
         
+        // Prefer a client-friendly message; never expose stack or internal details to the client
+        const userMessage = (error.code === 'card_declined' || error.decline_code)
+            ? 'Your card was declined. Please try another card or payment method.'
+            : (error.code === 'incorrect_cvc' || error.code === 'invalid_cvc')
+                ? 'The security code (CVC) is incorrect. Please check and try again.'
+                : (error.code === 'expired_card')
+                    ? 'Your card has expired. Please use another card.'
+                    : 'We could not start the payment. Please check your details and try again, or use another payment method.';
+
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to create payment intent',
             code: error.code || 'payment_intent_creation_failed',
+            userMessage,
             device: {
                 isMobile,
                 platform: isMobile ? 'mobile' : 'desktop'
             },
-            // Include Stripe error details if available
             stripeError: error.type ? {
                 type: error.type,
                 code: error.code,
@@ -1239,21 +1291,25 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
         const discountService = require('../services/discountService');
         const vatService = require('../services/vatService');
 
-        const shippingCountry = (shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode).toUpperCase().trim() : null;
-        const countryForVat = shippingCountry || vatService.getCountryFromRequest(req);
+        const countryForZoneUpdate = normalizeCountryCode((shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode) : '');
+
+        const countryForVat = countryForZoneUpdate || vatService.getCountryFromRequest(req);
         const vatRate = vatService.getVatRate(countryForVat);
 
         let shippingCost = 0;
         if (shippingAddress && shippingMethod) {
-            const country = (shippingAddress.country || shippingAddress.countryCode || '').toString().toUpperCase();
-            if (country) {
-                const zone = getShippingZone(country);
+            if (countryForZoneUpdate) {
+                const zone = getShippingZone(countryForZoneUpdate);
                 if (zone) {
                     const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
                     shippingCost = typeof validatedMethod.cost === 'number' && !isNaN(validatedMethod.cost) ? validatedMethod.cost : 0;
                 }
             }
-        } else if (cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
+            if (shippingCost <= 0 && cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
+                shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
+            }
+        }
+        if (shippingCost <= 0 && cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
             shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
         }
 
