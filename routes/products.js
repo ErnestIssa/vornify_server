@@ -468,6 +468,10 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
             const { country: vatCountry, vatRate } = vatService.getCountryAndVatFromRequest(req);
             product.vat_display = { country: vatCountry, vat_rate: vatRate };
             product.price_including_vat = Math.round(basePrice * (1 + vatRate) * 100) / 100;
+            const compareAt = product.compareAtPrice ?? product.compare_at_price;
+            if (typeof compareAt === 'number' && !isNaN(compareAt) && compareAt > 0) {
+                product.compare_at_price_including_vat = Math.round(compareAt * (1 + vatRate) * 100) / 100;
+            }
             
             // Per-request cache for exchange rates (avoids redundant exchange_rates reads)
             const rateCache = {};
@@ -773,7 +777,10 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
                 product.vat_display = { country: vatCountry, vat_rate: vatRate };
                 product.price_including_vat = Math.round(basePrice * (1 + vatRate) * 100) / 100;
-
+                const compareAt = product.compareAtPrice ?? product.compare_at_price;
+                if (typeof compareAt === 'number' && !isNaN(compareAt) && compareAt > 0) {
+                    product.compare_at_price_including_vat = Math.round(compareAt * (1 + vatRate) * 100) / 100;
+                }
                 try {
                     const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency, rateCache);
                     product.base_price = basePrice;
