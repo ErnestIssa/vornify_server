@@ -410,6 +410,40 @@ router.post('/create', async (req, res) => {
             }
         }
         
+        // Backend is single source of truth: recalculate totals from items, shipping, discount; VAT from shipping country
+        const checkoutTotalsService = require('../services/checkoutTotalsService');
+        const discountService = require('../services/discountService');
+        const vatService = require('../services/vatService');
+        const shippingCountry = (orderData.shippingAddress && (orderData.shippingAddress.country || orderData.shippingAddress.countryCode)) || (orderData.customer && (orderData.customer.country || orderData.customer.countryCode));
+        const countryForVat = shippingCountry ? String(shippingCountry).toUpperCase().trim() : vatService.DEFAULT_COUNTRY;
+        const vatRate = vatService.getVatRate(countryForVat);
+
+        const shippingCostForTotals = orderData.shippingCost ?? orderData.shippingMethod?.cost ?? 0;
+        let orderDiscountAmount = 0;
+        if (orderData.appliedDiscount && typeof orderData.appliedDiscount.amount === 'number' && !isNaN(orderData.appliedDiscount.amount)) {
+            orderDiscountAmount = orderData.appliedDiscount.amount;
+        } else if (orderData.discountCode) {
+            const productGross = (orderData.items || []).reduce((sum, item) => {
+                const p = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+                const q = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+                return sum + p * q;
+            }, 0);
+            const calc = await discountService.calculateOrderTotals(productGross, shippingCostForTotals, 0, orderData.discountCode);
+            if (calc.success && calc.appliedDiscount && typeof calc.appliedDiscount.amount === 'number') {
+                orderDiscountAmount = calc.appliedDiscount.amount;
+            }
+        }
+        const calculatedTotals = checkoutTotalsService.calculateTotals(
+            orderData.items || [],
+            shippingCostForTotals,
+            orderDiscountAmount,
+            orderData.currency || 'SEK',
+            vatRate,
+            { country: countryForVat }
+        );
+        // Keep backward-compat alias for consumers that read order.totals.shipping
+        const orderTotals = { ...calculatedTotals, shipping: calculatedTotals.shippingGross };
+        
         // Generate unique Order ID with timeout protection
         console.log('📦 [ORDER CREATE] Generating unique order ID...');
         const orderId = await Promise.race([
@@ -481,21 +515,20 @@ router.post('/create', async (req, res) => {
                 color: item.color || null
             })) : [],
             
-            // Financial information
-            total: orderData.totals?.total || orderData.total || 0,
-            shipping: orderData.totals?.shipping || orderData.shippingCost || 0,
-            tax: orderData.totals?.tax || orderData.tax || 0,
-            subtotal: orderData.totals?.subtotal || orderData.subtotal || 0,
-            
-            // Discount information - CRITICAL: Store discount details in order
-            discount: orderData.totals?.discount || orderData.discount || 0,
-            discountedSubtotal: orderData.totals?.discountedSubtotal || orderData.discountedSubtotal || (orderData.totals?.subtotal || orderData.subtotal || 0),
-            appliedDiscount: orderData.appliedDiscount || null, // Store full discount info including code
+            // Financial information (backend-calculated only; frontend totals ignored)
+            totals: orderTotals,
+            total: calculatedTotals.total,
+            shipping: calculatedTotals.shippingGross,
+            tax: calculatedTotals.vatAmount,
+            subtotal: calculatedTotals.subtotalNet,
+            discount: calculatedTotals.discountAmount,
+            discountedSubtotal: calculatedTotals.subtotalGross - calculatedTotals.vatAmount,
+            appliedDiscount: orderData.appliedDiscount || null,
             discountCode: orderData.appliedDiscount?.code || orderData.discountCode || null,
             
             // Multi-currency support
             currency: orderData.currency || currencyService.BASE_CURRENCY,
-            baseTotal: orderData.baseTotal || orderData.totals?.total || orderData.total || 0,
+            baseTotal: calculatedTotals.total,
             baseCurrency: orderData.baseCurrency || currencyService.BASE_CURRENCY,
             exchangeRate: orderData.exchangeRate || 1.0,
             rateTimestamp: orderData.rateTimestamp || new Date().toISOString(),

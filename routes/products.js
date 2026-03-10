@@ -6,6 +6,7 @@ const translationService = require('../services/translationService');
 const productTranslationHelper = require('../services/productTranslationHelper');
 const seoHelper = require('../utils/seoHelper');
 const reviewStatsHelper = require('../utils/reviewStatsHelper');
+const vatService = require('../services/vatService');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 const optionalAuthenticateAdmin = authenticateAdmin.optionalAuthenticateAdmin || (async (req, res, next) => { req.isAdminRequest = false; next(); });
 
@@ -462,6 +463,11 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
             const requestedCurrency = req.query.currency?.toUpperCase() || null;
             const basePrice = product.price || 0;
             const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
+
+            // VAT for display: country from CF-IPCountry or ?country=; product base price is ex-VAT
+            const { country: vatCountry, vatRate } = vatService.getCountryAndVatFromRequest(req);
+            product.vat_display = { country: vatCountry, vat_rate: vatRate };
+            product.price_including_vat = Math.round(basePrice * (1 + vatRate) * 100) / 100;
             
             // Per-request cache for exchange rates (avoids redundant exchange_rates reads)
             const rateCache = {};
@@ -758,13 +764,16 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
             
             // Per-request cache for exchange rates (reduces ~180 DB reads to ~9 for product list)
             const rateCache = {};
-            
+            const { country: vatCountry, vatRate } = vatService.getCountryAndVatFromRequest(req);
+
             // Process inventory data for each product and add multi-currency prices
             products = await Promise.all(products.map(async (product) => {
                 // Add multi-currency prices (shared rateCache avoids repeated exchange_rates reads)
                 const basePrice = product.price || 0;
                 const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
-                
+                product.vat_display = { country: vatCountry, vat_rate: vatRate };
+                product.price_including_vat = Math.round(basePrice * (1 + vatRate) * 100) / 100;
+
                 try {
                     const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency, rateCache);
                     product.base_price = basePrice;

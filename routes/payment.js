@@ -610,146 +610,129 @@ async function handleChargeRefunded(charge) {
 
 /**
  * POST /api/payments/create-intent
- * Create a Stripe payment intent for checkout
- * 
- * Body:
- * {
- *   "amount": 100.00,
- *   "currency": "sek",
- *   "orderId": "PM123456",
- *   "customerEmail": "customer@example.com",
- *   "paymentMethod": "card",
- *   "metadata": { ... }
- * }
+ * Create a Stripe payment intent for checkout.
+ * Payment amount is ALWAYS derived from backend-calculated cart totals.
+ * Frontend must NOT send amount, subtotal, tax, or total; those are ignored.
+ *
+ * Body (allowed):
+ *   userId (required)
+ *   cartId (optional)
+ *   shippingMethodId, shippingMethod (optional – id + { id, type, ... } for zone pricing)
+ *   shippingAddress (optional – for zone/country)
+ *   discountCode (optional)
+ *   customerEmail, orderId, metadata (optional – for Stripe/customer)
  */
 router.post('/create-intent', async (req, res) => {
     try {
-        const { amount, currency, orderId, customerEmail, paymentMethod, metadata = {}, orderData } = req.body;
-        
-        // Detect mobile device for logging and debugging
+        const body = req.body || {};
+        // Allowed fields; any amount/totals from frontend are ignored
+        const userId = body.userId;
+        const customerEmail = body.customerEmail;
+        const orderId = body.orderId;
+        const metadata = body.metadata || {};
+        const shippingAddress = body.shippingAddress || body.customer;
+        const shippingMethod = body.shippingMethod || (body.shippingMethodId ? { id: body.shippingMethodId, type: body.shippingMethodType } : null);
+        const discountCode = body.discountCode || null;
+
         const userAgent = req.headers['user-agent'] || '';
         const isMobile = /Mobile|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
         const deviceInfo = {
             isMobile,
-            userAgent: userAgent.substring(0, 100), // Log first 100 chars
+            userAgent: userAgent.substring(0, 100),
             platform: isMobile ? 'mobile' : 'desktop'
         };
         
         console.log(`📱 [PAYMENT] Request from ${deviceInfo.platform} device`);
 
-        // Validate required fields
-        if (!amount || amount <= 0) {
+        if (!userId) {
             return res.status(400).json({
                 success: false,
-                error: 'Valid amount is required'
+                error: 'userId is required to create payment intent',
+                errorCode: 'MISSING_USER_ID'
             });
         }
 
-        if (!currency) {
-            return res.status(400).json({
-                success: false,
-                error: 'Currency is required'
-            });
-        }
-
-        // SECURITY: Recalculate total amount including shipping if orderData is provided
-        // This ensures the payment amount matches the actual order total (subtotal + shipping + tax - discount)
-        let validatedAmount = parseFloat(amount);
-        
-        // Log what we received for debugging
-        console.log('💳 [PAYMENT INTENT] Creating payment intent:', {
-            providedAmount: amount,
-            currency: currency,
-            hasOrderData: !!orderData,
-            orderTotals: orderData?.totals,
-            shippingMethod: orderData?.shippingMethod ? {
-                id: orderData.shippingMethod.id,
-                type: orderData.shippingMethod.type,
-                cost: orderData.shippingMethod.cost
-            } : null
+        // Load current cart from database (single source of truth for items and pricing)
+        const cartResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--read',
+            data: { userId }
         });
-        
-        if (orderData && typeof orderData === 'object') {
-            // PRIORITY 1: If orderData.totals.total exists, use it (most reliable)
-            // This is the authoritative total calculated by the frontend/backend
-            if (orderData.totals && orderData.totals.total && orderData.totals.total > 0) {
-                const orderTotal = parseFloat(orderData.totals.total);
-                
-                if (Math.abs(orderTotal - validatedAmount) > 0.01) {
-                    console.warn('⚠️ [PAYMENT SECURITY] Amount mismatch with order totals.total:', {
-                        provided: validatedAmount,
-                        orderTotal: orderTotal,
-                        difference: orderTotal - validatedAmount,
-                        orderTotals: orderData.totals
-                    });
-                    
-                    validatedAmount = orderTotal;
-                    console.log('✅ [PAYMENT SECURITY] Using orderData.totals.total:', validatedAmount);
-                } else {
-                    console.log('✅ [PAYMENT SECURITY] Amount matches orderData.totals.total:', validatedAmount);
-                }
-            }
-            
-            // PRIORITY 2: Recalculate from components if shipping method is provided (for validation)
-            // This serves as a double-check, but totals.total takes precedence
-            const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
-            const shippingAddress = orderData.shippingAddress || orderData.customer;
-            const shippingMethod = orderData.shippingMethod;
-            
-            if (shippingAddress && shippingMethod && orderData.totals) {
-                const country = shippingAddress.country || shippingAddress.countryCode;
-                if (country) {
-                    const zone = getShippingZone(country.toUpperCase());
-                    if (zone) {
-                        const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
-                        const correctShippingCost = validatedMethod.cost || 0;
-                        
-                        // Calculate correct total from order totals components
-                        const subtotal = orderData.totals.subtotal || 0;
-                        const tax = orderData.totals.tax || 0;
-                        const discount = orderData.totals.discount || 0;
-                        const shipping = correctShippingCost;
-                        
-                        const calculatedTotal = subtotal + tax + shipping - discount;
-                        
-                        // Validate that our calculation matches the provided total
-                        if (Math.abs(calculatedTotal - validatedAmount) > 0.01) {
-                            console.error('❌ [PAYMENT SECURITY] CRITICAL: Calculated total does not match provided amount!', {
-                                provided: validatedAmount,
-                                calculated: calculatedTotal,
-                                difference: calculatedTotal - validatedAmount,
-                                components: {
-                                    subtotal: subtotal,
-                                    shipping: shipping,
-                                    tax: tax,
-                                    discount: discount
-                                },
-                                orderTotals: orderData.totals
-                            });
-                            
-                            // Use calculated total (server-side validation wins)
-                            validatedAmount = calculatedTotal;
-                            console.log('✅ [PAYMENT SECURITY] Using server-calculated total (components):', validatedAmount);
-                        } else {
-                            console.log('✅ [PAYMENT SECURITY] Calculated total matches provided amount:', validatedAmount);
-                        }
-                    }
-                }
-            }
+
+        let cart = null;
+        if (cartResult.success && cartResult.data) {
+            cart = Array.isArray(cartResult.data) ? cartResult.data[0] : cartResult.data;
         }
-        
-        // Final validation: Ensure amount is positive
-        if (validatedAmount <= 0) {
-            console.error('❌ [PAYMENT SECURITY] Invalid validated amount:', validatedAmount);
+        if (!cart || !cart.items || !Array.isArray(cart.items) || cart.items.length === 0) {
             return res.status(400).json({
                 success: false,
-                error: 'Invalid payment amount calculated',
-                errorCode: 'INVALID_AMOUNT',
-                details: 'The calculated payment amount is invalid. Please contact support.'
+                error: 'Cart not found or empty. Add items to cart before creating payment intent.',
+                errorCode: 'CART_EMPTY_OR_MISSING'
+            });
+        }
+
+        const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
+        const checkoutTotalsService = require('../services/checkoutTotalsService');
+        const discountService = require('../services/discountService');
+        const vatService = require('../services/vatService');
+
+        // Shipping country overrides IP for final VAT (checkout rule)
+        const shippingCountry = (shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode).toUpperCase().trim() : null;
+        const countryForVat = shippingCountry || vatService.getCountryFromRequest(req);
+        const vatRate = vatService.getVatRate(countryForVat);
+
+        // Shipping cost from zone + selected method (backend-only; ignore any frontend-sent cost)
+        let shippingCost = 0;
+        if (shippingAddress && shippingMethod) {
+            const country = (shippingAddress.country || shippingAddress.countryCode || '').toString().toUpperCase();
+            if (country) {
+                const zone = getShippingZone(country);
+                if (zone) {
+                    const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
+                    shippingCost = typeof validatedMethod.cost === 'number' && !isNaN(validatedMethod.cost) ? validatedMethod.cost : 0;
+                }
+            }
+        } else if (cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
+            shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
+        }
+
+        // Discount from cart.appliedDiscount (already validated) or validate discountCode
+        let discountAmount = 0;
+        if (cart.appliedDiscount && typeof cart.appliedDiscount.amount === 'number' && !isNaN(cart.appliedDiscount.amount)) {
+            discountAmount = cart.appliedDiscount.amount;
+        } else if (discountCode) {
+            const productGross = (cart.items || []).reduce((sum, item) => {
+                const p = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+                const q = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+                return sum + p * q;
+            }, 0);
+            const calc = await discountService.calculateOrderTotals(productGross, shippingCost, 0, discountCode);
+            if (calc.success && calc.appliedDiscount && typeof calc.appliedDiscount.amount === 'number') {
+                discountAmount = calc.appliedDiscount.amount;
+            }
+        }
+
+        const totals = checkoutTotalsService.calculateTotals(
+            cart.items,
+            shippingCost,
+            discountAmount,
+            'SEK',
+            vatRate,
+            { country: countryForVat }
+        );
+        const validatedAmount = totals.total;
+        const currency = 'SEK';
+
+        if (validatedAmount <= 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid payment amount calculated from cart',
+                errorCode: 'INVALID_AMOUNT'
             });
         }
         
-        console.log('💳 [PAYMENT INTENT] Final validated amount:', validatedAmount, currency);
+        console.log('💳 [PAYMENT INTENT] Amount from backend cart totals:', validatedAmount, currency);
 
         // orderId is now optional - can be temporary or added later
         // If not provided, generate a temporary ID
@@ -988,7 +971,7 @@ router.post('/create-intent', async (req, res) => {
             success: true,
             paymentIntentId: paymentIntent.id,
             clientSecret: paymentIntent.client_secret,
-            amount: amount,
+            amount: validatedAmount,
             currency: currency.toLowerCase(),
             orderId: tempOrderId,
             isTemporary: isTemporaryOrderId,
@@ -1195,29 +1178,19 @@ router.post('/payment-failed', async (req, res) => {
 
 /**
  * PUT /api/payments/update-intent/:paymentIntentId
- * Update payment intent amount when shipping is selected
- * This allows updating the payment amount to include shipping costs
- * 
- * Body:
- * {
- *   "amount": 82,
- *   "currency": "sek",
- *   "orderData": {
- *     "totals": {
- *       "subtotal": 3,
- *       "shipping": 79,
- *       "tax": 0,
- *       "discount": 0,
- *       "total": 82
- *     },
- *     "shippingMethod": { ... }
- *   }
- * }
+ * Update payment intent amount from current cart totals (same rule as create-intent).
+ * Preferred: frontend should create a new PaymentIntent when shipping/discount/country change.
+ * Body: userId (required), shippingAddress, shippingMethod, discountCode (all optional).
+ * Amount/totals from frontend are ignored.
  */
 router.put('/update-intent/:paymentIntentId', async (req, res) => {
     try {
         const { paymentIntentId } = req.params;
-        const { amount, currency, orderData } = req.body;
+        const body = req.body || {};
+        const userId = body.userId;
+        const shippingAddress = body.shippingAddress || body.customer;
+        const shippingMethod = body.shippingMethod || (body.shippingMethodId ? { id: body.shippingMethodId, type: body.shippingMethodType } : null);
+        const discountCode = body.discountCode || null;
 
         if (!paymentIntentId) {
             return res.status(400).json({
@@ -1227,20 +1200,8 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
             });
         }
 
-        if (!amount || amount <= 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Valid amount is required',
-                errorCode: 'INVALID_AMOUNT'
-            });
-        }
-
-        console.log(`🔄 [PAYMENT] Updating payment intent ${paymentIntentId} with new amount: ${amount} ${currency || 'SEK'}`);
-
-        // Retrieve existing payment intent to check status
         const existingIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
         
-        // Check if payment intent can be updated (must be in correct status)
         if (existingIntent.status !== 'requires_payment_method' && existingIntent.status !== 'requires_confirmation') {
             return res.status(400).json({
                 success: false,
@@ -1250,83 +1211,99 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
             });
         }
 
-        // Validate and calculate correct amount (same logic as create-intent)
-        let validatedAmount = parseFloat(amount);
-        
-        if (orderData && typeof orderData === 'object') {
-            // PRIORITY 1: Use orderData.totals.total if provided
-            if (orderData.totals && orderData.totals.total && orderData.totals.total > 0) {
-                const orderTotal = parseFloat(orderData.totals.total);
-                
-                if (Math.abs(orderTotal - validatedAmount) > 0.01) {
-                    console.warn('⚠️ [PAYMENT UPDATE] Amount mismatch with order totals.total:', {
-                        provided: validatedAmount,
-                        orderTotal: orderTotal,
-                        difference: orderTotal - validatedAmount
-                    });
-                    
-                    validatedAmount = orderTotal;
-                    console.log('✅ [PAYMENT UPDATE] Using orderData.totals.total:', validatedAmount);
+        if (!userId) {
+            return res.status(400).json({
+                success: false,
+                error: 'userId is required to update payment intent amount from cart',
+                errorCode: 'MISSING_USER_ID'
+            });
+        }
+
+        const cartResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'carts',
+            command: '--read',
+            data: { userId }
+        });
+        let cart = null;
+        if (cartResult.success && cartResult.data) {
+            cart = Array.isArray(cartResult.data) ? cartResult.data[0] : cartResult.data;
+        }
+        if (!cart || !cart.items || !Array.isArray(cart.items) || cart.items.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Cart not found or empty',
+                errorCode: 'CART_EMPTY_OR_MISSING'
+            });
+        }
+
+        const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
+        const checkoutTotalsService = require('../services/checkoutTotalsService');
+        const discountService = require('../services/discountService');
+        const vatService = require('../services/vatService');
+
+        const shippingCountry = (shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode).toUpperCase().trim() : null;
+        const countryForVat = shippingCountry || vatService.getCountryFromRequest(req);
+        const vatRate = vatService.getVatRate(countryForVat);
+
+        let shippingCost = 0;
+        if (shippingAddress && shippingMethod) {
+            const country = (shippingAddress.country || shippingAddress.countryCode || '').toString().toUpperCase();
+            if (country) {
+                const zone = getShippingZone(country);
+                if (zone) {
+                    const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
+                    shippingCost = typeof validatedMethod.cost === 'number' && !isNaN(validatedMethod.cost) ? validatedMethod.cost : 0;
                 }
             }
-            
-            // PRIORITY 2: Validate by recalculating from components
-            const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
-            const shippingAddress = orderData.shippingAddress || orderData.customer;
-            const shippingMethod = orderData.shippingMethod;
-            
-            if (shippingAddress && shippingMethod && orderData.totals) {
-                const country = shippingAddress.country || shippingAddress.countryCode;
-                if (country) {
-                    const zone = getShippingZone(country.toUpperCase());
-                    if (zone) {
-                        const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
-                        const correctShippingCost = validatedMethod.cost || 0;
-                        
-                        const subtotal = orderData.totals.subtotal || 0;
-                        const tax = orderData.totals.tax || 0;
-                        const discount = orderData.totals.discount || 0;
-                        const shipping = correctShippingCost;
-                        
-                        const calculatedTotal = subtotal + tax + shipping - discount;
-                        
-                        if (Math.abs(calculatedTotal - validatedAmount) > 0.01) {
-                            console.error('❌ [PAYMENT UPDATE] Calculated total does not match provided amount!', {
-                                provided: validatedAmount,
-                                calculated: calculatedTotal,
-                                difference: calculatedTotal - validatedAmount
-                            });
-                            
-                            validatedAmount = calculatedTotal;
-                            console.log('✅ [PAYMENT UPDATE] Using server-calculated total:', validatedAmount);
-                        }
-                    }
-                }
+        } else if (cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
+            shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
+        }
+
+        let discountAmount = 0;
+        if (cart.appliedDiscount && typeof cart.appliedDiscount.amount === 'number' && !isNaN(cart.appliedDiscount.amount)) {
+            discountAmount = cart.appliedDiscount.amount;
+        } else if (discountCode) {
+            const productGross = (cart.items || []).reduce((sum, item) => {
+                const p = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+                const q = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+                return sum + p * q;
+            }, 0);
+            const calc = await discountService.calculateOrderTotals(productGross, shippingCost, 0, discountCode);
+            if (calc.success && calc.appliedDiscount && typeof calc.appliedDiscount.amount === 'number') {
+                discountAmount = calc.appliedDiscount.amount;
             }
         }
 
-        // Convert to cents
-        const amountInCents = Math.round(validatedAmount * 100);
-        const currencyLower = (currency || existingIntent.currency || 'sek').toLowerCase();
+        const totals = checkoutTotalsService.calculateTotals(cart.items, shippingCost, discountAmount, 'SEK', vatRate, { country: countryForVat });
+        const validatedAmount = totals.total;
 
-        // Update payment intent with new amount
+        if (validatedAmount <= 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid amount calculated from cart',
+                errorCode: 'INVALID_AMOUNT'
+            });
+        }
+
+        console.log(`🔄 [PAYMENT] Updating payment intent ${paymentIntentId} with backend cart total: ${validatedAmount}`);
+
+        const amountInCents = Math.round(validatedAmount * 100);
+        const currencyLower = (existingIntent.currency || 'sek').toString().toLowerCase();
+
         const updateParams = {
             amount: amountInCents,
-            currency: currencyLower
-        };
-
-        // Update metadata with order totals if provided
-        if (orderData && orderData.totals) {
-            updateParams.metadata = {
+            currency: currencyLower,
+            metadata: {
                 ...existingIntent.metadata,
-                shippingCost: (orderData.totals.shipping || 0).toString(),
+                shippingCost: (totals.shippingGross || 0).toString(),
                 orderTotal: validatedAmount.toString(),
-                subtotal: (orderData.totals.subtotal || 0).toString(),
-                tax: (orderData.totals.tax || 0).toString(),
-                discount: (orderData.totals.discount || 0).toString(),
+                subtotalNet: (totals.subtotalNet || 0).toString(),
+                vatAmount: (totals.vatAmount || 0).toString(),
+                discountAmount: (totals.discountAmount || 0).toString(),
                 updatedAt: new Date().toISOString()
-            };
-        }
+            }
+        };
 
         const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
 
