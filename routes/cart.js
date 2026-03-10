@@ -3,8 +3,98 @@ const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const checkoutTotalsService = require('../services/checkoutTotalsService');
 const vatService = require('../services/vatService');
+const currencySelectionService = require('../services/currencySelectionService');
+const currencyService = require('../services/currencyService');
 
 const db = getDBInstance();
+const STORE_BASE_CURRENCY = 'SEK';
+const VAT_RATE_SE = 0.25;
+
+/** Build product lookup query by id (string or ObjectId). */
+function buildProductLookupQuery(id) {
+    if (!id) return { id: '' };
+    if (/^[a-fA-F0-9]{24}$/.test(String(id))) {
+        try {
+            const { ObjectId } = require('mongodb');
+            return { $or: [ { id: String(id) }, { _id: new ObjectId(id) } ] };
+        } catch (e) {
+            return { id: String(id) };
+        }
+    }
+    return { id: String(id) };
+}
+
+/**
+ * Fetch product's price in SEK (gross, VAT-inclusive) so cart always stores one currency.
+ * Returns null if product not found or price missing.
+ */
+async function getProductPriceSEKGross(productId) {
+    if (!productId) return null;
+    try {
+        const query = buildProductLookupQuery(productId);
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: query
+        });
+        if (!result.success || !result.data) return null;
+        const product = Array.isArray(result.data) ? result.data[0] : result.data;
+        if (!product) return null;
+        const basePrice = typeof product.price === 'number' && !isNaN(product.price) ? product.price : 0;
+        return Math.round(basePrice * (1 + VAT_RATE_SE) * 100) / 100;
+    } catch (e) {
+        console.warn('[cart] getProductPriceSEKGross failed for', productId, e.message);
+        return null;
+    }
+}
+
+/** Convert totals object (all numeric values) from SEK to display currency; add currency and currencySymbol. */
+function convertTotalsToCurrency(totals, rate, currency, currencySymbol) {
+    if (!totals || rate === 1) {
+        if (totals) {
+            totals.currency = currency || STORE_BASE_CURRENCY;
+            totals.currencySymbol = currencySymbol || currencySelectionService.getCurrencySymbol(currency || STORE_BASE_CURRENCY);
+        }
+        return totals;
+    }
+    const converted = {};
+    for (const [k, v] of Object.entries(totals)) {
+        converted[k] = typeof v === 'number' && !isNaN(v) ? Math.round(v * rate * 100) / 100 : v;
+    }
+    converted.currency = currency;
+    converted.currencySymbol = currencySymbol;
+    return converted;
+}
+
+/** Resolve display currency from request and convert totals from SEK if needed; returns { totals, rateFromSEK } (rateFromSEK = 1 for SEK). */
+async function ensureTotalsWithDisplayCurrency(totals, req) {
+    const { currency: displayCurrency, currencySymbol } = currencySelectionService.getDisplayCurrencyFromRequest(req);
+    if (displayCurrency && displayCurrency !== STORE_BASE_CURRENCY) {
+        try {
+            const rate = await currencyService.getExchangeRate(STORE_BASE_CURRENCY, displayCurrency);
+            const converted = convertTotalsToCurrency(totals, rate, displayCurrency, currencySymbol);
+            return { totals: converted, rateFromSEK: rate };
+        } catch (e) {
+            totals.currency = STORE_BASE_CURRENCY;
+            totals.currencySymbol = currencySelectionService.getCurrencySymbol(STORE_BASE_CURRENCY);
+            return { totals, rateFromSEK: 1 };
+        }
+    }
+    totals.currency = displayCurrency || STORE_BASE_CURRENCY;
+    totals.currencySymbol = currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY);
+    return { totals, rateFromSEK: 1 };
+}
+
+/** Add priceInDisplayCurrency to each cart item for frontend display (item.price is always SEK). */
+function enrichCartItemsForDisplay(cart, rateFromSEK) {
+    if (!cart || !cart.items || rateFromSEK == null) return cart;
+    cart.items = cart.items.map(item => ({
+        ...item,
+        priceInDisplayCurrency: Math.round((typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0) * rateFromSEK * 100) / 100
+    }));
+    return cart;
+}
 
 /** Get country and VAT rate for this request (Cloudflare CF-IPCountry or ?country= override). */
 function getVatOptsFromRequest(req) {
@@ -302,13 +392,17 @@ router.get('/:userId', async (req, res) => {
             }
             
             const vatOpts = getVatOptsFromRequest(req);
-            const totals = getBackendTotals(cart, vatOpts);
+            let totals = getBackendTotals(cart, vatOpts);
+            const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+            totals = resolvedTotals;
             cart.totals = totals;
-            
+            enrichCartItemsForDisplay(cart, rateFromSEK);
             res.json({
                 success: true,
                 cart,
-                totals
+                totals,
+                currency: totals.currency,
+                currencySymbol: totals.currencySymbol
             });
         } else {
             res.status(500).json({
@@ -382,16 +476,21 @@ router.post('/:userId/add', async (req, res) => {
             item.variantId === itemData.variantId
         );
         
+        // Always store price in SEK (gross) so totals are consistent; ignore frontend-sent price for amount
+        const priceSEKGross = await getProductPriceSEKGross(itemData.id);
+        const itemPrice = priceSEKGross != null ? priceSEKGross : (typeof itemData.price === 'number' && !isNaN(itemData.price) ? itemData.price : 0);
+
         if (existingItemIndex !== -1) {
-            // Update quantity of existing item
+            // Update quantity and refresh price from catalog (SEK) so merged line is correct
             cart.items[existingItemIndex].quantity += itemData.quantity;
+            cart.items[existingItemIndex].price = itemPrice;
         } else {
-            // Add new item to cart
+            // Add new item to cart with price in SEK (gross)
             cart.items.push({
                 cartItemId: itemData.cartItemId,
                 id: itemData.id,
                 name: itemData.name,
-                price: itemData.price,
+                price: itemPrice,
                 image: itemData.image || '',
                 size: itemData.size || null,
                 color: itemData.color || null,
@@ -399,25 +498,30 @@ router.post('/:userId/add', async (req, res) => {
                 colorId: itemData.colorId || null,
                 variantId: itemData.variantId || null,
                 quantity: itemData.quantity,
-                currency: itemData.currency || 'SEK',
+                currency: STORE_BASE_CURRENCY,
                 source: itemData.source || null,
                 addedAt: new Date().toISOString()
             });
         }
         
         const vatOpts = getVatOptsFromRequest(req);
-        const totals = getBackendTotals(cart, vatOpts);
+        let totals = getBackendTotals(cart, vatOpts);
+        const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+        totals = resolvedTotals;
         cart.totals = totals;
         cart.updatedAt = new Date().toISOString();
         
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
+            enrichCartItemsForDisplay(cart, rateFromSEK);
             res.json({
                 success: true,
                 message: 'Item added to cart',
                 cart,
-                totals
+                totals,
+                currency: totals.currency,
+                currencySymbol: totals.currencySymbol
             });
         } else {
             res.status(500).json({
@@ -490,18 +594,23 @@ router.put('/:userId/update', async (req, res) => {
         }
         
         const vatOpts = getVatOptsFromRequest(req);
-        const totals = getBackendTotals(cart, vatOpts);
+        let totals = getBackendTotals(cart, vatOpts);
+        const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+        totals = resolvedTotals;
         cart.totals = totals;
         cart.updatedAt = new Date().toISOString();
         
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
+            enrichCartItemsForDisplay(cart, rateFromSEK);
             res.json({
                 success: true,
                 message: quantity === 0 ? 'Item removed from cart' : 'Cart item updated',
                 cart,
-                totals
+                totals,
+                currency: totals.currency,
+                currencySymbol: totals.currencySymbol
             });
         } else {
             res.status(500).json({
@@ -565,18 +674,23 @@ router.delete('/:userId/remove/:cartItemId', async (req, res) => {
         cart.items.splice(itemIndex, 1);
         
         const vatOpts = getVatOptsFromRequest(req);
-        const totals = getBackendTotals(cart, vatOpts);
+        let totals = getBackendTotals(cart, vatOpts);
+        const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+        totals = resolvedTotals;
         cart.totals = totals;
         cart.updatedAt = new Date().toISOString();
         
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
+            enrichCartItemsForDisplay(cart, rateFromSEK);
             res.json({
                 success: true,
                 message: 'Item removed from cart',
                 cart,
-                totals
+                totals,
+                currency: totals.currency,
+                currencySymbol: totals.currencySymbol
             });
         } else {
             res.status(500).json({
@@ -795,22 +909,23 @@ router.post('/:userId', async (req, res) => {
             };
         }
         
-        // Validate and map items
+        // Validate and map items; normalize prices to SEK (gross) from product catalog
         try {
+            const pricePromises = items.map(item => getProductPriceSEKGross(item.id || item.productId));
+            const pricesSEK = await Promise.all(pricePromises);
             cart.items = items.map((item, index) => {
-                // Ensure required fields exist
                 if (!item.id && !item.productId) {
                     console.warn(`⚠️ [CART SYNC] Item at index ${index} missing id/productId`);
                 }
                 if (!item.name) {
                     console.warn(`⚠️ [CART SYNC] Item at index ${index} missing name`);
                 }
-                
+                const price = pricesSEK[index] != null ? pricesSEK[index] : (typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0);
                 return {
                     cartItemId: item.cartItemId || generateCartItemId(),
                     id: item.id || item.productId || `item_${index}`,
                     name: item.name || 'Unknown Product',
-                    price: typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0,
+                    price,
                     image: item.image || '',
                     size: item.size || null,
                     color: item.color || null,
@@ -818,7 +933,7 @@ router.post('/:userId', async (req, res) => {
                     colorId: item.colorId || null,
                     variantId: item.variantId || null,
                     quantity: typeof item.quantity === 'number' && !isNaN(item.quantity) && item.quantity > 0 ? item.quantity : 1,
-                    currency: item.currency || 'SEK',
+                    currency: STORE_BASE_CURRENCY,
                     source: item.source || null,
                     addedAt: item.addedAt || new Date().toISOString()
                 };
@@ -865,7 +980,9 @@ router.post('/:userId', async (req, res) => {
         }
         
         const vatOpts = getVatOptsFromRequest(req);
-        const totals = getBackendTotals(cart, vatOpts);
+        let totals = getBackendTotals(cart, vatOpts);
+        const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+        totals = resolvedTotals;
         cart.totals = totals;
         cart.updatedAt = new Date().toISOString();
         if (!cart.createdAt) cart.createdAt = new Date().toISOString();
@@ -884,10 +1001,13 @@ router.post('/:userId', async (req, res) => {
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
+            enrichCartItemsForDisplay(cart, rateFromSEK);
             console.log(`✅ [CART SYNC] Cart synced for userId: ${userId}, items: ${cart.items.length}, total: ${totals.total}`);
             res.json({
                 success: true,
                 message: 'Cart synced successfully',
+                currency: totals.currency,
+                currencySymbol: totals.currencySymbol,
                 cart,
                 totals
             });
@@ -996,18 +1116,23 @@ router.post('/:userId/apply-discount', async (req, res) => {
         }
         
         const vatOpts = getVatOptsFromRequest(req);
-        const totals = getBackendTotals(cart, vatOpts);
+        let totals = getBackendTotals(cart, vatOpts);
+        const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+        totals = resolvedTotals;
         cart.totals = totals;
         cart.updatedAt = new Date().toISOString();
         
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
+            enrichCartItemsForDisplay(cart, rateFromSEK);
             res.json({
                 success: true,
                 message: 'Discount applied successfully',
                 cart,
-                totals
+                totals,
+                currency: totals.currency,
+                currencySymbol: totals.currencySymbol
             });
         } else {
             res.status(500).json({
@@ -1062,18 +1187,23 @@ router.post('/:userId/remove-discount', async (req, res) => {
         
         cart.appliedDiscount = null;
         const vatOpts = getVatOptsFromRequest(req);
-        const totals = getBackendTotals(cart, vatOpts);
+        let totals = getBackendTotals(cart, vatOpts);
+        const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+        totals = resolvedTotals;
         cart.totals = totals;
         cart.updatedAt = new Date().toISOString();
         
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
+            enrichCartItemsForDisplay(cart, rateFromSEK);
             res.json({
                 success: true,
                 message: 'Discount removed successfully',
                 cart,
-                totals
+                totals,
+                currency: totals.currency,
+                currencySymbol: totals.currencySymbol
             });
         } else {
             res.status(500).json({

@@ -7,7 +7,10 @@ const productTranslationHelper = require('../services/productTranslationHelper')
 const seoHelper = require('../utils/seoHelper');
 const reviewStatsHelper = require('../utils/reviewStatsHelper');
 const vatService = require('../services/vatService');
+const currencySelectionService = require('../services/currencySelectionService');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+
+const STORE_BASE_CURRENCY = 'SEK';
 const optionalAuthenticateAdmin = authenticateAdmin.optionalAuthenticateAdmin || (async (req, res, next) => { req.isAdminRequest = false; next(); });
 
 const db = getDBInstance();
@@ -464,41 +467,50 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
             const basePrice = product.price || 0;
             const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
 
-            // VAT for display: country from CF-IPCountry or ?country=; product base price is ex-VAT
+            // VAT for display: country from CF-IPCountry or ?country=; product base price is ex-VAT (stored in SEK)
             const { country: vatCountry, vatRate } = vatService.getCountryAndVatFromRequest(req);
             product.vat_display = { country: vatCountry, vat_rate: vatRate };
-            product.price_including_vat = Math.round(basePrice * (1 + vatRate) * 100) / 100;
+            let priceInclVatSEK = Math.round(basePrice * (1 + vatRate) * 100) / 100;
+            product.price_including_vat = priceInclVatSEK;
             const compareAt = product.compareAtPrice ?? product.compare_at_price;
+            let compareAtInclVatSEK = null;
             if (typeof compareAt === 'number' && !isNaN(compareAt) && compareAt > 0) {
-                product.compare_at_price_including_vat = Math.round(compareAt * (1 + vatRate) * 100) / 100;
+                compareAtInclVatSEK = Math.round(compareAt * (1 + vatRate) * 100) / 100;
+                product.compare_at_price_including_vat = compareAtInclVatSEK;
             }
             
-            // Per-request cache for exchange rates (avoids redundant exchange_rates reads)
+            // Display currency: ?currency= override or auto from country (SE→SEK, EU→EUR, else→USD). Symbols: SEK→kr, EUR→€, USD→$
+            const { currency: displayCurrency, currencySymbol } = currencySelectionService.getDisplayCurrencyFromRequest(req);
             const rateCache = {};
-            
-            // Add multi-currency prices
-            try {
-                const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency, rateCache);
-                product.base_price = basePrice;
-                product.currency = baseCurrency;
-                product.prices = multiCurrencyPrices;
-                
-                // If specific currency requested, add converted_price field (reuses rateCache)
-                if (requestedCurrency && requestedCurrency !== baseCurrency) {
-                    const convertedPrice = multiCurrencyPrices[requestedCurrency];
-                    if (convertedPrice !== undefined) {
-                        product.selected_currency = requestedCurrency;
-                        product.converted_price = convertedPrice;
-                        const rate = await currencyService.getExchangeRate(baseCurrency, requestedCurrency, rateCache);
-                        product.exchange_rate = rate;
+            if (displayCurrency && displayCurrency !== STORE_BASE_CURRENCY) {
+                try {
+                    const rate = await currencyService.getExchangeRate(STORE_BASE_CURRENCY, displayCurrency, rateCache);
+                    product.price_including_vat = Math.round(priceInclVatSEK * rate * 100) / 100;
+                    if (compareAtInclVatSEK != null) {
+                        product.compare_at_price_including_vat = Math.round(compareAtInclVatSEK * rate * 100) / 100;
                     }
+                } catch (e) {
+                    console.warn('Product detail: currency conversion failed, using SEK', e.message);
+                }
+            }
+            product.currency = displayCurrency || STORE_BASE_CURRENCY;
+            product.currencySymbol = currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY);
+            
+            // Per-request cache for exchange rates (avoids redundant exchange_rates reads)
+            
+            // Add multi-currency prices (legacy; base in DB is SEK)
+            try {
+                const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, STORE_BASE_CURRENCY, rateCache);
+                product.base_price = basePrice;
+                product.prices = multiCurrencyPrices;
+                if (requestedCurrency && multiCurrencyPrices[requestedCurrency] !== undefined) {
+                    product.selected_currency = requestedCurrency;
+                    product.converted_price = multiCurrencyPrices[requestedCurrency];
                 }
             } catch (currencyError) {
                 console.warn('Failed to get multi-currency prices:', currencyError);
-                // Fallback: use base price for all currencies
                 product.base_price = basePrice;
-                product.currency = baseCurrency;
-                product.prices = { [baseCurrency]: basePrice };
+                product.prices = { [STORE_BASE_CURRENCY]: basePrice };
             }
             
             // Ensure inventory structure is complete
@@ -564,7 +576,9 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
             res.json({
                 success: true,
                 data: productWithSEO,
-                language: language // Include language in response for frontend reference
+                language: language,
+                currency: product.currency || STORE_BASE_CURRENCY,
+                currencySymbol: product.currencySymbol || currencySelectionService.getCurrencySymbol(product.currency || STORE_BASE_CURRENCY)
             });
         } else {
             res.status(404).json({
@@ -766,32 +780,39 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 products = products.slice(0, parseInt(limit));
             }
             
-            // Per-request cache for exchange rates (reduces ~180 DB reads to ~9 for product list)
             const rateCache = {};
             const { country: vatCountry, vatRate } = vatService.getCountryAndVatFromRequest(req);
+            const { currency: displayCurrency, currencySymbol } = currencySelectionService.getDisplayCurrencyFromRequest(req);
+            let sekToDisplayRate = 1;
+            if (displayCurrency && displayCurrency !== STORE_BASE_CURRENCY) {
+                try {
+                    sekToDisplayRate = await currencyService.getExchangeRate(STORE_BASE_CURRENCY, displayCurrency, rateCache);
+                } catch (e) {
+                    console.warn('Product list: currency rate fetch failed, using SEK', e.message);
+                }
+            }
 
-            // Process inventory data for each product and add multi-currency prices
+            // Process inventory data for each product; prices stored in SEK, converted to display currency
             products = await Promise.all(products.map(async (product) => {
-                // Add multi-currency prices (shared rateCache avoids repeated exchange_rates reads)
                 const basePrice = product.price || 0;
-                const baseCurrency = product.currency || currencyService.BASE_CURRENCY;
                 product.vat_display = { country: vatCountry, vat_rate: vatRate };
-                product.price_including_vat = Math.round(basePrice * (1 + vatRate) * 100) / 100;
+                let priceInclVatSEK = Math.round(basePrice * (1 + vatRate) * 100) / 100;
+                product.price_including_vat = displayCurrency === STORE_BASE_CURRENCY ? priceInclVatSEK : Math.round(priceInclVatSEK * sekToDisplayRate * 100) / 100;
                 const compareAt = product.compareAtPrice ?? product.compare_at_price;
                 if (typeof compareAt === 'number' && !isNaN(compareAt) && compareAt > 0) {
-                    product.compare_at_price_including_vat = Math.round(compareAt * (1 + vatRate) * 100) / 100;
+                    const compareAtSEK = Math.round(compareAt * (1 + vatRate) * 100) / 100;
+                    product.compare_at_price_including_vat = displayCurrency === STORE_BASE_CURRENCY ? compareAtSEK : Math.round(compareAtSEK * sekToDisplayRate * 100) / 100;
                 }
+                product.currency = displayCurrency || STORE_BASE_CURRENCY;
+                product.currencySymbol = currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY);
                 try {
-                    const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, baseCurrency, rateCache);
+                    const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, STORE_BASE_CURRENCY, rateCache);
                     product.base_price = basePrice;
-                    product.currency = baseCurrency;
                     product.prices = multiCurrencyPrices;
                 } catch (currencyError) {
                     console.warn(`Failed to get multi-currency prices for product ${product.id}:`, currencyError);
-                    // Fallback: use base price for all currencies
                     product.base_price = basePrice;
-                    product.currency = baseCurrency;
-                    product.prices = { [baseCurrency]: basePrice };
+                    product.prices = { [STORE_BASE_CURRENCY]: basePrice };
                 }
                 
                 if (product.inventory) {
@@ -864,7 +885,9 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 success: true,
                 data: productsWithSEO,
                 count: productsWithSEO.length,
-                language: language // Include language in response for frontend reference
+                language: language,
+                currency: displayCurrency || STORE_BASE_CURRENCY,
+                currencySymbol: currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY)
             });
         } else {
             res.status(500).json({

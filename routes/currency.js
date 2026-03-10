@@ -1,6 +1,23 @@
 const express = require('express');
 const router = express.Router();
 const currencyService = require('../services/currencyService');
+const currencySelectionService = require('../services/currencySelectionService');
+
+/**
+ * GET /api/currency/display
+ * Display currency for the store (SEK/EUR/USD) from country or ?currency= override.
+ * Returns currency code and symbol (SEK→kr, EUR→€, USD→$). Never uses £.
+ */
+router.get('/currency/display', (req, res) => {
+    const { currency, currencySymbol, country } = currencySelectionService.getDisplayCurrencyFromRequest(req);
+    res.json({
+        success: true,
+        currency,
+        currencySymbol,
+        country,
+        storeBaseCurrency: currencySelectionService.STORE_BASE_CURRENCY
+    });
+});
 
 /**
  * GET /api/convert

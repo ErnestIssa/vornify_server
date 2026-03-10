@@ -46,11 +46,12 @@ function calculateTotals(items = [], shippingGross = 0, discountAmount = 0, curr
     const productGrossSubtotalRounded = roundToCurrency(productGrossSubtotal);
     const discountRounded = roundToCurrency(Math.max(0, discountAmount));
 
-    const subtotalNet = roundToCurrency(productGrossSubtotalRounded / (1 + vat));
     const productGrossAfterDiscount = roundToCurrency(Math.max(0, productGrossSubtotalRounded - discountRounded));
     const productNetAfterDiscount = roundToCurrency(productGrossAfterDiscount / (1 + vat));
     const vatAmount = roundToCurrency(productGrossAfterDiscount - productNetAfterDiscount);
     const subtotalGross = productGrossAfterDiscount;
+    // Subtotal ex-VAT (after discount): so that subtotalNet + vatAmount = subtotalGross
+    const subtotalNet = productNetAfterDiscount;
 
     const shippingGrossRounded = roundToCurrency(shippingGross);
     const shippingNet = roundToCurrency(shippingGrossRounded / (1 + vat));
