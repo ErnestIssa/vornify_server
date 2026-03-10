@@ -70,6 +70,12 @@ function calculateTotals(items = [], shippingGross = 0, discountAmount = 0, curr
         currency: currency || 'SEK'
     };
     if (country) result.country = country;
+    // Backward-compat aliases so frontend can use totals.subtotal / totals.tax / totals.shipping
+    result.subtotal = subtotalNet;
+    result.tax = vatAmount;
+    result.shipping = shippingGrossRounded;
+    result.discount = discountRounded;
+    result.discountedSubtotal = roundToCurrency(productNetAfterDiscount);
     return result;
 }
 

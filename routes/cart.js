@@ -270,8 +270,7 @@ router.get('/:userId', async (req, res) => {
         });
         
         if (result.success) {
-            // If cart exists, return it; otherwise return empty cart
-            const cart = result.data || {
+            let cart = result.data || {
                 userId,
                 items: [],
                 totals: {
@@ -285,11 +284,8 @@ router.get('/:userId', async (req, res) => {
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString()
             };
-            
-            // CRITICAL: Handle array result from database
-            let cartData = cart;
             if (Array.isArray(cart)) {
-                cartData = cart.length > 0 ? cart[0] : {
+                cart = cart.length > 0 ? cart[0] : {
                     userId,
                     items: [],
                     totals: {
@@ -304,7 +300,6 @@ router.get('/:userId', async (req, res) => {
                     updatedAt: new Date().toISOString()
                 };
             }
-            cart = cartData;
             
             const vatOpts = getVatOptsFromRequest(req);
             const totals = getBackendTotals(cart, vatOpts);

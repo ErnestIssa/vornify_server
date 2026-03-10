@@ -823,11 +823,8 @@ router.post('/create-intent', async (req, res) => {
             }
         }
 
-        // Create payment intent with logging
+        // Create payment intent with logging (amount is always backend-calculated from cart; frontend must not send amount)
         console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${validatedAmount} ${currency} (${amountInCents} cents)`);
-        if (validatedAmount !== parseFloat(amount)) {
-            console.log(`⚠️ [PAYMENT] Amount was corrected from ${amount} to ${validatedAmount}`);
-        }
         console.log(`📱 [PAYMENT] Device: ${deviceInfo.platform}${isMobile ? ` (${userAgent.match(/Mobile|Android|iPhone|iPad/i)?.[0] || 'Mobile'})` : ''}`);
         
         // Log the EXACT parameters being sent to Stripe (for debugging)
