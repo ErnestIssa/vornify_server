@@ -77,6 +77,9 @@ function calculateTotals(items = [], shippingGross = 0, discountAmount = 0, curr
     result.shipping = shippingGrossRounded;
     result.discount = discountRounded;
     result.discountedSubtotal = roundToCurrency(productNetAfterDiscount);
+    // Explicit labels for order summary: use these so "Delsumma" is ex VAT, not incl VAT
+    result.subtotalExVat = subtotalNet;   // Delsumma (ex. moms) – use this for "Subtotal" line
+    result.subtotalInclVat = subtotalGross; // Delsumma inkl. moms – do NOT use for "Subtotal" label
     return result;
 }
 
