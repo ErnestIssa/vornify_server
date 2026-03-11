@@ -1016,6 +1016,13 @@ router.post('/create-intent', async (req, res) => {
             orderId: tempOrderId,
             isTemporary: isTemporaryOrderId,
             status: paymentIntent.status,
+            // Frontend contract: enforce correct UX (see docs/FRONTEND-CHECKOUT-FIXES.md)
+            confirmOnlyOnCompleteButton: true,
+            afterVerificationCancelShowPaymentMethods: true,
+            clientInstructions: {
+                doNotConfirmUntil: 'User has clicked the "Complete my order" (or equivalent) button. Do not call stripe.confirmPayment() on mount, on payment method change, or on field blur.',
+                afterVerificationCancel: 'If the user exits or cancels the verification (e.g. 3DS), keep the payment section visible and allow choosing another payment method; do not hide or disable the Payment Element. Optionally request a new clientSecret via create-intent if the intent is no longer in requires_payment_method.'
+            },
             // Payment intent uses automatic_payment_methods (PaymentElement requirement)
             automaticPaymentMethods: {
                 enabled: paymentIntent.automatic_payment_methods?.enabled || false,
@@ -1025,24 +1032,21 @@ router.post('/create-intent', async (req, res) => {
             paymentMethodTypes: actualPaymentMethodTypes,
             // Payment methods that will be available in PaymentElement (when supported)
             paymentMethods: {
-                card: true,        // Always available with automatic_payment_methods
-                link: true,        // Available if customer has Link saved
-                klarna: true,      // Available if amount/currency supports it
-                applePay: true,    // Available on Safari (iOS/macOS) when device supports it
-                googlePay: true   // Available on Chrome/Edge when device supports it
+                card: true,
+                link: true,
+                klarna: true,
+                applePay: true,
+                googlePay: true
             },
-            // Device information for mobile debugging
             device: {
                 isMobile: isMobile,
                 platform: deviceInfo.platform
             },
-            // 3D Secure configuration (SCA compliance)
             threeDSecure: {
                 configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'automatic',
                 request_three_d_secure: paymentIntent.payment_method_options?.card?.request_three_d_secure || 'not_set',
-                note: '3DS will trigger automatically when card issuer requires it (European PSD2 compliance)'
+                note: '3DS runs only after the client calls confirmPayment(); do not confirm until user clicks Complete my order.'
             },
-            // Debug info (can be removed in production)
             debug: {
                 automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled,
                 status: paymentIntent.status,
