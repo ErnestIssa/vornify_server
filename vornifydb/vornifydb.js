@@ -198,6 +198,29 @@ class VortexDB {
                 }
             }
 
+            // Admin shipping config collections (optional - may not exist yet)
+            const shippingZonesColl = peakmode.collection('shipping_zones');
+            const shippingMethodsColl = peakmode.collection('shipping_methods');
+            const shippingPricesColl = peakmode.collection('shipping_prices');
+            const shippingFreeAreasColl = peakmode.collection('shipping_free_areas');
+            for (const [coll, spec] of [
+                [shippingZonesColl, [{ key: { active: 1 }, cacheKey: 'peakmode.shipping_zones.active' }]],
+                [shippingMethodsColl, [{ key: { active: 1 }, cacheKey: 'peakmode.shipping_methods.active' }, { key: { id: 1 }, cacheKey: 'peakmode.shipping_methods.id' }]],
+                [shippingPricesColl, [{ key: { zoneId: 1, methodId: 1 }, cacheKey: 'peakmode.shipping_prices.zoneId_methodId' }, { key: { active: 1 }, cacheKey: 'peakmode.shipping_prices.active' }]],
+                [shippingFreeAreasColl, [{ key: { country: 1, municipality: 1 }, cacheKey: 'peakmode.shipping_free_areas.country_municipality' }, { key: { active: 1 }, cacheKey: 'peakmode.shipping_free_areas.active' }]]
+            ]) {
+                for (const { key, cacheKey } of spec) {
+                    if (!this.indexCache.has(cacheKey)) {
+                        try {
+                            await coll.createIndex(key, { background: true });
+                            this.indexCache.add(cacheKey);
+                        } catch (idxErr) {
+                            console.warn(`Warning: Could not create index ${cacheKey}:`, idxErr.message);
+                        }
+                    }
+                }
+            }
+
         } catch (error) {
             console.error('Error setting up indexes:', error);
         }

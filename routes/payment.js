@@ -703,10 +703,10 @@ router.post('/create-intent', async (req, res) => {
             });
         }
 
-        const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
         const checkoutTotalsService = require('../services/checkoutTotalsService');
         const discountService = require('../services/discountService');
         const vatService = require('../services/vatService');
+        const shippingConfigService = require('../services/shippingConfigService');
 
         // Normalize country to ISO 2-letter code (frontend may send "Sweden" or "SE") so zone lookup works
         const countryForZone = normalizeCountryCode((shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode) : '');
@@ -716,17 +716,12 @@ router.post('/create-intent', async (req, res) => {
         const countryForVat = shippingCountry || vatService.getCountryFromRequest(req);
         const vatRate = vatService.getVatRate(countryForVat);
 
-        // Shipping cost from zone + selected method; must be included in payment total
+        // Shipping cost: admin/DB only; never trust frontend amount
         let shippingCost = 0;
         if (shippingAddress && shippingMethod) {
-            if (countryForZone) {
-                const zone = getShippingZone(countryForZone);
-                if (zone) {
-                    const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
-                    shippingCost = typeof validatedMethod.cost === 'number' && !isNaN(validatedMethod.cost) ? validatedMethod.cost : 0;
-                }
-            }
-            // If zone lookup failed or cost still 0, use cart's stored shipping so payment total matches cart
+            const methodId = shippingMethod.id || shippingMethod.shippingMethodId || (shippingMethod._id && shippingMethod._id.toString());
+            const municipality = (shippingAddress.municipality || shippingAddress.city || '').trim();
+            shippingCost = await shippingConfigService.getShippingCostFromDb(countryForZone, methodId, municipality);
             if (shippingCost <= 0 && cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
                 shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
             }
@@ -1290,10 +1285,10 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
             });
         }
 
-        const { getShippingZone, applyZonePricingToOption } = require('../utils/shippingZones');
         const checkoutTotalsService = require('../services/checkoutTotalsService');
         const discountService = require('../services/discountService');
         const vatService = require('../services/vatService');
+        const shippingConfigService = require('../services/shippingConfigService');
 
         const countryForZoneUpdate = normalizeCountryCode((shippingAddress && (shippingAddress.country || shippingAddress.countryCode)) ? String(shippingAddress.country || shippingAddress.countryCode) : '');
 
@@ -1302,13 +1297,9 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
 
         let shippingCost = 0;
         if (shippingAddress && shippingMethod) {
-            if (countryForZoneUpdate) {
-                const zone = getShippingZone(countryForZoneUpdate);
-                if (zone) {
-                    const validatedMethod = applyZonePricingToOption(shippingMethod, zone);
-                    shippingCost = typeof validatedMethod.cost === 'number' && !isNaN(validatedMethod.cost) ? validatedMethod.cost : 0;
-                }
-            }
+            const methodId = shippingMethod.id || shippingMethod.shippingMethodId || (shippingMethod._id && shippingMethod._id.toString());
+            const municipality = (shippingAddress.municipality || shippingAddress.city || '').trim();
+            shippingCost = await shippingConfigService.getShippingCostFromDb(countryForZoneUpdate, methodId, municipality);
             if (shippingCost <= 0 && cart.totals && (typeof cart.totals.shippingGross === 'number' || typeof cart.totals.shipping === 'number')) {
                 shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
             }

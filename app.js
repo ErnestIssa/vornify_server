@@ -33,6 +33,7 @@ const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require('./routes/adminAuth');
 const adminContentRoutes = require('./routes/adminContent');
 const adminNotificationsRoutes = require('./routes/adminNotifications');
+const adminShippingRoutes = require('./routes/adminShipping');
 const metaFeedRoutes = require('./routes/metaFeed');
 const vatRoutes = require('./routes/vat');
 const errorHandler = require('./middleware/errorHandler');
@@ -383,6 +384,7 @@ app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication (login, ver
 app.use('/api/admin', adminAuthRoutes); // Also expose invite + accept-invite at /api/admin/invite, /api/admin/accept-invite (frontend expects these paths)
 app.use('/api/admin', adminContentRoutes); // Admin content management (public read, protected write)
 app.use('/api/admin', adminNotificationsRoutes); // Admin notifications (list, create, delete, on-login)
+app.use('/api/admin/shipping', adminShippingRoutes); // Admin shipping config (zones, methods, prices, free-areas)
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 
 // Documentation routes

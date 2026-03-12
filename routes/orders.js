@@ -301,112 +301,20 @@ router.post('/create', async (req, res) => {
             total: orderData.total || orderData.totals?.total
         });
         
-        // SECURITY: Validate and recalculate shipping cost server-side
-        const { getShippingZone, applyZonePricingToOption, getZonePricing } = require('../utils/shippingZones');
+        // SECURITY: Recalculate shipping cost from admin/DB only; never trust frontend amount
+        const shippingConfigService = require('../services/shippingConfigService');
         const shippingAddress = orderData.shippingAddress || orderData.customer;
         const shippingMethod = orderData.shippingMethod;
         
         if (shippingAddress && shippingMethod) {
-            const country = shippingAddress.country || shippingAddress.countryCode;
-            if (country) {
-                const zone = getShippingZone(country.toUpperCase());
-                if (zone) {
-                    const providedShippingCost = orderData.shippingCost || orderData.totals?.shipping || shippingMethod.cost || 0;
-                    
-                    // Log what we received from frontend for debugging
-                    console.log('📦 [ORDER CREATE] Shipping method received:', {
-                        id: shippingMethod.id,
-                        type: shippingMethod.type,
-                        name: shippingMethod.name,
-                        deliveryMethod: shippingMethod.deliveryMethod,
-                        cost: shippingMethod.cost,
-                        providedCost: providedShippingCost,
-                        zone: zone
-                    });
-                    
-                    // Get valid prices for this zone to check if provided price is valid
-                    const { getZonePricing } = require('../utils/shippingZones');
-                    const zonePricing = getZonePricing(zone);
-                    const validPrices = zonePricing ? Object.values(zonePricing) : [];
-                    
-                    // Check if provided cost matches any valid price for this zone (within 1 SEK tolerance)
-                    const isValidPrice = validPrices.some(price => Math.abs(price - providedShippingCost) < 1);
-                    
-                    if (isValidPrice && providedShippingCost > 0) {
-                        // Provided price is valid - trust it (user selected this price)
-                        console.log('✅ [SHIPPING] Using provided shipping cost (valid for zone):', {
-                            provided: providedShippingCost,
-                            zone: zone,
-                            methodType: shippingMethod.type || shippingMethod.id
-                        });
-                        
-                        // Ensure shipping cost is set correctly
-                        orderData.shippingCost = providedShippingCost;
-                        if (orderData.totals) {
-                            orderData.totals.shipping = providedShippingCost;
-                        }
-                        if (orderData.shippingMethod) {
-                            orderData.shippingMethod.cost = providedShippingCost;
-                        }
-                    } else {
-                        // Provided price is invalid or missing - recalculate based on method type
-                        // IMPORTANT: Ensure shippingMethod has all necessary fields for matching
-                        const methodForPricing = {
-                            ...shippingMethod,
-                            // Ensure type is set if missing
-                            type: shippingMethod.type || (shippingMethod.id?.includes('home') ? 'home' : 
-                                                          shippingMethod.id?.includes('locker') ? 'parcel_locker' :
-                                                          shippingMethod.id?.includes('mailbox') ? 'mailbox' :
-                                                          shippingMethod.id?.includes('service') ? 'service_point' : ''),
-                            // Ensure deliveryMethod is set if missing
-                            deliveryMethod: shippingMethod.deliveryMethod || (shippingMethod.type === 'home' ? 'HOME_DELIVERY' :
-                                                                             shippingMethod.type === 'parcel_locker' ? 'PARCEL_LOCKER' :
-                                                                             shippingMethod.type === 'mailbox' ? 'MAILBOX' :
-                                                                             shippingMethod.type === 'service_point' ? 'SERVICE_POINT' : '')
-                        };
-                        
-                        const validatedMethod = applyZonePricingToOption(methodForPricing, zone);
-                        const correctShippingCost = validatedMethod.cost || 0;
-                        
-                        console.warn('⚠️ [SECURITY] Shipping cost being recalculated:', {
-                            orderId: 'pending',
-                            provided: providedShippingCost,
-                            correct: correctShippingCost,
-                            zone: zone,
-                            methodType: methodForPricing.type,
-                            methodId: methodForPricing.id,
-                            methodName: methodForPricing.name,
-                            deliveryMethod: methodForPricing.deliveryMethod,
-                            pricingReason: validatedMethod.pricingReason,
-                            country: country,
-                            validPrices: validPrices,
-                            originalShippingMethod: {
-                                id: shippingMethod.id,
-                                type: shippingMethod.type,
-                                name: shippingMethod.name,
-                                cost: shippingMethod.cost
-                            }
-                        });
-                        
-                        // Use server-calculated price (secure, cannot be manipulated)
-                        orderData.shippingCost = correctShippingCost;
-                        if (orderData.totals) {
-                            orderData.totals.shipping = correctShippingCost;
-                        }
-                        
-                        // Update shipping method with correct cost
-                        if (orderData.shippingMethod) {
-                            orderData.shippingMethod.cost = correctShippingCost;
-                        }
-                        
-                        console.log('✅ [SECURITY] Shipping cost validated and corrected:', {
-                            zone: zone,
-                            correctCost: correctShippingCost,
-                            methodType: methodForPricing.type,
-                            pricingReason: validatedMethod.pricingReason
-                        });
-                    }
-                }
+            const country = (shippingAddress.country || shippingAddress.countryCode || '').toString().toUpperCase().trim();
+            if (country && (await shippingConfigService.hasZoneConfig())) {
+                const methodId = shippingMethod.id || shippingMethod.shippingMethodId || (shippingMethod._id && shippingMethod._id.toString());
+                const municipality = (shippingAddress.municipality || shippingAddress.city || '').trim();
+                const shippingCostFromDb = await shippingConfigService.getShippingCostFromDb(country, methodId, municipality);
+                orderData.shippingCost = shippingCostFromDb;
+                if (orderData.totals) orderData.totals.shipping = shippingCostFromDb;
+                if (orderData.shippingMethod) orderData.shippingMethod.cost = shippingCostFromDb;
             }
         }
         

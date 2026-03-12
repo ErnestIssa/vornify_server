@@ -5,8 +5,6 @@ const { parseString } = require('xml2js');
 const { promisify } = require('util');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getLanguageFromRequest, DEFAULT_LANGUAGE } = require('../services/translationService');
-const { getFixedDeliveryOptions, getShippingZone, applyZonePricingToOptions } = require('../utils/shippingZones');
-
 const db = getDBInstance();
 
 // Helper function to get Fraktjakt locale from request (defaults to English)
@@ -859,304 +857,66 @@ router.post('/options', async (req, res) => {
             };
             return res.status(400).json(errorResponse);
         }
-        
-        // Determine shipping zone based on country (for pricing)
-        const zone = getShippingZone(recipientAddress.country);
-        
-        if (!zone) {
+
+        // Admin-configured shipping: use DB first if zones/methods/prices are configured (do not break existing flow)
+        const shippingConfigService = require('../services/shippingConfigService');
+        const municipality = req.body.municipality || city || '';
+        const { zone: dbZone, options: dbOptions, fromDb } = await shippingConfigService.getDeliveryOptionsFromDb(
+            recipientAddress.country,
+            municipality,
+            currency || 'SEK'
+        );
+        if (fromDb && dbOptions && dbOptions.length > 0) {
+            const byType = (type) => dbOptions.filter(o => (o.type || '').toLowerCase() === type.toLowerCase());
+            const home = [...byType('home'), ...byType('home_eco')];
+            const parcelLocker = byType('parcel_locker');
+            const mailbox = byType('mailbox');
+            const servicePoint = byType('service_point');
+            const allOptions = [...dbOptions].sort((a, b) => (a.cost || 0) - (b.cost || 0));
+            return res.json({
+                success: true,
+                deliveryOptions: { home, servicePoint, parcelLocker, mailbox, all: allOptions },
+                zone: dbZone ? (dbZone.name || dbZone._id?.toString()) : null,
+                address: {
+                    country: recipientAddress.country,
+                    postalCode: recipientAddress.postalCode,
+                    street: recipientAddress.street,
+                    city: recipientAddress.city || null
+                },
+                currency: (dbOptions[0] && dbOptions[0].currency) || 'SEK',
+                baseCurrency: 'SEK',
+                exchangeRate: 1,
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // Shipping is admin/DB only; no legacy hardcoded zones
+        if (!dbZone) {
             return res.status(400).json({
                 success: false,
-                error: `Shipping is not available to ${recipientAddress.country}. We currently ship to Sweden and EU countries only.`,
+                error: `Shipping is not available to ${recipientAddress.country}. Add a shipping zone for this country in Admin → Shipping Config.`,
                 errorCode: 'SHIPPING_UNAVAILABLE',
                 validationError: true,
-                field: 'country',
-                details: `Country code ${recipientAddress.country} is not in our shipping zones.`
-            });
-        }
-        
-        // Validate warehouse address is configured
-        if (!WAREHOUSE_ADDRESS.countryCode || !WAREHOUSE_ADDRESS.postalCode || 
-            !WAREHOUSE_ADDRESS.city || !WAREHOUSE_ADDRESS.streetName) {
-            return res.status(500).json({
-                success: false,
-                error: 'Warehouse address not configured. Please set WAREHOUSE_COUNTRY, WAREHOUSE_POSTAL_CODE, WAREHOUSE_CITY, and WAREHOUSE_STREET environment variables.'
-            });
-        }
-        
-        // Prepare request body for PostNord API (correct format according to PostNord support)
-        const requestBody = {
-            warehouses: [
-                {
-                    id: "warehouse1",
-                    address: {
-                        postCode: WAREHOUSE_ADDRESS.postalCode,
-                        street: WAREHOUSE_ADDRESS.streetName,
-                        city: WAREHOUSE_ADDRESS.city,
-                        countryCode: WAREHOUSE_ADDRESS.countryCode
-                    },
-                    orderHandling: {
-                        daysUntilOrderIsReady: "0-2"
-                    }
-                }
-            ],
-            customer: {
-                customerKey: POSTNORD_DELIVERY_API.customerKey
-            },
-            recipient: {
-                address: {
-                    postCode: recipientAddress.postalCode,
-                    countryCode: recipientAddress.country
-                }
-            }
-        };
-        
-        // Add street and city to recipient address if provided (optional fields)
-        if (recipientAddress.street) {
-            requestBody.recipient.address.street = recipientAddress.street;
-        }
-        if (recipientAddress.city) {
-            requestBody.recipient.address.city = recipientAddress.city;
-        }
-        
-        // Build API URL with API key as query parameter (not header)
-        const apiUrl = `${POSTNORD_DELIVERY_API.baseUrl}?apikey=${POSTNORD_DELIVERY_API.apiKey}`;
-        
-        // Make request to PostNord API
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestBody)
-        });
-        
-        // Check if request was successful
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error('PostNord API error:', {
-                status: response.status,
-                statusText: response.statusText,
-                error: errorText
-            });
-            
-            // Provide more helpful error messages
-            let errorMessage = 'Failed to fetch delivery options from PostNord';
-            if (response.status === 403) {
-                errorMessage = 'Access forbidden. This may be caused by missing or incorrect customerKey, or invalid sender address. Please verify your PostNord API key, customerKey, and warehouse address configuration.';
-            } else if (response.status === 401) {
-                errorMessage = 'Unauthorized. Please check your PostNord API key is correctly set.';
-            } else if (response.status === 400) {
-                errorMessage = 'Bad request. Please verify the request format and field names are correct.';
-            }
-            
-            return res.status(response.status).json({
-                success: false,
-                error: errorMessage,
-                status: response.status,
-                details: errorText
-            });
-        }
-        
-        // Parse response
-        const data = await response.json();
-        
-        // Extract delivery options from response
-        // PostNord API response structure: warehouseToDeliveryOptions array
-        let deliveryOptions = [];
-        
-        // PostNord returns: { warehouseToDeliveryOptions: [{ warehouse: {...}, deliveryOptions: [...] }] }
-        if (data.warehouseToDeliveryOptions && Array.isArray(data.warehouseToDeliveryOptions)) {
-            // Extract delivery options from all warehouses
-            data.warehouseToDeliveryOptions.forEach(warehouseData => {
-                if (warehouseData.deliveryOptions && Array.isArray(warehouseData.deliveryOptions)) {
-                    // Each delivery option has: type, defaultOption, additionalOptions
-                    warehouseData.deliveryOptions.forEach(option => {
-                        // Add default option with type preserved
-                        if (option.defaultOption) {
-                            deliveryOptions.push({
-                                ...option.defaultOption,
-                                type: option.type,
-                                isDefault: true,
-                                additionalOptions: option.additionalOptions || []
-                            });
-                        } else {
-                            // If no defaultOption, add the option itself with type
-                            deliveryOptions.push({
-                                ...option,
-                                type: option.type,
-                                isDefault: false
-                            });
-                        }
-                    });
-                }
-            });
-        } else if (data.deliveryOptions && Array.isArray(data.deliveryOptions)) {
-            deliveryOptions = data.deliveryOptions;
-        } else if (Array.isArray(data)) {
-            deliveryOptions = data;
-        }
-        
-        // Process delivery options using helper functions (maintains existing structure)
-        let homeDelivery = filterHomeDeliveryOptions(deliveryOptions);
-        let servicePoint = filterServicePointOptions(deliveryOptions);
-        let parcelLocker = filterParcelLockerOptions(deliveryOptions);
-        let mailbox = filterMailboxOptions(deliveryOptions);
-        
-        // Log zone detection for debugging
-        console.log('📦 [SHIPPING] Zone detected:', zone, 'for country:', recipientAddress.country);
-        console.log('📦 [SHIPPING] Options before pricing:', {
-            home: homeDelivery.length,
-            servicePoint: servicePoint.length,
-            parcelLocker: parcelLocker.length,
-            mailbox: mailbox.length
-        });
-        
-        // Apply zone-based pricing to all options (SECURE - server-side calculation)
-        if (zone) {
-            homeDelivery = applyZonePricingToOptions(homeDelivery, zone);
-            servicePoint = applyZonePricingToOptions(servicePoint, zone);
-            parcelLocker = applyZonePricingToOptions(parcelLocker, zone);
-            mailbox = applyZonePricingToOptions(mailbox, zone);
-            
-            // Log pricing application with detailed info
-            console.log('📦 [SHIPPING] Pricing applied. Sample costs:', {
-                home: homeDelivery[0]?.cost || 'N/A',
-                homeCount: homeDelivery.length,
-                parcelLocker: parcelLocker[0]?.cost || 'N/A',
-                parcelLockerCount: parcelLocker.length,
-                mailbox: mailbox[0]?.cost || 'N/A',
-                mailboxCount: mailbox.length,
-                servicePoint: servicePoint[0]?.cost || 'N/A',
-                servicePointCount: servicePoint.length
-            });
-            
-            // Verify all options have prices
-            const optionsWithoutPrice = [
-                ...homeDelivery.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'home' })),
-                ...parcelLocker.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'parcelLocker' })),
-                ...mailbox.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'mailbox' })),
-                ...servicePoint.filter(opt => !opt.cost || opt.cost === 0).map(opt => ({ ...opt, category: 'servicePoint' }))
-            ];
-            
-            if (optionsWithoutPrice.length > 0) {
-                console.error('❌ [SHIPPING] Options without prices:', optionsWithoutPrice.map(opt => ({
-                    category: opt.category,
-                    id: opt.id,
-                    type: opt.type,
-                    name: opt.name,
-                    deliveryMethod: opt.deliveryMethod,
-                    pricingReason: opt.pricingReason
-                })));
-            } else {
-                console.log('✅ [SHIPPING] All options have prices applied correctly');
-            }
-        } else {
-            console.error('⚠️ [SHIPPING] Zone is undefined! Cannot apply pricing.');
-        }
-        
-        // Combine all options for 'all' array
-        const allOptions = [
-            ...homeDelivery,
-            ...servicePoint,
-            ...parcelLocker,
-            ...mailbox
-        ];
-        
-        // Ensure all options have zone and pricing applied
-        if (!zone) {
-            console.error('❌ [SHIPPING] Zone is undefined! Cannot apply pricing. Country:', recipientAddress.country);
-            return res.status(400).json({
-                success: false,
-                error: 'Shipping not available to this country',
-                errorCode: 'SHIPPING_UNAVAILABLE',
-                details: `Shipping is only available to Sweden (SE) and EU countries. Country code: ${recipientAddress.country}`,
                 field: 'country'
             });
         }
-        
-        // Verify pricing was applied (at least one option should have cost > 0)
-        const hasPricing = allOptions.some(opt => opt.cost > 0);
-        if (!hasPricing && allOptions.length > 0) {
-            console.error('❌ [SHIPPING] No pricing applied to options!', {
-                zone: zone,
-                optionsCount: allOptions.length,
-                sampleOption: allOptions[0]
+        if (!dbOptions || dbOptions.length === 0) {
+            return res.json({
+                success: true,
+                deliveryOptions: { home: [], servicePoint: [], parcelLocker: [], mailbox: [], all: [] },
+                zone: dbZone.name || dbZone._id?.toString(),
+                address: {
+                    country: recipientAddress.country,
+                    postalCode: recipientAddress.postalCode,
+                    street: recipientAddress.street,
+                    city: recipientAddress.city || null
+                },
+                currency: 'SEK',
+                baseCurrency: 'SEK',
+                exchangeRate: 1,
+                timestamp: new Date().toISOString()
             });
         }
-        
-        // Convert shipping prices to requested currency if different from SEK
-        let finalOptions = allOptions;
-        let finalHomeDelivery = homeDelivery;
-        let finalServicePoint = servicePoint;
-        let finalParcelLocker = parcelLocker;
-        let finalMailbox = mailbox;
-        let responseCurrency = 'SEK';
-        let exchangeRate = 1.0;
-        
-        if (currency && currency.toUpperCase() !== 'SEK') {
-            try {
-                const currencyService = require('../services/currencyService');
-                const conversionResult = await currencyService.convertCurrency(100, 'SEK', currency.toUpperCase());
-                
-                if (conversionResult.success) {
-                    exchangeRate = conversionResult.rate;
-                    responseCurrency = currency.toUpperCase();
-                    
-                    // Helper function to convert option costs
-                    const convertOption = (option) => ({
-                        ...option,
-                        cost: Math.round(option.cost * exchangeRate * 100) / 100,
-                        currency: responseCurrency,
-                        baseCost: option.cost, // Keep original SEK cost
-                        baseCurrency: 'SEK',
-                        exchangeRate: exchangeRate
-                    });
-                    
-                    // Convert all option arrays
-                    finalHomeDelivery = homeDelivery.map(convertOption);
-                    finalServicePoint = servicePoint.map(convertOption);
-                    finalParcelLocker = parcelLocker.map(convertOption);
-                    finalMailbox = mailbox.map(convertOption);
-                    finalOptions = allOptions.map(convertOption);
-                    
-                    console.log(`💱 [SHIPPING] Converted shipping prices from SEK to ${responseCurrency} at rate ${exchangeRate}`);
-                } else {
-                    console.warn(`⚠️ [SHIPPING] Currency conversion failed, using SEK:`, conversionResult.error);
-                }
-            } catch (currencyError) {
-                console.error('❌ [SHIPPING] Currency conversion error:', currencyError);
-                // Continue with SEK if conversion fails
-            }
-        }
-        
-        // Return formatted response (maintains existing structure for frontend compatibility)
-        res.json({
-            success: true,
-            deliveryOptions: {
-                home: finalHomeDelivery,
-                servicePoint: finalServicePoint,
-                parcelLocker: finalParcelLocker,
-                mailbox: finalMailbox,
-                all: finalOptions
-            },
-            zone: zone, // Include zone for frontend reference (always "SE" or "EU")
-            address: {
-                country: recipientAddress.country,
-                postalCode: recipientAddress.postalCode,
-                street: recipientAddress.street,
-                city: recipientAddress.city || null
-            },
-            warehouse: {
-                countryCode: WAREHOUSE_ADDRESS.countryCode,
-                postalCode: WAREHOUSE_ADDRESS.postalCode,
-                city: WAREHOUSE_ADDRESS.city,
-                streetName: WAREHOUSE_ADDRESS.streetName
-            },
-            currency: responseCurrency,
-            baseCurrency: 'SEK',
-            exchangeRate: exchangeRate,
-            timestamp: new Date().toISOString()
-        });
         
     } catch (error) {
         console.error('Delivery options error:', error);
