@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
+const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
 const currencyService = require('../services/currencyService');
 const {
     CANONICAL_STATUSES,
@@ -317,7 +319,20 @@ router.post('/create', async (req, res) => {
                 if (orderData.shippingMethod) orderData.shippingMethod.cost = shippingCostFromDb;
             }
         }
-        
+
+        // Auto-assign best warehouse when not set (multi-warehouse support)
+        if (orderData.items?.length && shippingAddress && !orderData.warehouseId) {
+            try {
+                const warehouseSelectionService = require('../services/warehouseSelectionService');
+                const destCountry = (shippingAddress.country || shippingAddress.countryCode || '').toString().toUpperCase().trim();
+                const orderItems = (orderData.items || []).map(i => ({ id: i.id || i.productId, productId: i.id || i.productId, quantity: i.quantity || 1 }));
+                const { warehouse } = await warehouseSelectionService.selectWarehouse(orderItems, destCountry, { preferSingleShipment: true });
+                if (warehouse && warehouse._id) orderData.warehouseId = warehouse._id.toString();
+            } catch (e) {
+                console.warn('[ORDER CREATE] Warehouse selection skipped:', e.message);
+            }
+        }
+
         // Backend is single source of truth: recalculate totals from items, shipping, discount; VAT from shipping country
         const checkoutTotalsService = require('../services/checkoutTotalsService');
         const discountService = require('../services/discountService');
@@ -1358,6 +1373,141 @@ router.get('/all', async (req, res) => {
     }
 });
 
+// GET /api/orders/list - Admin orders dashboard: list with filters, sorting, pagination
+router.get('/list', authenticateAdmin, async (req, res) => {
+    try {
+        const {
+            status,
+            fulfillmentStatus,
+            carrier,
+            shippingMethod,
+            country,
+            warehouseId,
+            dateFrom,
+            dateTo,
+            minTotal,
+            maxTotal,
+            limit = 50,
+            offset = 0
+        } = req.query;
+        const andParts = [ NOT_DELETED_FILTER ];
+        if (status) andParts.push({ status: String(status).toLowerCase() });
+        if (fulfillmentStatus) andParts.push({ fulfillmentStatus: String(fulfillmentStatus).toLowerCase() });
+        if (carrier) andParts.push({ shippingProvider: new RegExp(String(carrier), 'i') });
+        if (shippingMethod) andParts.push({ 'shippingMethod.name': new RegExp(String(shippingMethod), 'i') });
+        if (country) andParts.push({ 'shippingAddress.country': new RegExp(String(country), 'i') });
+        if (warehouseId) andParts.push({ warehouseId: ObjectId.isValid(warehouseId) ? new ObjectId(warehouseId) : warehouseId });
+        if (dateFrom || dateTo) {
+            const dateQ = {};
+            if (dateFrom) dateQ.$gte = new Date(dateFrom);
+            if (dateTo) dateQ.$lte = new Date(dateTo);
+            andParts.push({ createdAt: dateQ });
+        }
+        if (minTotal != null || maxTotal != null) {
+            const totalQ = {};
+            if (minTotal != null) totalQ.$gte = Number(minTotal);
+            if (maxTotal != null) totalQ.$lte = Number(maxTotal);
+            andParts.push({ 'totals.total': totalQ });
+        }
+        const query = { $and: andParts };
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: query
+        });
+        let orders = (result.success && result.data) ? (Array.isArray(result.data) ? result.data : [result.data]) : [];
+        const total = orders.length;
+        orders = orders.slice(Number(offset) || 0, (Number(offset) || 0) + (Number(limit) || 50));
+        const data = orders.map(o => ({
+            orderId: o.orderId || o._id?.toString(),
+            customer: o.customer ? { email: o.customer.email, name: o.customer.name || o.customer.firstName } : null,
+            orderDate: o.createdAt || o.orderDate || o.date,
+            paymentStatus: o.paymentStatus || 'unknown',
+            fulfillmentStatus: o.fulfillmentStatus || o.status || 'pending',
+            shippingMethod: o.shippingMethod?.name || o.shippingMethod || null,
+            carrier: o.shippingProvider || null,
+            trackingNumber: o.trackingNumber || null,
+            total: o.totals?.total ?? o.total ?? 0,
+            destinationCountry: o.shippingAddress?.country || o.customer?.country || null,
+            warehouseId: o.warehouseId || null
+        }));
+        return res.json({ success: true, data, total, limit: Number(limit) || 50, offset: Number(offset) || 0 });
+    } catch (error) {
+        console.error('Orders list (admin) error:', error);
+        return res.status(500).json({ success: false, error: error.message || 'Failed to retrieve orders' });
+    }
+});
+
+// POST /api/orders/bulk-action - Admin bulk actions
+router.post('/bulk-action', authenticateAdmin, async (req, res) => {
+    try {
+        const { action, orderIds, trackingNumber, carrier } = req.body;
+        if (!action || !Array.isArray(orderIds) || orderIds.length === 0) {
+            return res.status(400).json({ success: false, error: 'action and orderIds (array) are required' });
+        }
+        const results = { processed: 0, updated: [], failed: [] };
+        for (const orderId of orderIds) {
+            try {
+                if (action === 'mark_shipped' && trackingNumber) {
+                    const updateResult = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId },
+                            update: {
+                                status: 'shipped',
+                                trackingNumber: String(trackingNumber),
+                                shippingProvider: carrier || null,
+                                updatedAt: new Date().toISOString()
+                            }
+                        }
+                    });
+                    if (updateResult.success) results.updated.push(orderId);
+                } else if (action === 'cancel') {
+                    const updateResult = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId },
+                            update: { status: 'cancelled', updatedAt: new Date().toISOString() }
+                        }
+                    });
+                    if (updateResult.success) results.updated.push(orderId);
+                } else if (action === 'export') {
+                    results.updated.push(orderId);
+                }
+                results.processed++;
+            } catch (e) {
+                results.failed.push({ orderId, error: e.message });
+            }
+        }
+        return res.json({ success: true, ...results });
+    } catch (error) {
+        console.error('Bulk action error:', error);
+        return res.status(500).json({ success: false, error: error.message || 'Bulk action failed' });
+    }
+});
+
+// POST /api/orders/generate-labels - Bulk label generation (stub; integrate carrier APIs later)
+router.post('/generate-labels', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderIds } = req.body || {};
+        const ids = Array.isArray(orderIds) ? orderIds : [];
+        return res.json({
+            success: true,
+            message: 'Label generation not integrated. Connect carrier APIs (PostNord, DHL, etc.) to enable.',
+            orderIds: ids,
+            labelUrls: [],
+            generated: 0
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: error.message || 'Failed' });
+    }
+});
+
 // Get orders by customer email (path parameter - for backward compatibility; excludes soft-deleted)
 router.get('/customer/:email', async (req, res) => {
     try {
@@ -1716,6 +1866,123 @@ router.post('/:orderId/notify', async (req, res) => {
                 message: error.message
             });
         }
+    }
+});
+
+const SHIPMENTS_COLL = 'shipments';
+
+// GET /api/orders/:orderId/shipments - List shipments for an order (split shipments)
+router.get('/:orderId/shipments', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: SHIPMENTS_COLL,
+            command: '--read',
+            data: { orderId }
+        });
+        const data = (result.success && Array.isArray(result.data)) ? result.data : [];
+        return res.json({ success: true, data });
+    } catch (e) {
+        console.error('Get order shipments error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to get shipments' });
+    }
+});
+
+// POST /api/orders/:orderId/shipments - Create a shipment (split shipment)
+router.post('/:orderId/shipments', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const { carrier, trackingNumber, warehouseId, status, estimatedDelivery, items } = req.body || {};
+        const coll = await db.getCollection('peakmode', SHIPMENTS_COLL);
+        const existing = await coll.find({ orderId }).toArray();
+        const shipmentIndex = existing.length + 1;
+        const doc = {
+            orderId,
+            shipmentIndex,
+            carrier: carrier || null,
+            trackingNumber: trackingNumber || null,
+            warehouseId: warehouseId || null,
+            status: status || 'label_created',
+            labelUrl: null,
+            estimatedDelivery: estimatedDelivery || null,
+            items: Array.isArray(items) ? items : [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        const insertResult = await coll.insertOne(doc);
+        return res.status(201).json({ success: true, data: { _id: insertResult.insertedId, ...doc } });
+    } catch (e) {
+        console.error('Create shipment error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to create shipment' });
+    }
+});
+
+// PUT /api/orders/:orderId/shipments/:shipmentId - Update a shipment
+router.put('/:orderId/shipments/:shipmentId', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderId, shipmentId } = req.params;
+        const { carrier, trackingNumber, warehouseId, status, estimatedDelivery, labelUrl, items } = req.body || {};
+        const filter = { orderId, _id: ObjectId.isValid(shipmentId) ? new ObjectId(shipmentId) : shipmentId };
+        const update = { updatedAt: new Date().toISOString() };
+        if (carrier !== undefined) update.carrier = carrier;
+        if (trackingNumber !== undefined) update.trackingNumber = trackingNumber;
+        if (warehouseId !== undefined) update.warehouseId = warehouseId;
+        if (status !== undefined) update.status = status;
+        if (estimatedDelivery !== undefined) update.estimatedDelivery = estimatedDelivery;
+        if (labelUrl !== undefined) update.labelUrl = labelUrl;
+        if (items !== undefined) update.items = Array.isArray(items) ? items : [];
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: SHIPMENTS_COLL,
+            command: '--update',
+            data: { filter, update }
+        });
+        if (!result.success) return res.status(result.error && result.error.includes('No document matched') ? 404 : 500).json({ success: false, error: result.error || 'Update failed' });
+        return res.json({ success: true });
+    } catch (e) {
+        console.error('Update shipment error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to update shipment' });
+    }
+});
+
+// POST /api/orders/:orderId/generate-label - Create shipment via SHIPIT and get label (logistics automation)
+router.post('/:orderId/generate-label', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const shipitService = require('../services/shipping/shipitService');
+        if (!shipitService.isConfigured()) {
+            return res.status(503).json({
+                success: false,
+                orderId,
+                message: 'SHIPIT is not configured. Set SHIPIT_API_KEY and SHIPIT_BASE_URL.',
+                labelUrl: null,
+                generated: false
+            });
+        }
+        const result = await shipitService.createShipment(orderId);
+        if (!result.success) {
+            return res.status(400).json({
+                success: false,
+                orderId,
+                message: result.error || 'Failed to create shipment',
+                labelUrl: null,
+                generated: false
+            });
+        }
+        return res.json({
+            success: true,
+            orderId,
+            message: 'Shipment created. Download label and send tracking to customer.',
+            labelUrl: result.shipment?.label_url ?? result.shipment?.labelUrl ?? null,
+            trackingNumber: result.shipment?.tracking_number ?? result.shipment?.trackingNumber ?? null,
+            shipmentId: result.shipment?.shipit_shipment_id ?? result.shipment?.shipment_id ?? null,
+            carrier: result.shipment?.carrier ?? null,
+            generated: true
+        });
+    } catch (e) {
+        console.error('Generate label (SHIPIT) error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed' });
     }
 });
 

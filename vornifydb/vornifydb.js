@@ -203,11 +203,15 @@ class VortexDB {
             const shippingMethodsColl = peakmode.collection('shipping_methods');
             const shippingPricesColl = peakmode.collection('shipping_prices');
             const shippingFreeAreasColl = peakmode.collection('shipping_free_areas');
+            const warehousesColl = peakmode.collection('warehouses');
+            const carrierIntegrationsColl = peakmode.collection('carrier_integrations');
             for (const [coll, spec] of [
                 [shippingZonesColl, [{ key: { active: 1 }, cacheKey: 'peakmode.shipping_zones.active' }]],
                 [shippingMethodsColl, [{ key: { active: 1 }, cacheKey: 'peakmode.shipping_methods.active' }, { key: { id: 1 }, cacheKey: 'peakmode.shipping_methods.id' }]],
                 [shippingPricesColl, [{ key: { zoneId: 1, methodId: 1 }, cacheKey: 'peakmode.shipping_prices.zoneId_methodId' }, { key: { active: 1 }, cacheKey: 'peakmode.shipping_prices.active' }]],
-                [shippingFreeAreasColl, [{ key: { country: 1, municipality: 1 }, cacheKey: 'peakmode.shipping_free_areas.country_municipality' }, { key: { active: 1 }, cacheKey: 'peakmode.shipping_free_areas.active' }]]
+                [shippingFreeAreasColl, [{ key: { country: 1, municipality: 1 }, cacheKey: 'peakmode.shipping_free_areas.country_municipality' }, { key: { active: 1 }, cacheKey: 'peakmode.shipping_free_areas.active' }]],
+                [warehousesColl, [{ key: { active: 1 }, cacheKey: 'peakmode.warehouses.active' }, { key: { country: 1 }, cacheKey: 'peakmode.warehouses.country' }]],
+                [carrierIntegrationsColl, [{ key: { active: 1 }, cacheKey: 'peakmode.carrier_integrations.active' }, { key: { carrier_name: 1 }, cacheKey: 'peakmode.carrier_integrations.carrier_name' }]]
             ]) {
                 for (const { key, cacheKey } of spec) {
                     if (!this.indexCache.has(cacheKey)) {

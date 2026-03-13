@@ -992,6 +992,9 @@ router.post('/', authenticateAdmin, async (req, res) => {
         productData.active = productData.active !== undefined ? productData.active : true;
         productData.featured = productData.featured !== undefined ? productData.featured : false;
         productData.published = productData.published !== undefined ? productData.published : false;
+        if (productData.warehouseIds !== undefined) {
+            productData.warehouseIds = Array.isArray(productData.warehouseIds) ? productData.warehouseIds : (productData.warehouseIds ? [productData.warehouseIds] : []);
+        }
         
         // Process inventory data if provided (returns full document with inventory normalized)
         if (productData.inventory) {
@@ -1082,6 +1085,11 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
         
         // Add updated timestamp
         updateData.updatedAt = new Date().toISOString();
+
+        // Warehouse assignment: which warehouse(s) have this product (for multi-warehouse selection)
+        if (updateData.warehouseIds !== undefined) {
+            updateData.warehouseIds = Array.isArray(updateData.warehouseIds) ? updateData.warehouseIds : (updateData.warehouseIds ? [updateData.warehouseIds] : []);
+        }
         
         // Resolve existing product by id then by _id (same as GET /:id) so admin can use either in the URL
         let existingProductResult = await db.executeOperation({

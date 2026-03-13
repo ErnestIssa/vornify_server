@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
 
 const db = getDBInstance();
 
@@ -81,6 +82,53 @@ async function getCarrierTrackingInfo(trackingNumber, carrier) {
         throw new Error(`Failed to get tracking information from ${carrier}`);
     }
 }
+
+// GET /api/tracking/admin/dashboard - Admin tracking dashboard: list all shipments with tracking
+router.get('/admin/dashboard', authenticateAdmin, async (req, res) => {
+    try {
+        const ordersResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { trackingNumber: { $exists: true, $ne: null, $ne: '' } }
+        });
+        let orders = (ordersResult.success && ordersResult.data) ? (Array.isArray(ordersResult.data) ? ordersResult.data : [ordersResult.data]) : [];
+        const fromOrders = orders.map(o => ({
+            shipmentId: o.orderId,
+            orderId: o.orderId,
+            carrier: o.shippingProvider || null,
+            trackingNumber: o.trackingNumber,
+            shipmentStatus: o.status || 'unknown',
+            origin: null,
+            destination: o.shippingAddress ? `${o.shippingAddress.city || ''} ${o.shippingAddress.country || ''}`.trim() : null,
+            lastUpdate: o.updatedAt || o.createdAt,
+            estimatedDelivery: o.estimatedDelivery || null
+        }));
+        const shipmentsResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'shipments',
+            command: '--read',
+            data: {}
+        });
+        let shipments = (shipmentsResult.success && shipmentsResult.data) ? (Array.isArray(shipmentsResult.data) ? shipmentsResult.data : [shipmentsResult.data]) : [];
+        const fromShipments = shipments.map(s => ({
+            shipmentId: s._id?.toString(),
+            orderId: s.orderId,
+            carrier: s.carrier,
+            trackingNumber: s.trackingNumber,
+            shipmentStatus: s.status || 'label_created',
+            origin: null,
+            destination: null,
+            lastUpdate: s.updatedAt || s.createdAt,
+            estimatedDelivery: s.estimatedDelivery || null
+        }));
+        const data = [...fromOrders, ...fromShipments];
+        return res.json({ success: true, data });
+    } catch (e) {
+        console.error('Tracking dashboard error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to get tracking dashboard' });
+    }
+});
 
 // GET /api/tracking/track/:trackingNumber - Track by tracking number
 router.get('/track/:trackingNumber', async (req, res) => {
