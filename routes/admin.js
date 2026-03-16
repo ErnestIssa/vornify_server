@@ -383,5 +383,46 @@ router.post('/me/activity', authenticateAdmin, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/admin/shipments – Recent shipments for Admin Shipping Settings
+ * Returns all shipments from DB, latest first. Admin auth required.
+ * Query: limit (default 50), offset (default 0).
+ */
+router.get('/shipments', authenticateAdmin, async (req, res) => {
+    try {
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+        const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+        const coll = await db.getCollection('peakmode', 'shipments');
+        const rows = await coll.aggregate([
+            { $addFields: { _sortDate: { $ifNull: ['$updated_at', { $ifNull: ['$updatedAt', { $ifNull: ['$created_at', '$createdAt'] }] }] } } },
+            { $sort: { _sortDate: -1 } },
+            { $skip: offset },
+            { $limit: limit },
+            { $project: { _sortDate: 0 } }
+        ]).toArray();
+
+        const data = rows.map((s) => {
+            const last = s.updated_at || s.updatedAt || s.created_at || s.createdAt;
+            return {
+                shipmentId: (s._id && s._id.toString) ? s._id.toString() : (s.shipit_shipment_id || s.shipmentNumber || ''),
+                orderId: s.orderId || s.order_id || '',
+                carrier: s.carrier || null,
+                trackingNumber: s.trackingNumber || s.tracking_number || null,
+                shipmentStatus: s.status || s.shipmentStatus || 'pending',
+                lastUpdate: last || null,
+                estimatedDelivery: s.estimatedDelivery || null,
+                origin: s.origin || null,
+                destination: s.destination || null
+            };
+        });
+
+        return res.json({ success: true, data });
+    } catch (e) {
+        console.error('[admin] GET /shipments error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to load shipments' });
+    }
+});
+
 module.exports = router;
 
