@@ -1440,7 +1440,9 @@ router.get('/list', authenticateAdmin, async (req, res) => {
                 // Deterministic fields for receipt/invoice lookups
                 customerEmail,
                 customerName,
-                customerId: o.customerId || o.customer?._id || null,
+                // In this backend, customer profiles are keyed by email (`GET /api/customers/:id` reads by { email: id }).
+                // So the most reliable deterministic customerId for the admin route is the email itself.
+                customerId: customerEmail,
 
                 orderDate: o.createdAt || o.orderDate || o.date,
                 paymentStatus: o.paymentStatus || 'unknown',
