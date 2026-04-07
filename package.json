@@ -36,6 +36,8 @@
     "multer": "^2.0.2",
     "multer-storage-cloudinary": "^4.0.0",
     "node-fetch": "^3.3.2",
+    "puppeteer": "^24.40.0",
+    "qrcode": "^1.5.4",
     "stripe": "^14.17.0",
     "uuid": "^11.1.0",
     "xml2js": "^0.6.2"

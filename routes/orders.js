@@ -1397,6 +1397,7 @@ router.get('/list', authenticateAdmin, async (req, res) => {
         if (shippingMethod) andParts.push({ 'shippingMethod.name': new RegExp(String(shippingMethod), 'i') });
         if (country) andParts.push({ 'shippingAddress.country': new RegExp(String(country), 'i') });
         if (warehouseId) andParts.push({ warehouseId: ObjectId.isValid(warehouseId) ? new ObjectId(warehouseId) : warehouseId });
+        if (req.query.invoiceNumber) andParts.push({ invoiceNumber: String(req.query.invoiceNumber).trim() });
         if (dateFrom || dateTo) {
             const dateQ = {};
             if (dateFrom) dateQ.$gte = new Date(dateFrom);
@@ -1419,19 +1420,39 @@ router.get('/list', authenticateAdmin, async (req, res) => {
         let orders = (result.success && result.data) ? (Array.isArray(result.data) ? result.data : [result.data]) : [];
         const total = orders.length;
         orders = orders.slice(Number(offset) || 0, (Number(offset) || 0) + (Number(limit) || 50));
-        const data = orders.map(o => ({
-            orderId: o.orderId || o._id?.toString(),
-            customer: o.customer ? { email: o.customer.email, name: o.customer.name || o.customer.firstName } : null,
-            orderDate: o.createdAt || o.orderDate || o.date,
-            paymentStatus: o.paymentStatus || 'unknown',
-            fulfillmentStatus: o.fulfillmentStatus || o.status || 'pending',
-            shippingMethod: o.shippingMethod?.name || o.shippingMethod || null,
-            carrier: o.shippingProvider || null,
-            trackingNumber: o.trackingNumber || null,
-            total: o.totals?.total ?? o.total ?? 0,
-            destinationCountry: o.shippingAddress?.country || o.customer?.country || null,
-            warehouseId: o.warehouseId || null
-        }));
+        const data = orders.map(o => {
+            const customerEmail = o.customer?.email || o.customerEmail || null;
+            const customerName =
+                o.customer?.name ||
+                [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') ||
+                o.customerName ||
+                null;
+
+            return {
+                orderId: o.orderId || o._id?.toString(),
+                invoiceNumber: o.invoiceNumber || null,
+
+                // Keep the existing nested shape (admin UI may already rely on it)
+                customer: (customerEmail || customerName)
+                    ? { email: customerEmail, name: customerName }
+                    : null,
+
+                // Deterministic fields for receipt/invoice lookups
+                customerEmail,
+                customerName,
+                customerId: o.customerId || o.customer?._id || null,
+
+                orderDate: o.createdAt || o.orderDate || o.date,
+                paymentStatus: o.paymentStatus || 'unknown',
+                fulfillmentStatus: o.fulfillmentStatus || o.status || 'pending',
+                shippingMethod: o.shippingMethod?.name || o.shippingMethod || null,
+                carrier: o.shippingProvider || null,
+                trackingNumber: o.trackingNumber || null,
+                total: o.totals?.total ?? o.total ?? 0,
+                destinationCountry: o.shippingAddress?.country || o.customer?.country || null,
+                warehouseId: o.warehouseId || null
+            };
+        });
         return res.json({ success: true, data, total, limit: Number(limit) || 50, offset: Number(offset) || 0 });
     } catch (error) {
         console.error('Orders list (admin) error:', error);
@@ -1943,6 +1964,86 @@ router.put('/:orderId/shipments/:shipmentId', authenticateAdmin, async (req, res
     } catch (e) {
         console.error('Update shipment error:', e);
         return res.status(500).json({ success: false, error: e.message || 'Failed to update shipment' });
+    }
+});
+
+// GET /api/orders/:orderId/receipt - Download PDF receipt (admin)
+router.get('/:orderId/receipt', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const findResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
+        });
+        const order = findResult.success && findResult.data ? (Array.isArray(findResult.data) ? findResult.data[0] : findResult.data) : null;
+        if (!order || isOrderDeleted(order)) {
+            return res.status(404).json({ success: false, error: 'Order not found' });
+        }
+        if (order.paymentStatus !== 'succeeded') {
+            return res.status(400).json({ success: false, error: 'Receipt is only available for paid orders' });
+        }
+        const receiptPdfService = require('../services/receiptPdfService');
+        await receiptPdfService.ensureInvoiceNumberOnOrder(order, db);
+        const invoiceNumber = order.invoiceNumber || receiptPdfService.stableInvoiceNumber(orderId);
+        const orderForPdf = { ...order, invoiceNumber };
+        const { buffer, filename } = await receiptPdfService.generateReceiptPdfBuffer(orderForPdf);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`);
+        return res.send(buffer);
+    } catch (e) {
+        console.error('GET receipt error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to generate receipt' });
+    }
+});
+
+// POST /api/orders/:orderId/receipt/email - Resend receipt PDF by email (admin)
+router.post('/:orderId/receipt/email', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const findResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
+        });
+        const order = findResult.success && findResult.data ? (Array.isArray(findResult.data) ? findResult.data[0] : findResult.data) : null;
+        if (!order || isOrderDeleted(order)) {
+            return res.status(404).json({ success: false, error: 'Order not found' });
+        }
+        const email = order.customer?.email || order.customerEmail;
+        if (!email) {
+            return res.status(400).json({ success: false, error: 'Order has no customer email' });
+        }
+        if (order.paymentStatus !== 'succeeded') {
+            return res.status(400).json({ success: false, error: 'Receipt only for paid orders' });
+        }
+        const receiptPdfService = require('../services/receiptPdfService');
+        const emailService = require('../services/emailService');
+        await receiptPdfService.ensureInvoiceNumberOnOrder(order, db);
+        const invoiceNumber = order.invoiceNumber || receiptPdfService.stableInvoiceNumber(orderId);
+        const orderForPdf = { ...order, invoiceNumber };
+        const { buffer, filename } = await receiptPdfService.generateReceiptPdfBuffer(orderForPdf);
+        const customerName = order.customer?.name || `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`.trim() || order.customerName || 'Customer';
+        const lang = order.language || 'en';
+        const result = await emailService.sendOrderReceiptEmail(email, customerName, orderForPdf, lang, buffer, filename);
+        if (!result.success) {
+            return res.status(500).json({ success: false, error: result.error || 'Send failed' });
+        }
+        await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--update',
+            data: {
+                filter: { orderId },
+                update: { receiptSentAt: new Date().toISOString(), invoiceNumber }
+            }
+        });
+        return res.json({ success: true, message: 'Receipt sent', messageId: result.messageId });
+    } catch (e) {
+        console.error('POST receipt/email error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to send receipt' });
     }
 });
 

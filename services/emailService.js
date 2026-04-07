@@ -328,6 +328,68 @@ class EmailService {
     }
 
     /**
+     * Send order receipt PDF as attachment (after order confirmation).
+     * @param {string} to - Customer email
+     * @param {string} name - Customer display name
+     * @param {object} order - Order document (must include orderId, totals, invoiceNumber if assigned)
+     * @param {string} language - 'en' | 'sv'
+     * @param {Buffer} pdfBuffer - PDF bytes
+     * @param {string} filename - Attachment filename
+     */
+    async sendOrderReceiptEmail(to, name, order, language, pdfBuffer, filename) {
+        try {
+            if (!process.env.SENDGRID_API_KEY) {
+                return { success: false, error: 'Email service not configured' };
+            }
+            if (!to || !pdfBuffer || !Buffer.isBuffer(pdfBuffer)) {
+                return { success: false, error: 'Recipient and PDF buffer are required' };
+            }
+            const lang = (language || 'en').toLowerCase().startsWith('sv') ? 'sv' : 'en';
+            const subjects = {
+                en: `Your receipt — ${order.orderId || 'order'}`,
+                sv: `Ditt kvitto — ${order.orderId || 'order'}`
+            };
+            const bodies = {
+                en: `<p>Hello ${name || 'customer'},</p>
+<p>Thank you for your purchase. Your <strong>PDF receipt</strong> is attached to this email.</p>
+<p>Order: <strong>${order.orderId || ''}</strong></p>
+<p>If you have questions, contact <a href="mailto:support@peakmode.se">support@peakmode.se</a>.</p>
+<p>Peak Mode — No Limits. Just Peaks.</p>`,
+                sv: `<p>Hej ${name || 'kund'},</p>
+<p>Tack för ditt köp. Ditt <strong>PDF-kvitto</strong> finns bifogat.</p>
+<p>Order: <strong>${order.orderId || ''}</strong></p>
+<p>Frågor? Kontakta <a href="mailto:support@peakmode.se">support@peakmode.se</a>.</p>
+<p>Peak Mode — No Limits. Just Peaks.</p>`
+            };
+            const msg = {
+                to,
+                from: this.fromEmail,
+                subject: subjects[lang],
+                html: bodies[lang],
+                attachments: [{
+                    content: pdfBuffer.toString('base64'),
+                    filename: filename || `Receipt-${order.orderId}.pdf`,
+                    type: 'application/pdf',
+                    disposition: 'attachment'
+                }]
+            };
+            const response = await sgMail.send(msg);
+            return {
+                success: true,
+                messageId: response[0]?.headers?.['x-message-id'],
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            console.error('❌ Order receipt email error:', error);
+            return {
+                success: false,
+                error: error.message || 'Failed to send receipt email',
+                details: error.response?.body
+            };
+        }
+    }
+
+    /**
      * Send password reset email
      * @param {string} to - Recipient email address
      * @param {string} resetLink - Password reset link

@@ -301,6 +301,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             updateData.status = 'processing';
         }
 
+        if (paymentIntent.latest_charge && process.env.STRIPE_SECRET_KEY) {
+            try {
+                const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
+                const last4 = charge?.payment_method_details?.card?.last4;
+                if (last4) updateData.paymentCardLast4 = last4;
+            } catch (chargeErr) {
+                console.warn(`⚠️ [PAYMENT WEBHOOK] Could not load card last4 for receipt: ${chargeErr.message}`);
+            }
+        }
+
         // Mark any failed checkouts as completed if payment succeeded
         const paymentFailureService = require('../services/paymentFailureService');
         try {
@@ -325,8 +335,9 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         // This ensures customers only receive confirmation for paid orders
         if (!order.emailSent && order.customer?.email) {
             try {
-                // Verify payment status before sending email
-                if (order.paymentStatus !== 'succeeded') {
+                // Use merged status: DB row may still be pre-payment until update above is applied
+                const paidNow = order.paymentStatus === 'succeeded' || updateData.paymentStatus === 'succeeded';
+                if (!paidNow) {
                     console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} payment status is not 'succeeded' (${order.paymentStatus}). Skipping email.`);
                     return;
                 }
@@ -364,6 +375,51 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
                         timestamp: emailResult.timestamp,
                         currency: order.currency || 'SEK'
                     });
+
+                    // PDF receipt email (second email, after confirmation)
+                    if (!order.receiptEmailSent) {
+                        try {
+                            const receiptPdfService = require('../services/receiptPdfService');
+                            const orderForReceipt = {
+                                ...order,
+                                ...updateData,
+                                emailSent: true,
+                                paymentCardLast4: updateData.paymentCardLast4 || order.paymentCardLast4
+                            };
+                            await receiptPdfService.ensureInvoiceNumberOnOrder(orderForReceipt, db);
+                            const invoiceNumber = orderForReceipt.invoiceNumber || receiptPdfService.stableInvoiceNumber(orderId);
+                            orderForReceipt.invoiceNumber = invoiceNumber;
+                            const { buffer, filename } = await receiptPdfService.generateReceiptPdfBuffer(orderForReceipt);
+                            const receiptResult = await emailService.sendOrderReceiptEmail(
+                                order.customer.email,
+                                customerName,
+                                orderForReceipt,
+                                orderLanguage,
+                                buffer,
+                                filename
+                            );
+                            if (receiptResult.success) {
+                                await db.executeOperation({
+                                    database_name: 'peakmode',
+                                    collection_name: 'orders',
+                                    command: '--update',
+                                    data: {
+                                        filter: { orderId },
+                                        update: {
+                                            receiptEmailSent: true,
+                                            receiptSentAt: new Date().toISOString(),
+                                            invoiceNumber
+                                        }
+                                    }
+                                });
+                                console.log(`✅ [PAYMENT WEBHOOK] Receipt PDF emailed to ${order.customer.email}`);
+                            } else {
+                                console.error('❌ [PAYMENT WEBHOOK] Receipt email failed:', receiptResult.error);
+                            }
+                        } catch (receiptErr) {
+                            console.error('❌ [PAYMENT WEBHOOK] Receipt PDF generation or email failed:', receiptErr.message);
+                        }
+                    }
                 } else {
                     console.error('❌ [PAYMENT WEBHOOK] Failed to send order confirmation email:', {
                         email: order.customer.email,
