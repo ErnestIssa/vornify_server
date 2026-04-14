@@ -16,7 +16,7 @@ class EmailService {
             console.log('✅ SendGrid API initialized');
         }
         
-        this.fromEmail = process.env.EMAIL_FROM || 'support@peakmode.se';
+        this.fromEmail = (process.env.EMAIL_FROM || 'support@peakmode.se').trim();
         this.supportInboxEmail = process.env.SUPPORT_INBOX_EMAIL || 'support@peakmode.se';
         this.supportSenderName = process.env.SUPPORT_INBOX_NAME || 'Peak Mode Support';
         this.adminNotificationEmail = process.env.ADMIN_EMAIL || process.env.ADMIN_SUPPORT_EMAIL || null;
@@ -47,16 +47,22 @@ class EmailService {
                 throw new Error('Recipient email address is required');
             }
 
+            const cleanedTemplateId = (templateId || '').trim();
+
             // Check if template ID is a placeholder
-            const isPlaceholder = !templateId || (templateId.startsWith('d-') && templateId.includes('template_id'));
+            const isPlaceholder = !cleanedTemplateId || (cleanedTemplateId.startsWith('d-') && cleanedTemplateId.includes('template_id'));
             
             const msg = {
                 to: to,
-                from: this.fromEmail
+                from: {
+                    email: this.fromEmail,
+                    name: this.supportSenderName || 'Peak Mode'
+                }
             };
 
             // Add subject (required for non-template emails)
-            msg.subject = subject || 'Email from Peak Mode';
+            const safeSubject = (subject && String(subject).trim()) ? String(subject).trim() : 'Email from Peak Mode';
+            msg.subject = safeSubject;
 
             // If template ID is a placeholder, send plain content instead
             if (isPlaceholder) {
@@ -117,8 +123,9 @@ class EmailService {
                 msg.html = htmlContent;
             } else {
                 // Use template ID as normal
-                msg.templateId = templateId;
-                msg.dynamicTemplateData = dynamicData || {};
+                msg.templateId = cleanedTemplateId;
+                // If the SendGrid template subject uses `{{subject}}`, this ensures it is never blank.
+                msg.dynamicTemplateData = { ...(dynamicData || {}), subject: safeSubject };
                 console.log(`📧 Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
             }
             

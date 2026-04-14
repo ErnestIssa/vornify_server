@@ -508,20 +508,30 @@ router.post('/create', async (req, res) => {
                 {
                     status: 'Order Placed',
                     date: new Date().toISOString(),
-                    description: 'Order received and payment confirmed',
+                    description: 'Order initiated — awaiting payment confirmation',
                     timestamp: new Date().toISOString()
                 }
             ]
         };
         
-        // Create the order in database with timeout protection
-        console.log('📦 [ORDER CREATE] Saving order to database...');
+        // IMPORTANT: Do NOT create a real order until payment succeeds.
+        // Store this as a pending checkout (order draft) to be promoted by the Stripe webhook.
+        console.log('📦 [ORDER CREATE] Saving pending checkout (order draft) to database...');
         const result = await Promise.race([
             db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'orders',
+            collection_name: 'pending_checkouts',
             command: '--create',
-            data: order
+            data: {
+                id: orderId,
+                orderId,
+                status: 'pending_payment',
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                customerEmail: order.customer?.email || order.customerEmail || null,
+                paymentIntentId: order.paymentIntentId || null,
+                orderDraft: order
+            }
             }),
             new Promise((_, reject) => 
                 setTimeout(() => reject(new Error('Database operation timeout')), 15000)
@@ -532,21 +542,20 @@ router.post('/create', async (req, res) => {
         console.log(`📦 [ORDER CREATE] Database operation completed in ${dbTime}ms`);
         
         if (result.success) {
-            console.log('📦 [ORDER CREATE] Order created successfully:', orderId);
+            console.log('📦 [ORDER CREATE] Pending checkout created successfully:', orderId);
             
             // Send response immediately - don't wait for background operations
             const responseTime = Date.now() - startTime;
             console.log(`📦 [ORDER CREATE] Sending response in ${responseTime}ms`);
             
-            // Note: Email is sent in background, so we don't wait for it here
+            // Note: Real order + emails will be created/sent by the Stripe webhook after payment succeeds
             res.json({
                 success: true,
-                message: 'Order created successfully',
+                message: 'Checkout created successfully',
                 orderId: orderId,
                 data: {
                     orderId: orderId,
-                    order: order,
-                    emailWillBeSent: !order.emailSent && !!order.customer?.email // Indicate if email will be sent
+                    pendingCheckout: true
                 }
             });
             
@@ -581,27 +590,8 @@ router.post('/create', async (req, res) => {
                         }
                     }
 
-                    // Create or update customer record (background)
-                    console.log('📦 [ORDER CREATE] Background: Creating/updating customer...');
-                    try {
-                        await Promise.race([
-                            createOrUpdateCustomer(order),
-                            new Promise((_, reject) => 
-                                setTimeout(() => reject(new Error('Customer update timeout')), 20000)
-                            )
-                        ]);
-                        console.log('📦 [ORDER CREATE] Background: Customer updated successfully');
-            } catch (customerError) {
-                        console.error('📦 [ORDER CREATE] Background: Failed to create/update customer:', customerError.message);
-                        // Don't fail - this is background processing
-            }
-
-                    // CRITICAL: DO NOT send order confirmation email here!
-                    // Order confirmation emails should ONLY be sent AFTER payment is confirmed
-                    // This prevents sending confirmation emails for unpaid orders
-                    // Email will be sent in payment webhook handler (handlePaymentIntentSucceeded)
-                    console.log('📦 [ORDER CREATE] Background: Order created. Waiting for payment confirmation before sending email.');
-                    console.log('📦 [ORDER CREATE] Background: Email will be sent when payment is confirmed via Stripe webhook.');
+                    // IMPORTANT: Do not create/update customer and do not email until payment succeeds.
+                    console.log('📦 [ORDER CREATE] Background: Pending checkout saved. Waiting for Stripe webhook to create the real order + send emails.');
                     
                     const totalTime = Date.now() - startTime;
                     console.log(`📦 [ORDER CREATE] Background operations completed in ${totalTime}ms total`);
@@ -613,7 +603,7 @@ router.post('/create', async (req, res) => {
             console.error('📦 [ORDER CREATE] Database operation failed:', result);
             res.status(400).json({
                 success: false,
-                error: result.error || 'Failed to create order in database',
+                error: result.error || 'Failed to create pending checkout in database',
                 ...result
             });
         }

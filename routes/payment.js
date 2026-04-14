@@ -254,7 +254,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             return;
         }
 
-        // Find and update order
+        // Find and update order (real orders are only created after payment succeeds)
         const findResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'orders',
@@ -262,17 +262,83 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             data: { orderId }
         });
 
-        if (!findResult.success || !findResult.data) {
-            console.error(`⚠️ [PAYMENT WEBHOOK] Payment intent ${paymentIntent.id} succeeded but order ${orderId} not found in database`);
-            console.error(`⚠️ [PAYMENT WEBHOOK] This could indicate a duplicate payment or order creation failure`);
-            console.error(`⚠️ [PAYMENT WEBHOOK] Payment amount: ${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}`);
-            console.error(`⚠️ [PAYMENT WEBHOOK] Customer: ${paymentIntent.customer || 'N/A'}`);
-            // DO NOT create order here - this could be a duplicate payment from a failed frontend attempt
-            // Log for investigation but don't process
-            return;
+        let order = (findResult.success && findResult.data) ? findResult.data : null;
+
+        // If no real order exists yet, promote pending checkout draft into a real order now.
+        if (!order) {
+            const pendingResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'pending_checkouts',
+                command: '--read',
+                data: { orderId }
+            });
+
+            const pending = (pendingResult.success && pendingResult.data)
+                ? (Array.isArray(pendingResult.data) ? pendingResult.data[0] : pendingResult.data)
+                : null;
+
+            if (!pending || !pending.orderDraft) {
+                console.error(`⚠️ [PAYMENT WEBHOOK] Payment intent ${paymentIntent.id} succeeded but no order or pending checkout found for ${orderId}`);
+                console.error(`⚠️ [PAYMENT WEBHOOK] Amount: ${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}`);
+                return;
+            }
+
+            const draft = pending.orderDraft;
+            const nowIso = new Date().toISOString();
+            const promotedOrder = {
+                ...draft,
+                orderId,
+                status: 'processing',
+                paymentStatus: 'succeeded',
+                paymentIntentId: paymentIntent.id,
+                stripeCustomerId: paymentIntent.customer || draft.stripeCustomerId || null,
+                updatedAt: nowIso,
+                timeline: [
+                    ...(draft.timeline || []),
+                    {
+                        status: 'Payment Confirmed',
+                        date: nowIso,
+                        description: `Payment of ${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()} confirmed`,
+                        timestamp: nowIso
+                    }
+                ]
+            };
+
+            const createOrderResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'orders',
+                command: '--create',
+                data: promotedOrder
+            });
+
+            if (!createOrderResult.success) {
+                console.error(`❌ [PAYMENT WEBHOOK] Failed to promote pending checkout to order for ${orderId}:`, createOrderResult.error || createOrderResult);
+                return;
+            }
+
+            // Mark pending checkout completed (best-effort)
+            try {
+                await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'pending_checkouts',
+                    command: '--update',
+                    data: {
+                        filter: { orderId },
+                        update: {
+                            status: 'completed',
+                            completedAt: nowIso,
+                            paymentIntentId: paymentIntent.id,
+                            updatedAt: nowIso
+                        }
+                    }
+                });
+            } catch (e) {
+                console.warn('⚠️ [PAYMENT WEBHOOK] Could not mark pending checkout completed:', e.message);
+            }
+
+            order = promotedOrder;
         }
 
-        const order = findResult.data;
         const normalizedEmail = (order.customer?.email || order.customerEmail || '').toLowerCase().trim();
 
         // Update order with payment status
@@ -1558,6 +1624,9 @@ router.post('/confirm', async (req, res) => {
                 amount: paymentIntent.amount / 100,
                 currency: paymentIntent.currency,
                 alreadyConfirmed: true,
+                // Frontend UX contract: treat this as SUCCESS (common on retry / double-click)
+                shouldRedirectToSuccess: true,
+                userMessage: 'Your payment was already completed. Redirecting you to your order confirmation…',
                 message: 'Payment was already confirmed'
             });
         }
@@ -1573,7 +1642,8 @@ router.post('/confirm', async (req, res) => {
                 alreadyProcessing: true,
                 message: 'Payment is already being processed - do not call confirmCardPayment again',
                 action: 'wait_for_webhook', // Frontend should wait for webhook or poll status
-                shouldNotConfirm: true // Explicit flag for frontend
+                shouldNotConfirm: true, // Explicit flag for frontend
+                userMessage: 'Your payment is processing. Please wait a moment—do not refresh or try again.'
             });
         }
 
@@ -1582,7 +1652,8 @@ router.post('/confirm', async (req, res) => {
                 success: false,
                 error: 'Payment intent has been canceled',
                 paymentStatus: 'canceled',
-                code: 'payment_canceled'
+                code: 'payment_canceled',
+                userMessage: 'This payment was canceled. Please try again.'
             });
         }
 
@@ -1656,14 +1727,20 @@ router.post('/confirm', async (req, res) => {
             paymentStatus: paymentIntent.status,
             orderId: targetOrderId,
             amount: paymentIntent.amount / 100,
-            currency: paymentIntent.currency
+            currency: paymentIntent.currency,
+            userMessage: paymentStatus === 'succeeded'
+                ? 'Payment completed. Redirecting…'
+                : (paymentStatus === 'processing'
+                    ? 'Your payment is processing. Please wait…'
+                    : 'Payment status updated.')
         });
     } catch (error) {
         console.error('Confirm payment error:', error);
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to confirm payment',
-            code: error.code || 'payment_confirmation_failed'
+            code: error.code || 'payment_confirmation_failed',
+            userMessage: 'We could not confirm your payment. Please try again, or use another payment method.'
         });
     }
 });
