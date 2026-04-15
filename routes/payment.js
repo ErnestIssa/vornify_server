@@ -39,6 +39,39 @@ try {
 
 const db = getDBInstance();
 
+/** Read first matching pending_checkouts row (VornifyDB may return array or object). */
+async function readPendingCheckoutRow(query) {
+    const r = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'pending_checkouts',
+        command: '--read',
+        data: query
+    });
+    if (!r.success || !r.data) return null;
+    const rows = Array.isArray(r.data) ? r.data : [r.data];
+    return rows[0] || null;
+}
+
+/**
+ * Find draft checkout for a succeeded PaymentIntent.
+ * Order: by paymentIntentId (fixes "pay before draft saved" / TEMP metadata mismatch), then hint orderId, then metadata orderId.
+ */
+async function findPendingCheckoutForPaymentIntent(paymentIntent, hintOrderId) {
+    const piId = paymentIntent.id;
+    let p = await readPendingCheckoutRow({ paymentIntentId: piId });
+    if (p?.orderDraft) return p;
+    if (hintOrderId) {
+        p = await readPendingCheckoutRow({ orderId: hintOrderId });
+        if (p?.orderDraft) return p;
+    }
+    const metaOid = paymentIntent.metadata?.orderId;
+    if (metaOid) {
+        p = await readPendingCheckoutRow({ orderId: metaOid });
+        if (p?.orderDraft) return p;
+    }
+    return null;
+}
+
 /** Normalize country to ISO 2-letter code (e.g. "Sweden" -> "SE") for zone lookup. */
 function normalizeCountryCode(countryOrCode) {
     if (!countryOrCode || typeof countryOrCode !== 'string') return '';
@@ -246,48 +279,40 @@ router.post('/webhook', express.raw({ type: 'application/json' }), verifyWebhook
 });
 
 // Helper function to handle successful payment
-async function handlePaymentIntentSucceeded(paymentIntent) {
+// options.hintOrderId — from POST /confirm when client knows the real PM order id (metadata may still be TEMP)
+async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
+    const hintOrderId = options.hintOrderId || null;
     try {
-        const orderId = paymentIntent.metadata.orderId;
-        if (!orderId) {
-            console.warn('Payment intent succeeded but no orderId in metadata');
-            return;
-        }
+        let resolvedOrderId = paymentIntent.metadata?.orderId || hintOrderId || null;
 
         // Find and update order (real orders are only created after payment succeeds)
-        const findResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'orders',
-            command: '--read',
-            data: { orderId }
-        });
+        let findResult = resolvedOrderId
+            ? await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'orders',
+                command: '--read',
+                data: { orderId: resolvedOrderId }
+            })
+            : { success: false, data: null };
 
         let order = (findResult.success && findResult.data) ? findResult.data : null;
 
         // If no real order exists yet, promote pending checkout draft into a real order now.
         if (!order) {
-            const pendingResult = await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'pending_checkouts',
-                command: '--read',
-                data: { orderId }
-            });
-
-            const pending = (pendingResult.success && pendingResult.data)
-                ? (Array.isArray(pendingResult.data) ? pendingResult.data[0] : pendingResult.data)
-                : null;
+            const pending = await findPendingCheckoutForPaymentIntent(paymentIntent, hintOrderId);
 
             if (!pending || !pending.orderDraft) {
-                console.error(`⚠️ [PAYMENT WEBHOOK] Payment intent ${paymentIntent.id} succeeded but no order or pending checkout found for ${orderId}`);
+                console.error(`⚠️ [PAYMENT WEBHOOK] Payment intent ${paymentIntent.id} succeeded but no order or pending checkout found (metadata orderId=${resolvedOrderId || 'none'}, hint=${hintOrderId || 'none'})`);
                 console.error(`⚠️ [PAYMENT WEBHOOK] Amount: ${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}`);
                 return;
             }
 
             const draft = pending.orderDraft;
+            resolvedOrderId = draft.orderId || pending.orderId;
             const nowIso = new Date().toISOString();
             const promotedOrder = {
                 ...draft,
-                orderId,
+                orderId: resolvedOrderId,
                 status: 'processing',
                 paymentStatus: 'succeeded',
                 paymentIntentId: paymentIntent.id,
@@ -312,7 +337,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
             });
 
             if (!createOrderResult.success) {
-                console.error(`❌ [PAYMENT WEBHOOK] Failed to promote pending checkout to order for ${orderId}:`, createOrderResult.error || createOrderResult);
+                console.error(`❌ [PAYMENT WEBHOOK] Failed to promote pending checkout to order for ${resolvedOrderId}:`, createOrderResult.error || createOrderResult);
                 return;
             }
 
@@ -323,7 +348,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
                     collection_name: 'pending_checkouts',
                     command: '--update',
                     data: {
-                        filter: { orderId },
+                        filter: { orderId: resolvedOrderId },
                         update: {
                             status: 'completed',
                             completedAt: nowIso,
@@ -338,6 +363,26 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
 
             order = promotedOrder;
         }
+
+        resolvedOrderId = order.orderId || resolvedOrderId;
+
+        // Keep Stripe metadata aligned with the real order id (fixes TEMP vs PM mismatch for dashboards/webhooks)
+        if (resolvedOrderId && paymentIntent.metadata?.orderId !== resolvedOrderId) {
+            try {
+                await stripe.paymentIntents.update(paymentIntent.id, {
+                    metadata: {
+                        ...paymentIntent.metadata,
+                        orderId: resolvedOrderId,
+                        isTemporary: 'false',
+                        updatedAt: new Date().toISOString()
+                    }
+                });
+            } catch (metaErr) {
+                console.warn('⚠️ [PAYMENT WEBHOOK] Could not sync PaymentIntent metadata orderId:', metaErr.message);
+            }
+        }
+
+        const orderId = resolvedOrderId;
 
         const normalizedEmail = (order.customer?.email || order.customerEmail || '').toLowerCase().trim();
 
@@ -1614,17 +1659,23 @@ router.post('/confirm', async (req, res) => {
         // Retrieve payment intent from Stripe
         const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
-        // Check payment intent status - prevent duplicate confirmations
+        // Payment already succeeded — still run finalize (creates order + emails if webhook ran before draft existed)
         if (paymentIntent.status === 'succeeded') {
-            console.log(`⚠️ [PAYMENT] Payment intent ${paymentIntentId} already succeeded`);
+            console.log(`⚠️ [PAYMENT] Payment intent ${paymentIntentId} already succeeded — ensuring order + emails`);
+            try {
+                await handlePaymentIntentSucceeded(paymentIntent, { hintOrderId: orderId || null });
+            } catch (finErr) {
+                console.error('❌ [PAYMENT] finalize after succeeded failed:', finErr.message);
+            }
+            const refreshedPi = await stripe.paymentIntents.retrieve(paymentIntentId);
+            const finalOrderId = orderId || refreshedPi.metadata?.orderId || null;
             return res.json({
                 success: true,
                 paymentStatus: 'succeeded',
-                orderId: orderId || paymentIntent.metadata.orderId,
+                orderId: finalOrderId,
                 amount: paymentIntent.amount / 100,
                 currency: paymentIntent.currency,
                 alreadyConfirmed: true,
-                // Frontend UX contract: treat this as SUCCESS (common on retry / double-click)
                 shouldRedirectToSuccess: true,
                 userMessage: 'Your payment was already completed. Redirecting you to your order confirmation…',
                 message: 'Payment was already confirmed'

@@ -564,29 +564,28 @@ router.post('/create', async (req, res) => {
                 try {
                     // Update payment intent with actual order ID if it was created with temporary ID
                     if (order.paymentIntentId) {
-                        console.log('📦 [ORDER CREATE] Background: Updating payment intent with actual order ID...');
+                        console.log('📦 [ORDER CREATE] Background: Syncing PaymentIntent metadata with checkout order id...');
                         try {
                             const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
                             const existingIntent = await stripe.paymentIntents.retrieve(order.paymentIntentId);
-                            
-                            // Check if payment intent has temporary order ID
-                            if (existingIntent.metadata?.isTemporary === 'true' || 
-                                existingIntent.metadata?.orderId?.startsWith('TEMP-')) {
-                                
+                            const metaOid = existingIntent.metadata?.orderId;
+                            const needsSync = !metaOid ||
+                                metaOid !== orderId ||
+                                existingIntent.metadata?.isTemporary === 'true' ||
+                                String(metaOid).startsWith('TEMP-');
+                            if (needsSync) {
                                 await stripe.paymentIntents.update(order.paymentIntentId, {
                                     metadata: {
                                         ...existingIntent.metadata,
-                                        orderId: orderId,
+                                        orderId,
                                         isTemporary: 'false',
                                         updatedAt: new Date().toISOString()
                                     }
                                 });
-                                
-                                console.log(`📦 [ORDER CREATE] Background: Payment intent ${order.paymentIntentId} updated with order ID ${orderId}`);
+                                console.log(`📦 [ORDER CREATE] Background: Payment intent ${order.paymentIntentId} metadata orderId → ${orderId}`);
                             }
                         } catch (paymentIntentError) {
                             console.error('📦 [ORDER CREATE] Background: Failed to update payment intent:', paymentIntentError.message);
-                            // Don't fail - this is background processing
                         }
                     }
 
