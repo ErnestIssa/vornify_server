@@ -407,13 +407,83 @@ class EmailService {
             };
             this.applyTransactionalMailSettings(msg);
             const response = await sgMail.send(msg);
+            console.log(`✅ Receipt email sent to ${to}`, {
+                messageId: response[0]?.headers?.['x-message-id'],
+                statusCode: response[0]?.statusCode,
+                hasAttachment: true,
+                orderId: order?.orderId
+            });
             return {
                 success: true,
                 messageId: response[0]?.headers?.['x-message-id'],
+                statusCode: response[0]?.statusCode,
                 timestamp: new Date().toISOString()
             };
         } catch (error) {
             console.error('❌ Order receipt email error:', error);
+            return {
+                success: false,
+                error: error.message || 'Failed to send receipt email',
+                details: error.response?.body
+            };
+        }
+    }
+
+    /**
+     * Send order receipt email WITHOUT PDF attachment (fallback when PDF generation fails).
+     */
+    async sendOrderReceiptEmailNoAttachment(to, name, order, language) {
+        try {
+            if (!process.env.SENDGRID_API_KEY) {
+                return { success: false, error: 'Email service not configured' };
+            }
+            if (!to) {
+                return { success: false, error: 'Recipient is required' };
+            }
+            const lang = (language || 'en').toLowerCase().startsWith('sv') ? 'sv' : 'en';
+            const subjects = {
+                en: `Your receipt — ${order.orderId || 'order'}`,
+                sv: `Ditt kvitto — ${order.orderId || 'order'}`
+            };
+            const bodies = {
+                en: `<p>Hello ${name || 'customer'},</p>
+<p>Thank you for your purchase.</p>
+<p><strong>Note:</strong> Our system could not generate the PDF receipt attachment at the moment, but your order is confirmed.</p>
+<p>Order: <strong>${order.orderId || ''}</strong></p>
+<p>If you need the PDF receipt, reply to this email or contact <a href="mailto:support@peakmode.se">support@peakmode.se</a> and we will resend it.</p>
+<p>Peak Mode — No Limits. Just Peaks.</p>`,
+                sv: `<p>Hej ${name || 'kund'},</p>
+<p>Tack för ditt köp.</p>
+<p><strong>Obs:</strong> Vi kunde inte skapa PDF-bilagan just nu, men din order är bekräftad.</p>
+<p>Order: <strong>${order.orderId || ''}</strong></p>
+<p>Behöver du PDF-kvittot? Svara på detta mail eller kontakta <a href="mailto:support@peakmode.se">support@peakmode.se</a> så skickar vi det igen.</p>
+<p>Peak Mode — No Limits. Just Peaks.</p>`
+            };
+            const msg = {
+                to,
+                from: {
+                    email: this.fromEmail,
+                    name: this.supportSenderName || 'Peak Mode'
+                },
+                subject: subjects[lang],
+                html: bodies[lang]
+            };
+            this.applyTransactionalMailSettings(msg);
+            const response = await sgMail.send(msg);
+            console.log(`✅ Receipt fallback email sent to ${to}`, {
+                messageId: response[0]?.headers?.['x-message-id'],
+                statusCode: response[0]?.statusCode,
+                hasAttachment: false,
+                orderId: order?.orderId
+            });
+            return {
+                success: true,
+                messageId: response[0]?.headers?.['x-message-id'],
+                statusCode: response[0]?.statusCode,
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            console.error('❌ Order receipt fallback email error:', error);
             return {
                 success: false,
                 error: error.message || 'Failed to send receipt email',

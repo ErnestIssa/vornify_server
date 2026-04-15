@@ -118,6 +118,67 @@ router.get('/check-newsletter-subscribers', authenticateAdmin, async (req, res) 
     }
 });
 
+/**
+ * POST /api/admin/test-receipt-email
+ * Send a test "order receipt" email to a target address (with or without PDF).
+ *
+ * Body: { orderId: string, to: string, includePdf?: boolean }
+ */
+router.post('/test-receipt-email', authenticateAdmin, async (req, res) => {
+    try {
+        const { orderId, to, includePdf } = req.body || {};
+        if (!orderId || !to) {
+            return res.status(400).json({ success: false, error: 'orderId and to are required' });
+        }
+
+        const emailService = require('../services/emailService');
+        const receiptPdfService = require('../services/receiptPdfService');
+
+        const orderResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'orders',
+            command: '--read',
+            data: { orderId }
+        });
+        const raw = orderResult && orderResult.success ? orderResult.data : null;
+        const order = Array.isArray(raw) ? raw[0] : raw;
+        if (!order) {
+            return res.status(404).json({ success: false, error: `Order ${orderId} not found` });
+        }
+
+        const customerName = order.customer?.name ||
+            `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`.trim() ||
+            order.customerName ||
+            'Valued Customer';
+        const orderLanguage = order.language || 'en';
+
+        if (includePdf) {
+            await receiptPdfService.ensureInvoiceNumberOnOrder(order, db);
+            const { buffer, filename } = await receiptPdfService.generateReceiptPdfBuffer(order);
+            const result = await emailService.sendOrderReceiptEmail(
+                to,
+                customerName,
+                order,
+                orderLanguage,
+                buffer,
+                filename
+            );
+            return res.json({ success: true, mode: 'pdf', result });
+        }
+
+        const result = await emailService.sendOrderReceiptEmailNoAttachment(
+            to,
+            customerName,
+            order,
+            orderLanguage
+        );
+        return res.json({ success: true, mode: 'no_pdf', result });
+    } catch (error) {
+        console.error('❌ [ADMIN] test-receipt-email failed:', error);
+        return res.status(500).json({ success: false, error: 'Failed to send test receipt email', details: error.message });
+    }
+});
+
 /** Normalize admin id to string for API responses */
 function adminIdString(admin) {
     if (!admin) return null;

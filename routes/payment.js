@@ -514,6 +514,24 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
 
             const confirmationOk = !!order.emailSent || confirmationJustSent;
             if (!order.receiptEmailSent && confirmationOk) {
+                // Track receipt attempts in DB so failures are visible even if logs are hard to access
+                try {
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId },
+                            update: {
+                                receiptEmailLastAttemptAt: new Date().toISOString(),
+                                receiptEmailAttempts: (order.receiptEmailAttempts || 0) + 1
+                            }
+                        }
+                    });
+                } catch (e) {
+                    console.warn(`⚠️ [PAYMENT WEBHOOK] Could not record receipt attempt metadata for ${orderId}:`, e.message);
+                }
+
                 try {
                     const receiptPdfService = require('../services/receiptPdfService');
                     const orderForReceipt = {
@@ -544,6 +562,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                                 update: {
                                     receiptEmailSent: true,
                                     receiptSentAt: new Date().toISOString(),
+                                    receiptEmailLastError: null,
                                     invoiceNumber
                                 }
                             }
@@ -551,9 +570,73 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                         console.log(`✅ [PAYMENT WEBHOOK] Receipt PDF emailed to ${custEmail}`);
                     } else {
                         console.error('❌ [PAYMENT WEBHOOK] Receipt email failed:', receiptResult.error);
+                        try {
+                            await db.executeOperation({
+                                database_name: 'peakmode',
+                                collection_name: 'orders',
+                                command: '--update',
+                                data: {
+                                    filter: { orderId },
+                                    update: {
+                                        receiptEmailLastError: `send_failed: ${receiptResult.error || 'unknown'}`,
+                                        receiptEmailLastErrorAt: new Date().toISOString()
+                                    }
+                                }
+                            });
+                        } catch (e) {
+                            // ignore
+                        }
                     }
                 } catch (receiptErr) {
                     console.error('❌ [PAYMENT WEBHOOK] Receipt PDF generation or email failed:', receiptErr.message, receiptErr.stack);
+                    try {
+                        await db.executeOperation({
+                            database_name: 'peakmode',
+                            collection_name: 'orders',
+                            command: '--update',
+                            data: {
+                                filter: { orderId },
+                                update: {
+                                    receiptEmailLastError: `exception: ${receiptErr.message || String(receiptErr)}`,
+                                    receiptEmailLastErrorAt: new Date().toISOString()
+                                }
+                            }
+                        });
+                    } catch (e) {
+                        // ignore
+                    }
+
+                    // Fallback: still send a receipt-style email without attachment so the customer receives something
+                    // and we can distinguish PDF/Puppeteer issues from SendGrid delivery issues.
+                    try {
+                        const orderForFallback = { ...order, ...updateData, emailSent: true };
+                        const fallbackResult = await emailService.sendOrderReceiptEmailNoAttachment(
+                            custEmail,
+                            customerName,
+                            orderForFallback,
+                            orderLanguage
+                        );
+                        if (fallbackResult.success) {
+                            await db.executeOperation({
+                                database_name: 'peakmode',
+                                collection_name: 'orders',
+                                command: '--update',
+                                data: {
+                                    filter: { orderId },
+                                    update: {
+                                        receiptEmailFallbackSent: true,
+                                        receiptEmailFallbackSentAt: new Date().toISOString(),
+                                        receiptEmailFallbackMessageId: fallbackResult.messageId || null
+                                    }
+                                }
+                            });
+                            console.log(`✅ [PAYMENT WEBHOOK] Receipt fallback email (no PDF) sent to ${custEmail}`);
+                        } else {
+                            console.error('❌ [PAYMENT WEBHOOK] Receipt fallback email failed:', fallbackResult.error, fallbackResult.details);
+                        }
+                    } catch (fallbackErr) {
+                        console.error('❌ [PAYMENT WEBHOOK] Receipt fallback exception:', fallbackErr.message);
+                    }
                 }
             } else if (order.receiptEmailSent) {
                 console.log(`📧 [PAYMENT WEBHOOK] Order ${orderId} receipt email already sent`);
