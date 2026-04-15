@@ -92,33 +92,45 @@ function normalizeCountryCode(countryOrCode) {
 }
 
 /** Compute canonical order totals on backend (source of truth). */
-function computeCanonicalOrderTotals(order) {
+function computeCanonicalOrderTotals(order, overrides = {}) {
     const checkoutTotalsService = require('../services/checkoutTotalsService');
     const vatService = require('../services/vatService');
 
     const items = Array.isArray(order?.items) ? order.items : [];
 
     const shippingCountryRaw =
+        overrides.country ||
         order?.shippingAddress?.country ||
         order?.shippingAddress?.countryCode ||
         order?.customer?.country ||
         order?.customer?.countryCode ||
         vatService.DEFAULT_COUNTRY;
     const country = normalizeCountryCode(String(shippingCountryRaw || ''));
-    const vatRate = vatService.getVatRate(country || vatService.DEFAULT_COUNTRY);
+    const vatRate =
+        (typeof overrides.vatRate === 'number' && !isNaN(overrides.vatRate))
+            ? overrides.vatRate
+            : vatService.getVatRate(country || vatService.DEFAULT_COUNTRY);
 
     const shippingGross =
-        (order?.totals && (typeof order.totals.shippingGross === 'number' ? order.totals.shippingGross : undefined)) ??
-        (order?.totals && (typeof order.totals.shipping === 'number' ? order.totals.shipping : undefined)) ??
-        (typeof order?.shippingCost === 'number' ? order.shippingCost : undefined) ??
-        (typeof order?.shipping === 'number' ? order.shipping : undefined) ??
-        0;
+        (typeof overrides.shippingGross === 'number' && !isNaN(overrides.shippingGross))
+            ? overrides.shippingGross
+            : (
+                (order?.totals && (typeof order.totals.shippingGross === 'number' ? order.totals.shippingGross : undefined)) ??
+                (order?.totals && (typeof order.totals.shipping === 'number' ? order.totals.shipping : undefined)) ??
+                (typeof order?.shippingCost === 'number' ? order.shippingCost : undefined) ??
+                (typeof order?.shipping === 'number' ? order.shipping : undefined) ??
+                0
+            );
 
     const discountAmount =
-        (order?.totals && (typeof order.totals.discountAmount === 'number' ? order.totals.discountAmount : undefined)) ??
-        (order?.totals && (typeof order.totals.discount === 'number' ? order.totals.discount : undefined)) ??
-        (order?.appliedDiscount && typeof order.appliedDiscount.amount === 'number' ? order.appliedDiscount.amount : undefined) ??
-        0;
+        (typeof overrides.discountAmount === 'number' && !isNaN(overrides.discountAmount))
+            ? overrides.discountAmount
+            : (
+                (order?.totals && (typeof order.totals.discountAmount === 'number' ? order.totals.discountAmount : undefined)) ??
+                (order?.totals && (typeof order.totals.discount === 'number' ? order.totals.discount : undefined)) ??
+                (order?.appliedDiscount && typeof order.appliedDiscount.amount === 'number' ? order.appliedDiscount.amount : undefined) ??
+                0
+            );
 
     return checkoutTotalsService.calculateTotals(items, shippingGross, discountAmount, 'SEK', vatRate, { country });
 }
@@ -444,13 +456,28 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             ]
         };
 
-        // Canonical totals (backend source of truth). Overwrite any stale/incorrect totals from draft/frontend.
+        // Canonical totals (backend source of truth). Prefer the exact snapshot stored in PaymentIntent metadata
+        // to avoid using stale draft values for shipping/discount that can differ from what the customer paid.
         try {
-            const canonicalTotals = computeCanonicalOrderTotals(order);
+            const meta = paymentIntent.metadata || {};
+            const parsedShipping = meta.shippingGross != null ? Number(meta.shippingGross) : NaN;
+            const parsedDiscount = meta.discountAmount != null ? Number(meta.discountAmount) : NaN;
+            const parsedVatRate = meta.vatRate != null ? Number(meta.vatRate) : NaN;
+            const metaCountry = meta.country != null ? String(meta.country) : undefined;
+
+            const canonicalTotals = computeCanonicalOrderTotals(order, {
+                shippingGross: !isNaN(parsedShipping) ? parsedShipping : undefined,
+                discountAmount: !isNaN(parsedDiscount) ? parsedDiscount : undefined,
+                vatRate: !isNaN(parsedVatRate) ? parsedVatRate : undefined,
+                country: metaCountry || undefined
+            });
             updateData.totals = canonicalTotals;
             updateData.currency = 'SEK';
             updateData.totalsCalculatedAt = new Date().toISOString();
             updateData.totalsEngine = 'checkoutTotalsService';
+            // Also persist shipping/discount snapshot fields explicitly for easier debugging
+            if (!isNaN(parsedShipping)) updateData.shippingCost = parsedShipping;
+            if (!isNaN(parsedDiscount)) updateData.discountAmount = parsedDiscount;
         } catch (totErr) {
             console.warn(`⚠️ [PAYMENT WEBHOOK] Failed to compute canonical totals for ${orderId}:`, totErr.message);
         }
@@ -495,16 +522,22 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             }
         });
 
-        // Confirmation + PDF receipt: receipt must run even if confirmation was already sent (e.g. PDF failed once;
-        // previously the whole block was skipped when emailSent was true, so receipt never retried.)
-        const custEmail = order.customer?.email;
-        const paidNow = order.paymentStatus === 'succeeded' || updateData.paymentStatus === 'succeeded';
+        // Send confirmation/receipt emails asynchronously to avoid slowing down webhook ack or /payments/confirm.
+        setImmediate(async () => {
+            // Confirmation + PDF receipt: receipt must run even if confirmation was already sent (e.g. PDF failed once;
+            // previously the whole block was skipped when emailSent was true, so receipt never retried.)
+            const custEmail = order.customer?.email;
+            const paidNow = order.paymentStatus === 'succeeded' || updateData.paymentStatus === 'succeeded';
 
-        if (!custEmail) {
-            console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} has no customer email, cannot send emails`);
-        } else if (!paidNow) {
-            console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} payment status is not 'succeeded' (${order.paymentStatus}). Skipping emails.`);
-        } else {
+            if (!custEmail) {
+                console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} has no customer email, cannot send emails`);
+                return;
+            }
+            if (!paidNow) {
+                console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} payment status is not 'succeeded' (${order.paymentStatus}). Skipping emails.`);
+                return;
+            }
+
             const customerName = order.customer.name ||
                 `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() ||
                 order.customerName ||
@@ -684,7 +717,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             } else if (order.receiptEmailSent) {
                 console.log(`📧 [PAYMENT WEBHOOK] Order ${orderId} receipt email already sent`);
             }
-        }
+        });
 
         // Mark abandoned checkout as completed (if exists)
         if (normalizedEmail) {
@@ -1076,10 +1109,16 @@ router.post('/create-intent', async (req, res) => {
         // Convert validated amount to cents
         const amountInCents = Math.round(validatedAmount * 100);
 
-        // Prepare payment intent metadata
+        // Prepare payment intent metadata (used later as an immutable audit trail for totals shown on thank-you/PDF)
         const paymentMetadata = {
             orderId: tempOrderId,
             isTemporary: isTemporaryOrderId.toString(),
+            // Canonical checkout totals snapshot (strings for Stripe metadata)
+            shippingGross: String(totals.shippingGross || 0),
+            discountAmount: String(totals.discountAmount || 0),
+            vatRate: String(totals.vatRate || vatRate || 0.25),
+            country: String(totals.country || countryForVat || ''),
+            total: String(totals.total || validatedAmount || 0),
             ...metadata
         };
 
@@ -1795,11 +1834,15 @@ router.post('/confirm', async (req, res) => {
         // Payment already succeeded — still run finalize (creates order + emails if webhook ran before draft existed)
         if (paymentIntent.status === 'succeeded') {
             console.log(`⚠️ [PAYMENT] Payment intent ${paymentIntentId} already succeeded — ensuring order + emails`);
-            try {
-                await handlePaymentIntentSucceeded(paymentIntent, { hintOrderId: orderId || null });
-            } catch (finErr) {
-                console.error('❌ [PAYMENT] finalize after succeeded failed:', finErr.message);
-            }
+            // Fire-and-forget finalize to avoid blocking the success page render.
+            // The webhook will also run finalize; this is just a safety net.
+            setImmediate(async () => {
+                try {
+                    await handlePaymentIntentSucceeded(paymentIntent, { hintOrderId: orderId || null });
+                } catch (finErr) {
+                    console.error('❌ [PAYMENT] finalize after succeeded failed:', finErr.message);
+                }
+            });
             const refreshedPi = await stripe.paymentIntents.retrieve(paymentIntentId);
             const finalOrderId = orderId || refreshedPi.metadata?.orderId || null;
             let canonicalTotals = null;
@@ -1812,7 +1855,19 @@ router.post('/confirm', async (req, res) => {
                         data: { orderId: finalOrderId }
                     });
                     const existingOrder = findResult.success ? normalizeReadFirst(findResult.data) : null;
-                    if (existingOrder) canonicalTotals = computeCanonicalOrderTotals(existingOrder);
+                    if (existingOrder) {
+                        const meta = paymentIntent.metadata || {};
+                        const parsedShipping = meta.shippingGross != null ? Number(meta.shippingGross) : NaN;
+                        const parsedDiscount = meta.discountAmount != null ? Number(meta.discountAmount) : NaN;
+                        const parsedVatRate = meta.vatRate != null ? Number(meta.vatRate) : NaN;
+                        const metaCountry = meta.country != null ? String(meta.country) : undefined;
+                        canonicalTotals = computeCanonicalOrderTotals(existingOrder, {
+                            shippingGross: !isNaN(parsedShipping) ? parsedShipping : undefined,
+                            discountAmount: !isNaN(parsedDiscount) ? parsedDiscount : undefined,
+                            vatRate: !isNaN(parsedVatRate) ? parsedVatRate : undefined,
+                            country: metaCountry || undefined
+                        });
+                    }
                 }
             } catch (e) {
                 // ignore; success page can still render without breakdown

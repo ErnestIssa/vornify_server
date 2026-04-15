@@ -18,6 +18,17 @@ const COMPANY = {
 
 const LOGO_URL = process.env.RECEIPT_LOGO_URL || 'https://www.peakmode.se/favicon.ico';
 
+function displayWebsite(raw) {
+    const s = (raw || '').trim();
+    if (!s) return 'www.peakmode.se';
+    // Normalize accidental "https://https://..." and always display without protocol.
+    return s
+        .replace(/^https?:\/\//i, '')
+        .replace(/^https?:\/\//i, '')
+        .replace(/^\/+/, '')
+        .replace(/\/$/, '');
+}
+
 /** Base URL for QR (admin opens order). Trailing slash optional. */
 function getAdminOrderQrBase() {
     const base = (process.env.ADMIN_RECEIPT_QR_URL_BASE || process.env.ADMIN_APP_BASE_URL || 'https://peakmode.se').replace(/\/$/, '');
@@ -214,7 +225,7 @@ function buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang) {
   <div class="company">
     <strong>${escapeHtml(COMPANY.name)}</strong><br/>
     Org.nr ${escapeHtml(COMPANY.orgNumber)}<br/>
-    ${escapeHtml(COMPANY.website)}<br/>
+    ${escapeHtml(displayWebsite(COMPANY.website))}<br/>
     ${t(lang, 'customer') === 'Kund' ? 'Support' : 'Support'}: ${escapeHtml(COMPANY.supportEmail)}<br/>
     ${escapeHtml(COMPANY.addressLine)}
   </div>
@@ -290,7 +301,7 @@ async function generateReceiptPdfBuffer(order) {
             bcid: 'code128',
             text: adminUrl,
             scale: 3,
-            height: 10,
+            height: 5,
             includetext: false,
             backgroundcolor: 'FFFFFF'
         });
