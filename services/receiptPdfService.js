@@ -6,13 +6,13 @@
 
 const crypto = require('crypto');
 const QRCode = require('qrcode');
+const bwipjs = require('bwip-js');
 
 const COMPANY = {
     name: process.env.RECEIPT_COMPANY_NAME || 'PM SHOP AB',
     orgNumber: process.env.RECEIPT_ORG_NUMBER || '559557-5480',
     website: process.env.RECEIPT_WEBSITE_URL || 'https://www.peakmode.se',
     supportEmail: process.env.RECEIPT_SUPPORT_EMAIL || 'support@peakmode.se',
-    phone: process.env.RECEIPT_SUPPORT_PHONE || '0761915524',
     addressLine: process.env.RECEIPT_COMPANY_ADDRESS || 'Kapellgatan 10, 746 39 Bålsta, Sweden'
 };
 
@@ -53,13 +53,13 @@ const STRINGS = {
         paid: 'Paid',
         tracking: 'Tracking',
         questions: 'If you have any questions about your order, please contact',
-        trackHint: 'Track your order using the tracking number provided.',
+        trackHint: 'Track your order using the tracking number provided:',
         footerThanks: 'Thank you for shopping with us!',
         tagline: 'No Limits. Just Peaks.',
         policies: 'Policies & information',
         privacy: 'Privacy policy',
         terms: 'Terms & conditions',
-        scanLabel: 'Scan for order details',
+        scanLabel: 'Scan barcode for order details',
         card: 'Card',
         country: 'Country'
     },
@@ -85,13 +85,13 @@ const STRINGS = {
         paid: 'Betald',
         tracking: 'Spårning',
         questions: 'Vid frågor om din order, kontakta',
-        trackHint: 'Spåra din order med spårningsnumret nedan.',
+        trackHint: 'Spåra din order med spårningsnumret nedan:',
         footerThanks: 'Tack för att du handlar hos oss!',
         tagline: 'No Limits. Just Peaks.',
         policies: 'Policy och information',
         privacy: 'Integritetspolicy',
         terms: 'Köpvillkor',
-        scanLabel: 'Skanna för orderdetaljer',
+        scanLabel: 'Skanna streckkoden för orderdetaljer',
         card: 'Kort',
         country: 'Land'
     }
@@ -136,8 +136,8 @@ async function ensureInvoiceNumberOnOrder(order, db) {
     return invoiceNumber;
 }
 
-function buildReceiptHtml(order, invoiceNumber, qrDataUrl, lang) {
-    const currency = (order.currency || order.totals?.currency || 'SEK').toUpperCase();
+function buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang) {
+    const currency = (order.displayCurrency || order.currency || order.totals?.currency || 'SEK').toUpperCase();
     const totals = order.totals || {};
     const subEx = totals.subtotalExVat ?? totals.subtotal ?? order.subtotal ?? 0;
     const vatProducts = totals.vatAmount ?? totals.tax ?? order.tax ?? 0;
@@ -169,7 +169,7 @@ function buildReceiptHtml(order, invoiceNumber, qrDataUrl, lang) {
     const txId = order.paymentIntentId || order.stripeChargeId || '—';
 
     const privacyUrl = process.env.RECEIPT_PRIVACY_URL || 'https://www.peakmode.se/privacy-policy';
-    const termsUrl = process.env.RECEIPT_TERMS_URL || 'https://www.peakmode.se/terms';
+    const termsUrl = process.env.RECEIPT_TERMS_URL || 'https://peakmode.se/terms-of-service';
 
     const lines = (order.items || []).map((item) => {
         const qty = item.quantity || 1;
@@ -216,7 +216,6 @@ function buildReceiptHtml(order, invoiceNumber, qrDataUrl, lang) {
     Org.nr ${escapeHtml(COMPANY.orgNumber)}<br/>
     ${escapeHtml(COMPANY.website)}<br/>
     ${t(lang, 'customer') === 'Kund' ? 'Support' : 'Support'}: ${escapeHtml(COMPANY.supportEmail)}<br/>
-    ${escapeHtml(COMPANY.phone)}<br/>
     ${escapeHtml(COMPANY.addressLine)}
   </div>
   <div class="dots"></div>
@@ -252,12 +251,12 @@ function buildReceiptHtml(order, invoiceNumber, qrDataUrl, lang) {
   ${trackingBlock}
   <div class="footer">
     <p>${escapeHtml(t(lang, 'questions'))} <a href="mailto:${escapeHtml(COMPANY.supportEmail)}">${escapeHtml(COMPANY.supportEmail)}</a>.</p>
-    <p>${escapeHtml(t(lang, 'trackHint'))}</p>
+    <p>${escapeHtml(t(lang, 'trackHint'))} ${escapeHtml(`(${order.orderId || ''})`)}</p>
     <p><strong>${escapeHtml(t(lang, 'footerThanks'))}</strong><br/>${escapeHtml(t(lang, 'tagline'))}</p>
     <p>${escapeHtml(t(lang, 'policies'))}: <a href="${escapeHtml(privacyUrl)}">${escapeHtml(t(lang, 'privacy'))}</a> · <a href="${escapeHtml(termsUrl)}">${escapeHtml(t(lang, 'terms'))}</a></p>
   </div>
   <div class="qr-wrap">
-    <img src="${qrDataUrl}" alt="QR"/>
+    <img src="${barcodeDataUrl}" alt="Barcode"/>
     <div class="qr-label">${escapeHtml(t(lang, 'scanLabel'))}</div>
   </div>
 </body>
@@ -283,9 +282,26 @@ async function generateReceiptPdfBuffer(order) {
     const lang = (order.language || 'en').toLowerCase().startsWith('sv') ? 'sv' : 'en';
     const orderId = order.orderId;
     const adminUrl = `${getAdminOrderQrBase()}/${encodeURIComponent(orderId)}`;
-    const qrDataUrl = await QRCode.toDataURL(adminUrl, { margin: 1, width: 200, color: { dark: '#000000', light: '#ffffff' } });
+    // Use Code 128 barcode (server-scannable) instead of QR.
+    // We encode the admin order URL so staff can scan and open the order details.
+    let barcodeDataUrl;
+    try {
+        const png = await bwipjs.toBuffer({
+            bcid: 'code128',
+            text: adminUrl,
+            scale: 3,
+            height: 10,
+            includetext: false,
+            backgroundcolor: 'FFFFFF'
+        });
+        barcodeDataUrl = `data:image/png;base64,${png.toString('base64')}`;
+    } catch (e) {
+        // Fallback: if barcode generation fails for any reason, keep a QR so receipt generation does not break.
+        const qrDataUrl = await QRCode.toDataURL(adminUrl, { margin: 1, width: 200, color: { dark: '#000000', light: '#ffffff' } });
+        barcodeDataUrl = qrDataUrl;
+    }
 
-    const html = buildReceiptHtml(order, invoiceNumber, qrDataUrl, lang);
+    const html = buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang);
 
     const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
 
