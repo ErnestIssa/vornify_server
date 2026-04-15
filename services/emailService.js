@@ -23,6 +23,20 @@ class EmailService {
     }
 
     /**
+     * SendGrid click-tracking rewrites links via a branded host (e.g. url6790.peakmode.se).
+     * If Link Branding DNS/SSL is wrong, buttons break. Disable tracking on transactional mail by default.
+     * Opt in: set SENDGRID_ENABLE_CLICK_TRACKING=true (only after Link Branding is verified in SendGrid).
+     */
+    applyTransactionalMailSettings(msg) {
+        if (process.env.SENDGRID_ENABLE_CLICK_TRACKING === 'true') return;
+        msg.trackingSettings = {
+            ...(msg.trackingSettings || {}),
+            clickTracking: { enable: false, enableText: false },
+            openTracking: { enable: process.env.SENDGRID_ENABLE_OPEN_TRACKING === 'true' }
+        };
+    }
+
+    /**
      * Send a generic email using SendGrid dynamic template
      * @param {string} to - Recipient email address
      * @param {string} subject - Email subject
@@ -124,11 +138,19 @@ class EmailService {
             } else {
                 // Use template ID as normal
                 msg.templateId = cleanedTemplateId;
-                // If the SendGrid template subject uses `{{subject}}`, this ensures it is never blank.
-                msg.dynamicTemplateData = { ...(dynamicData || {}), subject: safeSubject };
+                // Dynamic templates only show a subject if the template's Subject line uses a tag (e.g. {{subject}})
+                // or a static string in SendGrid. We pass several common aliases.
+                msg.dynamicTemplateData = {
+                    ...(dynamicData || {}),
+                    subject: safeSubject,
+                    email_subject: safeSubject,
+                    Subject: safeSubject,
+                    subject_line: safeSubject
+                };
                 console.log(`📧 Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
             }
-            
+
+            this.applyTransactionalMailSettings(msg);
             const response = await sgMail.send(msg);
             
             console.log(`✅ Email sent successfully to ${to}`, {
@@ -370,7 +392,10 @@ class EmailService {
             };
             const msg = {
                 to,
-                from: this.fromEmail,
+                from: {
+                    email: this.fromEmail,
+                    name: this.supportSenderName || 'Peak Mode'
+                },
                 subject: subjects[lang],
                 html: bodies[lang],
                 attachments: [{
@@ -380,6 +405,7 @@ class EmailService {
                     disposition: 'attachment'
                 }]
             };
+            this.applyTransactionalMailSettings(msg);
             const response = await sgMail.send(msg);
             return {
                 success: true,
@@ -1356,6 +1382,7 @@ class EmailService {
                 msg.attachments = msg.attachments.filter(Boolean);
             }
 
+            this.applyTransactionalMailSettings(msg);
             // Send email via SendGrid
             const response = await sgMail.send(msg);
 
