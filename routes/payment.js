@@ -72,6 +72,16 @@ async function findPendingCheckoutForPaymentIntent(paymentIntent, hintOrderId) {
     return null;
 }
 
+/**
+ * VornifyDB `--read` with `{ orderId }` returns an ARRAY (filter query), not a single doc.
+ * Empty match is `[]` which is truthy — never use raw `data` as the order document.
+ */
+function normalizeReadFirst(data) {
+    if (data == null) return null;
+    if (Array.isArray(data)) return data.length ? data[0] : null;
+    return data;
+}
+
 /** Normalize country to ISO 2-letter code (e.g. "Sweden" -> "SE") for zone lookup. */
 function normalizeCountryCode(countryOrCode) {
     if (!countryOrCode || typeof countryOrCode !== 'string') return '';
@@ -295,7 +305,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             })
             : { success: false, data: null };
 
-        let order = (findResult.success && findResult.data) ? findResult.data : null;
+        let order = findResult.success ? normalizeReadFirst(findResult.data) : null;
 
         // If no real order exists yet, promote pending checkout draft into a real order now.
         if (!order) {
@@ -1744,8 +1754,9 @@ router.post('/confirm', async (req, res) => {
                 data: { orderId: targetOrderId }
             });
 
-            if (findResult.success && findResult.data) {
-                const order = findResult.data;
+            const existingOrder = findResult.success ? normalizeReadFirst(findResult.data) : null;
+            if (existingOrder) {
+                const order = existingOrder;
                 if (order.status === 'pending') {
                     updateData.status = 'processing';
                 }
@@ -1792,6 +1803,44 @@ router.post('/confirm', async (req, res) => {
             error: error.message || 'Failed to confirm payment',
             code: error.code || 'payment_confirmation_failed',
             userMessage: 'We could not confirm your payment. Please try again, or use another payment method.'
+        });
+    }
+});
+
+/**
+ * POST /api/payments/finalize-after-payment
+ * Idempotent: if PaymentIntent succeeded, runs the same finalize as the webhook (order + emails).
+ * Use when webhook raced before pending_checkouts existed, or as a recovery after deploy.
+ * Body: { paymentIntentId: string, orderId?: string }
+ */
+router.post('/finalize-after-payment', async (req, res) => {
+    try {
+        const { paymentIntentId, orderId: hintOrderId } = req.body || {};
+        if (!paymentIntentId) {
+            return res.status(400).json({ success: false, error: 'paymentIntentId is required' });
+        }
+        const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+        if (pi.status !== 'succeeded') {
+            return res.json({
+                success: false,
+                paymentStatus: pi.status,
+                userMessage: 'Payment is not completed yet; finalize runs only after success.'
+            });
+        }
+        await handlePaymentIntentSucceeded(pi, { hintOrderId: hintOrderId || null });
+        const after = await stripe.paymentIntents.retrieve(paymentIntentId);
+        return res.json({
+            success: true,
+            paymentStatus: 'succeeded',
+            orderId: hintOrderId || after.metadata?.orderId || null,
+            message: 'Finalize attempted (order + emails if pending checkout was found)'
+        });
+    } catch (error) {
+        console.error('finalize-after-payment error:', error);
+        return res.status(500).json({
+            success: false,
+            error: error.message || 'Finalize failed',
+            userMessage: 'Could not finalize order. Contact support with your order number.'
         });
     }
 });
