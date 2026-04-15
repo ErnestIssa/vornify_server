@@ -91,6 +91,38 @@ function normalizeCountryCode(countryOrCode) {
     return map[upper] || upper;
 }
 
+/** Compute canonical order totals on backend (source of truth). */
+function computeCanonicalOrderTotals(order) {
+    const checkoutTotalsService = require('../services/checkoutTotalsService');
+    const vatService = require('../services/vatService');
+
+    const items = Array.isArray(order?.items) ? order.items : [];
+
+    const shippingCountryRaw =
+        order?.shippingAddress?.country ||
+        order?.shippingAddress?.countryCode ||
+        order?.customer?.country ||
+        order?.customer?.countryCode ||
+        vatService.DEFAULT_COUNTRY;
+    const country = normalizeCountryCode(String(shippingCountryRaw || ''));
+    const vatRate = vatService.getVatRate(country || vatService.DEFAULT_COUNTRY);
+
+    const shippingGross =
+        (order?.totals && (typeof order.totals.shippingGross === 'number' ? order.totals.shippingGross : undefined)) ??
+        (order?.totals && (typeof order.totals.shipping === 'number' ? order.totals.shipping : undefined)) ??
+        (typeof order?.shippingCost === 'number' ? order.shippingCost : undefined) ??
+        (typeof order?.shipping === 'number' ? order.shipping : undefined) ??
+        0;
+
+    const discountAmount =
+        (order?.totals && (typeof order.totals.discountAmount === 'number' ? order.totals.discountAmount : undefined)) ??
+        (order?.totals && (typeof order.totals.discount === 'number' ? order.totals.discount : undefined)) ??
+        (order?.appliedDiscount && typeof order.appliedDiscount.amount === 'number' ? order.appliedDiscount.amount : undefined) ??
+        0;
+
+    return checkoutTotalsService.calculateTotals(items, shippingGross, discountAmount, 'SEK', vatRate, { country });
+}
+
 /**
  * GET /api/payments/check-payment-methods
  * Check if Apple Pay and Google Pay are available for the user's device/browser
@@ -411,6 +443,17 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                 }
             ]
         };
+
+        // Canonical totals (backend source of truth). Overwrite any stale/incorrect totals from draft/frontend.
+        try {
+            const canonicalTotals = computeCanonicalOrderTotals(order);
+            updateData.totals = canonicalTotals;
+            updateData.currency = 'SEK';
+            updateData.totalsCalculatedAt = new Date().toISOString();
+            updateData.totalsEngine = 'checkoutTotalsService';
+        } catch (totErr) {
+            console.warn(`⚠️ [PAYMENT WEBHOOK] Failed to compute canonical totals for ${orderId}:`, totErr.message);
+        }
 
         // Add Stripe customer ID if available
         if (paymentIntent.customer) {
@@ -1759,12 +1802,28 @@ router.post('/confirm', async (req, res) => {
             }
             const refreshedPi = await stripe.paymentIntents.retrieve(paymentIntentId);
             const finalOrderId = orderId || refreshedPi.metadata?.orderId || null;
+            let canonicalTotals = null;
+            try {
+                if (finalOrderId) {
+                    const findResult = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--read',
+                        data: { orderId: finalOrderId }
+                    });
+                    const existingOrder = findResult.success ? normalizeReadFirst(findResult.data) : null;
+                    if (existingOrder) canonicalTotals = computeCanonicalOrderTotals(existingOrder);
+                }
+            } catch (e) {
+                // ignore; success page can still render without breakdown
+            }
             return res.json({
                 success: true,
                 paymentStatus: 'succeeded',
                 orderId: finalOrderId,
                 amount: paymentIntent.amount / 100,
                 currency: paymentIntent.currency,
+                totals: canonicalTotals,
                 alreadyConfirmed: true,
                 shouldRedirectToSuccess: true,
                 userMessage: 'Your payment was already completed. Redirecting you to your order confirmation…',

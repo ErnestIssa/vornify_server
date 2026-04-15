@@ -2103,10 +2103,45 @@ router.get('/:orderId', async (req, res) => {
                 error: 'Order not found'
             });
         }
-        res.json({
-            success: true,
-            data: order
-        });
+        // Ensure API always returns backend-canonical totals (source of truth).
+        // Older orders/drafts may have stale totals from frontend or older engines.
+        try {
+            const checkoutTotalsService = require('../services/checkoutTotalsService');
+            const vatService = require('../services/vatService');
+            const normalizeCountryCode = (c) => {
+                if (!c || typeof c !== 'string') return '';
+                const upper = c.toUpperCase().trim();
+                if (upper.length === 2) return upper;
+                const map = { SWEDEN: 'SE', GERMANY: 'DE', FRANCE: 'FR', DENMARK: 'DK', NORWAY: 'NO', FINLAND: 'FI', ITALY: 'IT', SPAIN: 'ES', NETHERLANDS: 'NL', POLAND: 'PL', AUSTRIA: 'AT', BELGIUM: 'BE', CROATIA: 'HR', CYPRUS: 'CY', CZECH: 'CZ', CZECHIA: 'CZ', ESTONIA: 'EE', GREECE: 'GR', HUNGARY: 'HU', IRELAND: 'IE', LATVIA: 'LV', LITHUANIA: 'LT', LUXEMBOURG: 'LU', MALTA: 'MT', PORTUGAL: 'PT', ROMANIA: 'RO', SLOVAKIA: 'SK', SLOVENIA: 'SI', BULGARIA: 'BG' };
+                return map[upper] || upper;
+            };
+            const shippingCountryRaw =
+                order?.shippingAddress?.country ||
+                order?.shippingAddress?.countryCode ||
+                order?.customer?.country ||
+                order?.customer?.countryCode ||
+                vatService.DEFAULT_COUNTRY;
+            const country = normalizeCountryCode(String(shippingCountryRaw || ''));
+            const vatRate = vatService.getVatRate(country || vatService.DEFAULT_COUNTRY);
+            const items = Array.isArray(order?.items) ? order.items : [];
+            const shippingGross =
+                (order?.totals && (typeof order.totals.shippingGross === 'number' ? order.totals.shippingGross : undefined)) ??
+                (order?.totals && (typeof order.totals.shipping === 'number' ? order.totals.shipping : undefined)) ??
+                (typeof order?.shippingCost === 'number' ? order.shippingCost : undefined) ??
+                0;
+            const discountAmount =
+                (order?.totals && (typeof order.totals.discountAmount === 'number' ? order.totals.discountAmount : undefined)) ??
+                (order?.totals && (typeof order.totals.discount === 'number' ? order.totals.discount : undefined)) ??
+                (order?.appliedDiscount && typeof order.appliedDiscount.amount === 'number' ? order.appliedDiscount.amount : undefined) ??
+                0;
+            const canonicalTotals = checkoutTotalsService.calculateTotals(items, shippingGross, discountAmount, 'SEK', vatRate, { country });
+            order.totals = canonicalTotals;
+            order.currency = 'SEK';
+        } catch (e) {
+            // Don't fail the request for totals calc issues
+        }
+
+        res.json({ success: true, data: order });
     } catch (error) {
         console.error('Get order error:', error);
         res.status(500).json({
