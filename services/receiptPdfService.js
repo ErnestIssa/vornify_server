@@ -287,17 +287,47 @@ async function generateReceiptPdfBuffer(order) {
 
     const html = buildReceiptHtml(order, invoiceNumber, qrDataUrl, lang);
 
-    let puppeteer;
-    try {
-        puppeteer = require('puppeteer');
-    } catch (e) {
-        throw new Error('puppeteer is not installed. Run: npm install puppeteer');
+    const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
+
+    async function launchBrowser() {
+        // 1) Prefer bundled puppeteer if it can launch (local/dev and some hosts)
+        try {
+            const puppeteer = require('puppeteer');
+            const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+            return await puppeteer.launch({
+                headless: true,
+                executablePath,
+                args: launchArgs
+            });
+        } catch (e1) {
+            // 2) Fallback for constrained/serverless Linux: puppeteer-core + @sparticuz/chromium
+            try {
+                const puppeteerCore = require('puppeteer-core');
+                const chromium = require('@sparticuz/chromium');
+                const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || (await chromium.executablePath());
+                return await puppeteerCore.launch({
+                    args: [...chromium.args, ...launchArgs],
+                    defaultViewport: chromium.defaultViewport,
+                    executablePath,
+                    headless: chromium.headless
+                });
+            } catch (e2) {
+                const more = [
+                    `puppeteer_error=${e1?.message || e1}`,
+                    `chromium_fallback_error=${e2?.message || e2}`,
+                    `platform=${process.platform}`,
+                    `arch=${process.arch}`,
+                    `node=${process.version}`,
+                    `PUPPETEER_EXECUTABLE_PATH=${process.env.PUPPETEER_EXECUTABLE_PATH || ''}`
+                ].join(' | ');
+                const err = new Error(`Failed to launch Chromium for receipt PDF. ${more}`);
+                err.cause = { puppeteer: e1, chromiumFallback: e2 };
+                throw err;
+            }
+        }
     }
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-    });
+    const browser = await launchBrowser();
     try {
         const page = await browser.newPage();
         await page.setContent(html, { waitUntil: 'networkidle0' });
