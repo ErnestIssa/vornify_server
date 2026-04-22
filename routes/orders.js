@@ -2078,8 +2078,8 @@ router.post('/:orderId/generate-label', authenticateAdmin, async (req, res) => {
     }
 });
 
-// GET /api/orders/:orderId - Get single order by ID (admin); 404 if order is soft-deleted
-router.get('/:orderId', async (req, res) => {
+// GET /api/orders/:orderId - Get single order by business `orderId` (e.g. PM…) or (optional) _id; admin only; 404 if soft-deleted
+router.get('/:orderId', authenticateAdmin, async (req, res) => {
     try {
         const { orderId } = req.params;
         
