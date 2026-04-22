@@ -29,10 +29,34 @@ function displayWebsite(raw) {
         .replace(/\/$/, '');
 }
 
-/** Base URL for QR (admin opens order). Trailing slash optional. */
-function getAdminOrderQrBase() {
-    const base = (process.env.ADMIN_RECEIPT_QR_URL_BASE || process.env.ADMIN_APP_BASE_URL || 'https://peakmode.se').replace(/\/$/, '');
-    return base.includes('/admin/orders') ? base : `${base}/admin/orders`;
+/**
+ * Full URL to open a single order in the Peakmode Admin **SPA** (client route: `/view-order/:id`).
+ * Do not use API-style paths like `/admin/orders/...` — the browser app only has `/view-order/{orderId}`.
+ *
+ * - Optional `RECEIPT_ADMIN_VIEW_ORDER_BASE`: full base *including* path, e.g. `https://host/view-order` or
+ *   `https://host/view-order/{orderId}` with template.
+ * - Otherwise uses origin of `ADMIN_APP_BASE_URL` / `ADMIN_FRONTEND_URL` (path stripped) so
+ *   values like `https://…onrender.com/orders` do not become `.../orders/admin/orders/...`.
+ */
+function getAdminViewOrderUrl(orderId) {
+    const id = encodeURIComponent(String(orderId || ''));
+    const customBase = (process.env.RECEIPT_ADMIN_VIEW_ORDER_BASE || '').trim();
+    if (customBase) {
+        const b = customBase.replace(/\/$/, '');
+        if (b.includes('{orderId}')) {
+            return b.replace(/\{orderId\}/g, id);
+        }
+        return `${b}/${id}`;
+    }
+    const raw = (process.env.ADMIN_APP_BASE_URL || process.env.ADMIN_FRONTEND_URL || process.env.ADMIN_PUBLIC_ORIGIN
+        || 'https://peakmode-admin.onrender.com').trim();
+    try {
+        const u = new URL(raw);
+        const origin = `${u.protocol}//${u.host}`;
+        return `${origin}/view-order/${id}`;
+    } catch {
+        return `https://peakmode-admin.onrender.com/view-order/${id}`;
+    }
 }
 
 function stableInvoiceNumber(orderId) {
@@ -316,7 +340,7 @@ async function generateReceiptPdfBuffer(order) {
     const invoiceNumber = order.invoiceNumber || stableInvoiceNumber(order.orderId);
     const lang = (order.language || 'en').toLowerCase().startsWith('sv') ? 'sv' : 'en';
     const orderId = order.orderId;
-    const adminUrl = `${getAdminOrderQrBase()}/${encodeURIComponent(orderId)}`;
+    const adminUrl = getAdminViewOrderUrl(orderId);
     // QR (top right) + Code 128 barcode (footer); both encode the same admin order URL.
     const qrDataUrl = await QRCode.toDataURL(adminUrl, { margin: 1, width: 200, color: { dark: '#000000', light: '#ffffff' } });
 
@@ -400,6 +424,6 @@ module.exports = {
     generateReceiptPdfBuffer,
     ensureInvoiceNumberOnOrder,
     stableInvoiceNumber,
-    getAdminOrderQrBase,
+    getAdminViewOrderUrl,
     COMPANY
 };
