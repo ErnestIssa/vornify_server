@@ -70,13 +70,9 @@ const STRINGS = {
         policies: 'Policies & information',
         privacy: 'Privacy policy',
         terms: 'Terms & conditions',
-        scanLabel: 'Opens this order in admin (barcode)',
         adminOnlyNote: 'For Peak Mode admin use only',
-        returnsSummaryTitle: 'Returns & refunds (summary)',
-        returnsReadMore: 'Read the full policy on',
-        returnsP1: 'Under Swedish and EU consumer law you may withdraw from your purchase within 30 days of receiving your order. To exercise the right of withdrawal, notify Peak Mode in writing (e.g. by email) within 14 days.',
-        returnsP2: 'Returned items must be unused, unwashed, and in original condition, with tags and packaging intact. We may refuse a return or issue a reduced refund if items show use, damage, odour, or missing tags.',
-        returnsP3: 'For hygiene reasons, certain items (such as underwear or items worn on the skin) may not be returnable if opened or used.',
+        /** Single very small legal line below barcode (no heading). */
+        receiptLegalFooter: 'You have the right to withdraw your purchase within 30 days of receiving your order, in accordance with applicable consumer law. Returned items must be unused, unwashed, in original condition, with tags and packaging intact. Certain hygiene-sensitive items may not be eligible for return if opened or used. Read full Terms, Returns & Refund Policy: www.peakmode.se/terms-of-service.',
         card: 'Card',
         country: 'Country'
     },
@@ -108,13 +104,8 @@ const STRINGS = {
         policies: 'Policy och information',
         privacy: 'Integritetspolicy',
         terms: 'Köpvillkor',
-        scanLabel: 'Öppnar ordern i admin (streckkod)',
         adminOnlyNote: 'Endast för Peak Modes administrativa användning',
-        returnsSummaryTitle: 'Retur & återbetalning (kort)',
-        returnsReadMore: 'Läs hela policyn på',
-        returnsP1: 'Enligt svensk och EU-konsumenträtt har du rätt att ångra köpet inom 30 dagar från att du mottagit varorna. För att utöva ångerrätten ska du meddela Peak Mode skriftligt (t.ex. via e-post) inom 14 dagar.',
-        returnsP2: 'Returnerade varor ska vara oanvända, otvättade och i originalskick med etiketter och förpackning intakta. Vi förbehåller oss rätten att neka retur eller göra avdrag vid spår av användning, skada, lukt eller saknade etiketter.',
-        returnsP3: 'Av hygieniska skäl kan vissa varor (t.ex. underkläder eller varor mot huden) inte returneras om de öppnats eller använts.',
+        receiptLegalFooter: 'Du har rätt att ångra ditt köp inom 30 dagar från att du mottagit din order, enligt tillämplig konsumentlagstiftning. Returnerade varor ska vara oanvända, otvättade, i originalskick, med etiketter och förpackning intakta. Vissa hygienkänsliga varor kan vara undantagna från retur om de öppnats eller använts. Läs fullständiga villkor, retur- och återbetalningspolicy: www.peakmode.se/terms-of-service.',
         card: 'Kort',
         country: 'Land'
     }
@@ -203,7 +194,6 @@ function buildReceiptHtml(order, invoiceNumber, qrDataUrl, barcodeDataUrl, lang)
 
     const privacyUrl = process.env.RECEIPT_PRIVACY_URL || 'https://www.peakmode.se/privacy-policy';
     const termsUrl = process.env.RECEIPT_TERMS_URL || 'https://peakmode.se/terms-of-service';
-    const returnsInfoUrl = process.env.RECEIPT_RETURNS_INFO_URL || termsUrl;
 
     const lines = (order.items || []).map((item) => {
         const qty = item.quantity || 1;
@@ -241,15 +231,10 @@ function buildReceiptHtml(order, invoiceNumber, qrDataUrl, barcodeDataUrl, lang)
     .track { text-align: center; font-size: 12px; font-weight: 600; letter-spacing: 0.5px; }
     .footer { margin-top: 20px; font-size: 10px; color: #444; text-align: center; line-height: 1.6; }
     .qr-wrap { text-align: center; margin-top: 24px; padding-top: 16px; }
-    .qr-wrap .barcode-img { max-width: 100%; height: auto; }
-    .qr-label { font-size: 9px; color: #666; margin-top: 6px; }
+    .qr-wrap .barcode-img { max-width: 100%; height: auto; display: block; margin-left: auto; margin-right: auto; }
     .admin-code-note { font-size: 8px; color: #888; margin-top: 4px; max-width: 120px; margin-left: auto; line-height: 1.3; }
     .admin-qr-top .admin-code-note { margin-left: auto; margin-right: 0; text-align: right; }
-    .qr-wrap .admin-code-note { margin-left: auto; margin-right: auto; text-align: center; max-width: 280px; }
-    .returns-block { margin-top: 20px; padding-top: 14px; border-top: 1px dotted #bbb; font-size: 8.5px; line-height: 1.45; color: #444; text-align: left; }
-    .returns-block h3 { font-size: 9.5px; margin: 0 0 8px 0; font-weight: 600; color: #111; }
-    .returns-block p { margin: 0 0 6px 0; }
-    .returns-block .read-more { margin-top: 8px; font-size: 8px; color: #555; }
+    .receipt-legal-footer { margin-top: 14px; font-size: 6.5px; line-height: 1.35; color: #666; text-align: center; max-width: 100%; }
     a { color: #111; }
   </style>
 </head>
@@ -307,16 +292,8 @@ function buildReceiptHtml(order, invoiceNumber, qrDataUrl, barcodeDataUrl, lang)
   </div>
   <div class="qr-wrap">
     <img class="barcode-img" src="${barcodeDataUrl}" alt="Barcode"/>
-    <div class="qr-label">${escapeHtml(t(lang, 'scanLabel'))}</div>
-    <div class="admin-code-note">${escapeHtml(t(lang, 'adminOnlyNote'))}</div>
   </div>
-  <div class="returns-block">
-    <h3>${escapeHtml(t(lang, 'returnsSummaryTitle'))}</h3>
-    <p>${escapeHtml(t(lang, 'returnsP1'))}</p>
-    <p>${escapeHtml(t(lang, 'returnsP2'))}</p>
-    <p>${escapeHtml(t(lang, 'returnsP3'))}</p>
-    <p class="read-more">${escapeHtml(t(lang, 'returnsReadMore'))} <a href="${escapeHtml(returnsInfoUrl)}">${escapeHtml(displayWebsite(returnsInfoUrl))}</a></p>
-  </div>
+  <p class="receipt-legal-footer">${escapeHtml(t(lang, 'receiptLegalFooter'))}</p>
 </body>
 </html>`;
 }
@@ -348,7 +325,8 @@ async function generateReceiptPdfBuffer(order) {
         const png = await bwipjs.toBuffer({
             bcid: 'code128',
             text: adminUrl,
-            scale: 2,
+            // scale 1 ≈ half the horizontal length of scale 2 (same bar height)
+            scale: 1,
             height: 4,
             includetext: false,
             backgroundcolor: 'FFFFFF'
