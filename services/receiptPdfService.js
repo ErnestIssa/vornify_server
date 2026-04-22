@@ -1,7 +1,7 @@
 /**
  * Peak Mode order receipt PDF (HTML → Puppeteer → PDF).
  * Reusable: generateReceiptPdfBuffer(order) returns Buffer + filename.
- * Language/currency from order (checkout). QR links to admin order URL (staff scan).
+ * Language/currency from order (checkout). QR (header) + Code 128 (footer) link to admin order URL (staff scan).
  */
 
 const crypto = require('crypto');
@@ -13,7 +13,7 @@ const COMPANY = {
     orgNumber: process.env.RECEIPT_ORG_NUMBER || '559557-5480',
     website: process.env.RECEIPT_WEBSITE_URL || 'https://www.peakmode.se',
     supportEmail: process.env.RECEIPT_SUPPORT_EMAIL || 'support@peakmode.se',
-    addressLine: process.env.RECEIPT_COMPANY_ADDRESS || 'Kapellgatan 10, 746 39 Bålsta, Sweden'
+    addressLine: process.env.RECEIPT_COMPANY_ADDRESS || 'Jyllandsgatan 112, 164 47 Kista, Sweden'
 };
 
 const LOGO_URL = process.env.RECEIPT_LOGO_URL || 'https://www.peakmode.se/favicon.ico';
@@ -70,7 +70,8 @@ const STRINGS = {
         policies: 'Policies & information',
         privacy: 'Privacy policy',
         terms: 'Terms & conditions',
-        scanLabel: 'Scan barcode for order details',
+        scanLabel: 'Opens this order in admin (barcode)',
+        adminOnlyNote: 'For Peak Mode admin use only',
         card: 'Card',
         country: 'Country'
     },
@@ -102,7 +103,8 @@ const STRINGS = {
         policies: 'Policy och information',
         privacy: 'Integritetspolicy',
         terms: 'Köpvillkor',
-        scanLabel: 'Skanna streckkoden för orderdetaljer',
+        scanLabel: 'Öppnar ordern i admin (streckkod)',
+        adminOnlyNote: 'Endast för Peak Modes administrativa användning',
         card: 'Kort',
         country: 'Land'
     }
@@ -147,7 +149,7 @@ async function ensureInvoiceNumberOnOrder(order, db) {
     return invoiceNumber;
 }
 
-function buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang) {
+function buildReceiptHtml(order, invoiceNumber, qrDataUrl, barcodeDataUrl, lang) {
     const currency = (order.displayCurrency || order.currency || order.totals?.currency || 'SEK').toUpperCase();
     const totals = order.totals || {};
     const subEx = totals.subtotalExVat ?? totals.subtotal ?? order.subtotal ?? 0;
@@ -201,7 +203,10 @@ function buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang) {
     * { box-sizing: border-box; }
     body { font-family: 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 11px; color: #111; margin: 0; padding: 24px; max-width: 600px; margin: 0 auto; }
     .logo { max-height: 48px; margin-bottom: 8px; }
-    .company { font-size: 10px; line-height: 1.5; color: #333; margin-bottom: 16px; }
+    .receipt-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 12px; }
+    .company { font-size: 10px; line-height: 1.5; color: #333; flex: 1; min-width: 0; margin-bottom: 0; }
+    .admin-qr-top { flex-shrink: 0; text-align: right; max-width: 120px; }
+    .admin-qr-top img { width: 96px; height: 96px; display: block; margin-left: auto; }
     .dots { border-top: 1px dotted #999; margin: 12px 0; }
     h1 { font-size: 15px; text-align: center; margin: 8px 0; font-weight: 700; }
     h2 { font-size: 13px; text-align: center; margin: 4px 0 16px; font-weight: 600; }
@@ -215,19 +220,28 @@ function buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang) {
     .track { text-align: center; font-size: 12px; font-weight: 600; letter-spacing: 0.5px; }
     .footer { margin-top: 20px; font-size: 10px; color: #444; text-align: center; line-height: 1.6; }
     .qr-wrap { text-align: center; margin-top: 24px; padding-top: 16px; }
-    .qr-wrap img { width: 120px; height: 120px; }
+    .qr-wrap .barcode-img { max-width: 100%; height: auto; }
     .qr-label { font-size: 9px; color: #666; margin-top: 6px; }
+    .admin-code-note { font-size: 8px; color: #888; margin-top: 4px; max-width: 120px; margin-left: auto; line-height: 1.3; }
+    .admin-qr-top .admin-code-note { margin-left: auto; margin-right: 0; text-align: right; }
+    .qr-wrap .admin-code-note { margin-left: auto; margin-right: auto; text-align: center; max-width: 280px; }
     a { color: #111; }
   </style>
 </head>
 <body>
   <img class="logo" src="${escapeHtml(LOGO_URL)}" alt="Peak Mode" onerror="this.style.display='none'"/>
-  <div class="company">
-    <strong>${escapeHtml(COMPANY.name)}</strong><br/>
-    Org.nr ${escapeHtml(COMPANY.orgNumber)}<br/>
-    ${escapeHtml(displayWebsite(COMPANY.website))}<br/>
-    ${t(lang, 'customer') === 'Kund' ? 'Support' : 'Support'}: ${escapeHtml(COMPANY.supportEmail)}<br/>
-    ${escapeHtml(COMPANY.addressLine)}
+  <div class="receipt-header">
+    <div class="company">
+      <strong>${escapeHtml(COMPANY.name)}</strong><br/>
+      Org.nr ${escapeHtml(COMPANY.orgNumber)}<br/>
+      ${escapeHtml(displayWebsite(COMPANY.website))}<br/>
+      ${t(lang, 'customer') === 'Kund' ? 'Support' : 'Support'}: ${escapeHtml(COMPANY.supportEmail)}<br/>
+      ${escapeHtml(COMPANY.addressLine)}
+    </div>
+    <div class="admin-qr-top">
+      <img src="${qrDataUrl}" alt="QR"/>
+      <div class="admin-code-note">${escapeHtml(t(lang, 'adminOnlyNote'))}</div>
+    </div>
   </div>
   <div class="dots"></div>
   <h1>${escapeHtml(t(lang, 'thankYou'))}</h1>
@@ -267,8 +281,9 @@ function buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang) {
     <p>${escapeHtml(t(lang, 'policies'))}: <a href="${escapeHtml(privacyUrl)}">${escapeHtml(t(lang, 'privacy'))}</a> · <a href="${escapeHtml(termsUrl)}">${escapeHtml(t(lang, 'terms'))}</a></p>
   </div>
   <div class="qr-wrap">
-    <img src="${barcodeDataUrl}" alt="Barcode"/>
+    <img class="barcode-img" src="${barcodeDataUrl}" alt="Barcode"/>
     <div class="qr-label">${escapeHtml(t(lang, 'scanLabel'))}</div>
+    <div class="admin-code-note">${escapeHtml(t(lang, 'adminOnlyNote'))}</div>
   </div>
 </body>
 </html>`;
@@ -293,26 +308,26 @@ async function generateReceiptPdfBuffer(order) {
     const lang = (order.language || 'en').toLowerCase().startsWith('sv') ? 'sv' : 'en';
     const orderId = order.orderId;
     const adminUrl = `${getAdminOrderQrBase()}/${encodeURIComponent(orderId)}`;
-    // Use Code 128 barcode (server-scannable) instead of QR.
-    // We encode the admin order URL so staff can scan and open the order details.
+    // QR (top right) + Code 128 barcode (footer); both encode the same admin order URL.
+    const qrDataUrl = await QRCode.toDataURL(adminUrl, { margin: 1, width: 200, color: { dark: '#000000', light: '#ffffff' } });
+
     let barcodeDataUrl;
     try {
         const png = await bwipjs.toBuffer({
             bcid: 'code128',
             text: adminUrl,
             scale: 3,
-            height: 5,
+            height: 2,
             includetext: false,
             backgroundcolor: 'FFFFFF'
         });
         barcodeDataUrl = `data:image/png;base64,${png.toString('base64')}`;
     } catch (e) {
-        // Fallback: if barcode generation fails for any reason, keep a QR so receipt generation does not break.
-        const qrDataUrl = await QRCode.toDataURL(adminUrl, { margin: 1, width: 200, color: { dark: '#000000', light: '#ffffff' } });
-        barcodeDataUrl = qrDataUrl;
+        // Fallback: if barcode generation fails, reuse a compact QR at the footer so generation still works.
+        barcodeDataUrl = await QRCode.toDataURL(adminUrl, { margin: 1, width: 160, color: { dark: '#000000', light: '#ffffff' } });
     }
 
-    const html = buildReceiptHtml(order, invoiceNumber, barcodeDataUrl, lang);
+    const html = buildReceiptHtml(order, invoiceNumber, qrDataUrl, barcodeDataUrl, lang);
 
     const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
 

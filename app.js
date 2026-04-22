@@ -144,31 +144,59 @@ app.use((req, res, next) => {
 // Single CORS configuration for ALL /api routes (auth, vornifydb, support, etc.)
 // Required: frontend uses credentials: 'include' → server must NOT use origin: '*'
 // One config ensures login, refresh, vornifydb, and support all get explicit origin + credentials.
-const allowedApiOrigins = [
-    process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se',
-    'https://peakmode-admin.onrender.com',  // Deployed admin (Render)
-    process.env.FRONTEND_URL || process.env.BASE_URL || 'https://peakmode.se',
-    'https://www.peakmode.se',
-    'http://localhost:5175',
-    'http://localhost:5180',
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://localhost:8085',   // Vite dev server (client frontend)
-    'http://127.0.0.1:8085',
-    'http://127.0.0.1:5173',
-    'http://127.0.0.1:3000',
-    process.env.ADMIN_FRONTEND_DEV_URL
-].filter(Boolean);
+const extraCorsOrigins = (process.env.CORS_ADDITIONAL_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+const allowedApiOrigins = new Set(
+    [
+        process.env.ADMIN_FRONTEND_URL || 'https://admin.peakmode.se',
+        'https://peakmode-admin.onrender.com',  // Deployed admin (Render)
+        process.env.FRONTEND_URL || process.env.BASE_URL || 'https://peakmode.se',
+        'https://www.peakmode.se',
+        'http://localhost:5175',
+        'http://localhost:5180',
+        'http://localhost:5173',
+        'http://localhost:5176', // Vite default alternate port
+        'http://localhost:3000',
+        'http://localhost:8085',   // Vite dev server (client frontend)
+        'http://127.0.0.1:8085',
+        'http://127.0.0.1:5173',
+        'http://127.0.0.1:3000',
+        process.env.ADMIN_FRONTEND_DEV_URL,
+        ...extraCorsOrigins
+    ].filter(Boolean)
+);
+
+/** Any http(s)://localhost or 127.0.0.1 (any port) — Vite can use 5174, 5176, 5180, etc. */
+function isLocalhostDevOrigin(origin) {
+    if (!origin || typeof origin !== 'string') return false;
+    try {
+        const u = new URL(origin);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+        return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    } catch {
+        return false;
+    }
+}
 
 const apiCorsOptions = {
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
-        if (allowedApiOrigins.includes(origin)) return callback(null, true);
+        if (allowedApiOrigins.has(origin)) return callback(null, true);
+        if (isLocalhostDevOrigin(origin)) {
+            if (process.env.CORS_ALLOW_LOCALHOST === 'false') {
+                console.warn('[CORS] Localhost origin blocked (CORS_ALLOW_LOCALHOST=false):', origin);
+                return callback(new Error('Not allowed by CORS'));
+            }
+            return callback(null, true);
+        }
         console.warn('[CORS] Blocked origin:', origin);
         callback(new Error('Not allowed by CORS'));
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'api-key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'api-key', 'X-Request-Id'],
     credentials: true,
     maxAge: 86400,
     preflightContinue: false,
