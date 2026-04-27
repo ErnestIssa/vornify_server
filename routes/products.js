@@ -1228,6 +1228,145 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
+/**
+ * POST /api/products/:id/seed-color-media
+ * Admin helper to seed `inventory.colorMedia[]` from global `product.media[]`.
+ *
+ * Use cases:
+ * - Legacy products: quickly make them publishable under the new color->images requirement
+ * - Staff can then refine per-color galleries later
+ *
+ * Body (optional):
+ * - mode: 'missing' | 'all' (default 'missing')
+ */
+router.post('/:id/seed-color-media', authenticateAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const mode = (req.body && typeof req.body.mode === 'string') ? req.body.mode : 'missing';
+
+        // Load product by id/_id (same logic as update)
+        let existingProductResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: { id }
+        });
+        let product = existingProductResult.success && existingProductResult.data ? existingProductResult.data : null;
+        let updateFilter = { id };
+        if (!product) {
+            const { ObjectId } = require('mongodb');
+            try {
+                existingProductResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: new ObjectId(id) }
+                });
+            } catch (_) {
+                existingProductResult = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--read',
+                    data: { _id: id }
+                });
+            }
+            product = existingProductResult.success && existingProductResult.data ? existingProductResult.data : null;
+            if (product) {
+                updateFilter = { _id: typeof product._id === 'string' ? product._id : product._id };
+            }
+        }
+
+        if (!product) {
+            return res.status(404).json({ success: false, error: 'Product not found' });
+        }
+
+        if (!product.inventory || !Array.isArray(product.inventory.colors) || product.inventory.colors.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Product has no inventory.colors; cannot seed per-color media',
+                code: 'VALIDATION_ERROR'
+            });
+        }
+
+        const globalMedia = Array.isArray(product.media) ? product.media : [];
+        const globalPublicIds = Array.isArray(product.imagePublicIds) ? product.imagePublicIds : [];
+        if (!globalMedia.length) {
+            return res.status(400).json({
+                success: false,
+                error: 'Product has no global media[] to seed from',
+                code: 'VALIDATION_ERROR'
+            });
+        }
+
+        const existing = Array.isArray(product.inventory.colorMedia) ? product.inventory.colorMedia : [];
+        const byColorId = new Map(existing.map((e) => [e && e.colorId, e]).filter(([k]) => typeof k === 'string' && k));
+
+        const seededColorIds = [];
+        for (const c of product.inventory.colors) {
+            const colorId = c && c.id;
+            if (!colorId) continue;
+            const already = byColorId.get(colorId);
+
+            if (mode !== 'all') {
+                const hasImages = already && Array.isArray(already.media) && already.media.length > 0;
+                if (hasImages) continue;
+            }
+
+            seededColorIds.push(colorId);
+            byColorId.set(colorId, {
+                colorId,
+                media: globalMedia,
+                imagePublicIds: globalPublicIds.slice(0, globalMedia.length),
+                sortOrder: typeof c.sortOrder === 'number' ? c.sortOrder : 0,
+                active: true,
+                legacyFallback: true,
+                seededAt: new Date().toISOString()
+            });
+        }
+
+        const updatedInventory = variantService.normalizeInventoryColorMedia({
+            ...(product.inventory || {}),
+            colorMedia: Array.from(byColorId.values())
+        });
+
+        const updateData = {
+            inventory: updatedInventory,
+            updatedAt: new Date().toISOString()
+        };
+
+        const updateResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--update',
+            data: { filter: updateFilter, update: updateData }
+        });
+        if (!updateResult.success) {
+            return res.status(500).json({ success: false, error: updateResult.error || 'Update failed' });
+        }
+
+        const readResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: updateFilter
+        });
+        const updated = readResult.success && readResult.data ? readResult.data : { ...product, ...updateData };
+        normalizeProductForResponse(updated);
+
+        return res.json({
+            success: true,
+            message: seededColorIds.length
+                ? `Seeded colorMedia for ${seededColorIds.length} color(s)`
+                : 'No changes (colorMedia already present for all colors)',
+            seededColorIds,
+            data: updated
+        });
+    } catch (e) {
+        console.error('Seed colorMedia error:', e);
+        return res.status(500).json({ success: false, error: e.message || 'Failed to seed colorMedia' });
+    }
+});
+
 // DELETE /api/products/:id - Delete product (admin)
 router.delete('/:id', authenticateAdmin, async (req, res) => {
     try {
