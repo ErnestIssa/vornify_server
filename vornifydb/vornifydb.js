@@ -446,6 +446,8 @@ class VortexDB {
             }
 
             const inventory = data.inventory;
+            // Preserve premium variant media mappings (do not drop unknown fields during normalization)
+            const incomingColorMedia = Array.isArray(inventory.colorMedia) ? inventory.colorMedia : null;
             
             // Validate required inventory structure
             if (!inventory.colors || !Array.isArray(inventory.colors)) {
@@ -518,6 +520,11 @@ class VortexDB {
 
             // Add timestamp
             processedInventory.lastUpdated = new Date().toISOString();
+
+            // Re-attach colorMedia after normalization (keeps new feature fields stable)
+            if (incomingColorMedia) {
+                processedInventory.colorMedia = incomingColorMedia;
+            }
 
             return processedData;
         } catch (error) {

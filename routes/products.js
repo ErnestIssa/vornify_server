@@ -6,6 +6,7 @@ const translationService = require('../services/translationService');
 const productTranslationHelper = require('../services/productTranslationHelper');
 const seoHelper = require('../utils/seoHelper');
 const reviewStatsHelper = require('../utils/reviewStatsHelper');
+const variantService = require('../services/variantService');
 const vatService = require('../services/vatService');
 const currencySelectionService = require('../services/currencySelectionService');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
@@ -552,6 +553,17 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
                         sortOrder: variant.sortOrder !== undefined ? variant.sortOrder : index
                     }));
                 }
+
+                // Color-specific media map (premium variants)
+                if (product.inventory.colorMedia && Array.isArray(product.inventory.colorMedia)) {
+                    product.inventory.colorMedia = product.inventory.colorMedia.map((m, index) => ({
+                        colorId: m.colorId,
+                        media: Array.isArray(m.media) ? m.media : (Array.isArray(m.images) ? m.images : []),
+                        imagePublicIds: Array.isArray(m.imagePublicIds) ? m.imagePublicIds : [],
+                        sortOrder: m.sortOrder !== undefined ? m.sortOrder : index,
+                        active: m.active !== undefined ? m.active : true
+                    }));
+                }
             }
             normalizeProductForResponse(product);
             
@@ -969,6 +981,25 @@ router.post('/', authenticateAdmin, async (req, res) => {
                 code: 'VALIDATION_ERROR'
             });
         }
+
+        // Premium variants: normalize + validate per-color image mapping (backend source of truth).
+        if (productData.inventory) {
+            productData.inventory = variantService.normalizeInventoryColorMedia(productData.inventory);
+            const enforceOnDraft = process.env.ENFORCE_COLOR_IMAGES_ON_DRAFT === 'true';
+            const cmValidation = variantService.validateColorMediaPolicy({
+                inventory: productData.inventory,
+                published: productData.published === true,
+                enforceOnDraft
+            });
+            if (!cmValidation.valid) {
+                return res.status(400).json({
+                    success: false,
+                    error: cmValidation.error,
+                    code: cmValidation.code || 'VALIDATION_ERROR',
+                    missingColorIds: cmValidation.missingColorIds || []
+                });
+            }
+        }
         
         // Product detail content (Size & Fit, Materials, Shipping & Returns) – required for complete product
         const detailValidation = validateProductDetailContent(productData, false);
@@ -1131,6 +1162,24 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
         
         // Process inventory if provided (processInventoryData returns full doc; we only set .inventory)
         if (updateData.inventory) {
+            // Premium variants: normalize + validate per-color image mapping (backend source of truth).
+            updateData.inventory = variantService.normalizeInventoryColorMedia(updateData.inventory);
+            const enforceOnDraft = process.env.ENFORCE_COLOR_IMAGES_ON_DRAFT === 'true';
+            const mergedPublished = hasPublishedInBody ? (publishedFromRequest === true) : (existingProduct.published === true);
+            const cmValidation = variantService.validateColorMediaPolicy({
+                inventory: updateData.inventory,
+                published: mergedPublished,
+                enforceOnDraft
+            });
+            if (!cmValidation.valid) {
+                return res.status(400).json({
+                    success: false,
+                    error: cmValidation.error,
+                    code: cmValidation.code || 'VALIDATION_ERROR',
+                    missingColorIds: cmValidation.missingColorIds || []
+                });
+            }
+
             const mergedForInventory = { ...existingProduct, ...updateData };
             const processed = db.processInventoryData(mergedForInventory);
             updateData.inventory = processed.inventory;

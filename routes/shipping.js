@@ -10,7 +10,9 @@ const router = express.Router();
 // ---------- Address validation (used by POST /options) ----------
 
 function validateDeliveryOptionsAddress(address) {
-    const required = ['street', 'postalCode', 'country'];
+    // For delivery options we only need enough to resolve a zone/methods.
+    // Street is not required to quote shipping methods.
+    const required = ['postalCode', 'country'];
     const missing = required.filter(field => !address[field]);
     if (missing.length > 0) {
         throw new Error(`Missing required address fields: ${missing.join(', ')}`);
@@ -101,10 +103,21 @@ function validateShippingAddress(address) {
     if (formatError) {
         return { valid: false, error: { success: false, validationError: true, error: formatError.message, field: formatError.field, details: { postalCode, country, issue: formatError.issue } } };
     }
+    // IMPORTANT: Do not hard-fail on city↔postal-code mismatch here.
+    // Some address providers use different spellings/municipalities, and we still want to show shipping methods.
+    // We'll return a warning instead and continue.
     if (city) {
         const cityError = validatePostalCodeCityMatch(postalCode, city, country);
         if (cityError) {
-            return { valid: false, error: { success: false, validationError: true, error: cityError.message, field: cityError.field, suggestedCity: cityError.suggestedCity, details: { postalCode, city, country, issue: cityError.issue } } };
+            return {
+                valid: true,
+                warning: {
+                    warningCode: 'CITY_POSTAL_MISMATCH',
+                    message: cityError.message,
+                    suggestedCity: cityError.suggestedCity || null,
+                    details: { postalCode, city, country, issue: cityError.issue }
+                }
+            };
         }
     }
     const countryUpper = (country || '').toUpperCase();
@@ -125,17 +138,19 @@ router.post('/options', async (req, res) => {
     try {
         const { country, postalCode, street, city, currency } = req.body;
 
-        if (!country || !postalCode || !street) {
+        if (!country || !postalCode) {
             return res.status(400).json({
                 success: false,
-                error: 'Missing required fields: country, postalCode, and street are required'
+                error: 'Missing required fields: country and postalCode are required',
+                errorCode: 'MISSING_REQUIRED_FIELD',
+                validationError: true
             });
         }
 
         const recipientAddress = {
             country: country.toUpperCase(),
             postalCode: postalCode,
-            street: street,
+            street: street || '',
             city: city || ''
         };
 
@@ -149,6 +164,7 @@ router.post('/options', async (req, res) => {
                 validationError: true
             });
         }
+        const addressWarning = addressValidation.warning || null;
 
         const shippingConfigService = require('../services/shippingConfigService');
         const municipality = req.body.municipality || city || '';
@@ -170,6 +186,7 @@ router.post('/options', async (req, res) => {
                 deliveryOptions: { home, servicePoint, parcelLocker, mailbox, all: allOptions },
                 zone: dbZone ? (dbZone.name || dbZone._id?.toString()) : null,
                 address: { country: recipientAddress.country, postalCode: recipientAddress.postalCode, street: recipientAddress.street, city: recipientAddress.city || null },
+                warning: addressWarning,
                 currency: (dbOptions[0] && dbOptions[0].currency) || 'SEK',
                 baseCurrency: 'SEK',
                 exchangeRate: 1,
@@ -192,6 +209,7 @@ router.post('/options', async (req, res) => {
             deliveryOptions: { home: [], servicePoint: [], parcelLocker: [], mailbox: [], all: [] },
             zone: dbZone.name || dbZone._id?.toString(),
             address: { country: recipientAddress.country, postalCode: recipientAddress.postalCode, street: recipientAddress.street, city: recipientAddress.city || null },
+            warning: addressWarning,
             currency: 'SEK',
             baseCurrency: 'SEK',
             exchangeRate: 1,
