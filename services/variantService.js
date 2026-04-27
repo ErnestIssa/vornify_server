@@ -132,8 +132,146 @@ function buildLegacyFallbackColorMedia(inventory, globalMedia, globalPublicIds) 
     return { ...inventory, colorMedia };
 }
 
+/**
+ * Per-color size × stock matrix for admin + storefront convenience.
+ *
+ * Source of truth remains inventory.variants[]: one row per (colorId, sizeId) with quantity, sku, etc.
+ * This view aggregates duplicates (same color+size) by summing quantity; last row wins for sku/price if duplicated.
+ */
+function buildColorSizeMatrix(inventory) {
+    if (!inventory || typeof inventory !== 'object') return null;
+
+    const colors = Array.isArray(inventory.colors) ? inventory.colors : [];
+    const sizeCatalog = Array.isArray(inventory.sizes) ? inventory.sizes : [];
+    const variants = Array.isArray(inventory.variants) ? inventory.variants : [];
+    if (!colors.length || !sizeCatalog.length) return null;
+
+    const sizeById = new Map(
+        sizeCatalog
+            .filter((s) => s && s.id)
+            .map((s) => [String(s.id), s])
+    );
+
+    const colorMeta = (colorId) => {
+        const c = colors.find((x) => x && x.id === colorId);
+        return {
+            id: colorId,
+            name: c && c.name ? String(c.name) : '',
+            hex: c && c.hex ? String(c.hex) : '#000000',
+            colorAvailable: c ? c.available !== false : true
+        };
+    };
+
+    const pairMap = new Map();
+    for (const v of variants) {
+        if (!v || typeof v !== 'object') continue;
+        const colorId = toStringId(v.colorId);
+        const sizeId = toStringId(v.sizeId);
+        if (!colorId || !sizeId) continue;
+
+        const key = `${colorId}::${sizeId}`;
+        const rawQty = v.quantity !== undefined ? Number(v.quantity) : v.stock !== undefined ? Number(v.stock) : 0;
+        const safeQty = Number.isFinite(rawQty) ? Math.max(0, Math.floor(rawQty)) : 0;
+        const rowAvailable = v.available !== false;
+        const sObj = sizeById.get(sizeId);
+
+        const base = {
+            sizeId,
+            sizeName: (sObj && sObj.name) || sizeId,
+            sizeDescription: (sObj && sObj.description) || '',
+            sizeSortOrder: typeof (sObj && sObj.sortOrder) === 'number' ? sObj.sortOrder : 0,
+            sizeOptionAvailable: sObj ? sObj.available !== false : true,
+            quantity: 0,
+            availableForSale: rowAvailable,
+            sku: toStringId(v.sku) || null,
+            price: v.price,
+            variantId: v.id != null ? v.id : null
+        };
+
+        if (!pairMap.has(key)) {
+            pairMap.set(key, { ...base, quantity: safeQty });
+        } else {
+            const cur = pairMap.get(key);
+            cur.quantity += safeQty;
+            cur.availableForSale = cur.availableForSale && rowAvailable;
+            if (toStringId(v.sku)) cur.sku = toStringId(v.sku);
+            if (v.price !== undefined) cur.price = v.price;
+            if (v.id != null) cur.variantId = v.id;
+        }
+    }
+
+    const byColor = colors
+        .filter((c) => c && c.id)
+        .map((c) => toStringId(c.id))
+        .map((colorId) => {
+            const meta = colorMeta(colorId);
+            const sizesForColor = sizeCatalog
+                .filter((s) => s && s.id)
+                .map((s) => toStringId(s.id))
+                .map((sizeId) => {
+                    const key = `${colorId}::${sizeId}`;
+                    const merged = pairMap.get(key);
+                    const sRow = sizeById.get(sizeId) || {};
+                    const hasVariantRow = !!merged;
+                    const q = merged ? merged.quantity : 0;
+                    const canSell =
+                        meta.colorAvailable &&
+                        sRow.available !== false &&
+                        (merged ? merged.availableForSale : true) &&
+                        q > 0;
+                    return {
+                        sizeId,
+                        name: sRow.name || sizeId,
+                        description: sRow.description || '',
+                        sortOrder: typeof sRow.sortOrder === 'number' ? sRow.sortOrder : 0,
+                        hasVariant: hasVariantRow,
+                        quantity: q,
+                        inStock: q > 0,
+                        canAddToCart: canSell,
+                        sku: merged ? merged.sku : null,
+                        price: merged && merged.price !== undefined ? merged.price : undefined
+                    };
+                });
+
+            const offeredSizes = sizesForColor.filter((r) => r.hasVariant);
+            const inStockSizes = offeredSizes.filter((r) => r.inStock);
+            const totalUnits = offeredSizes.reduce((acc, r) => acc + (r.quantity || 0), 0);
+
+            return {
+                ...meta,
+                sizes: sizesForColor,
+                offeredSizeCount: offeredSizes.length,
+                inStockSizeCount: inStockSizes.length,
+                totalUnits,
+                hasAnyInventory: totalUnits > 0
+            };
+        });
+
+    const lookup = {};
+    for (const c of byColor) {
+        const m = {};
+        for (const s of c.sizes) {
+            m[s.sizeId] = {
+                quantity: s.quantity,
+                inStock: s.inStock,
+                canAddToCart: s.canAddToCart,
+                hasVariant: s.hasVariant,
+                sku: s.sku
+            };
+        }
+        lookup[c.id] = m;
+    }
+
+    return {
+        version: 1,
+        byColor,
+        lookupByColorId: lookup
+    };
+}
+
 module.exports = {
     normalizeInventoryColorMedia,
     validateColorMediaPolicy,
-    buildLegacyFallbackColorMedia
+    buildLegacyFallbackColorMedia,
+    buildColorSizeMatrix
 };

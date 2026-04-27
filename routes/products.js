@@ -139,6 +139,14 @@ function normalizeProductForResponse(product) {
             quantity: v.quantity !== undefined ? v.quantity : (v.stock !== undefined ? v.stock : 0)
         }));
     }
+    if (inv) {
+        const matrix = variantService.buildColorSizeMatrix(inv);
+        if (matrix) {
+            inv.colorSizeMatrix = matrix;
+        } else {
+            delete inv.colorSizeMatrix;
+        }
+    }
     return product;
 }
 

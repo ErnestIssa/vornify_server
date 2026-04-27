@@ -526,6 +526,9 @@ class VortexDB {
                 processedInventory.colorMedia = incomingColorMedia;
             }
 
+            // Server-computed API projection only (GET); do not store even if a client posts it
+            delete processedInventory.colorSizeMatrix;
+
             return processedData;
         } catch (error) {
             console.error('Error processing inventory data:', error);
