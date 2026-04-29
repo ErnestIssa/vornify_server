@@ -219,6 +219,16 @@ function buildColorSizeMatrix(inventory) {
                         sRow.available !== false &&
                         (merged ? merged.availableForSale : true) &&
                         q > 0;
+                    let storefrontBadge = 'not_offered';
+                    if (hasVariantRow && merged) {
+                        if (!merged.availableForSale) {
+                            storefrontBadge = q > 0 ? 'merchant_paused' : 'merchant_blocked';
+                        } else if (q > 0) {
+                            storefrontBadge = 'in_stock';
+                        } else {
+                            storefrontBadge = 'out_of_stock';
+                        }
+                    }
                     return {
                         sizeId,
                         name: sRow.name || sizeId,
@@ -228,6 +238,7 @@ function buildColorSizeMatrix(inventory) {
                         quantity: q,
                         inStock: q > 0,
                         canAddToCart: canSell,
+                        storefrontBadge,
                         sku: merged ? merged.sku : null,
                         price: merged && merged.price !== undefined ? merged.price : undefined
                     };
@@ -256,6 +267,7 @@ function buildColorSizeMatrix(inventory) {
                 inStock: s.inStock,
                 canAddToCart: s.canAddToCart,
                 hasVariant: s.hasVariant,
+                storefrontBadge: s.storefrontBadge,
                 sku: s.sku
             };
         }
@@ -263,7 +275,10 @@ function buildColorSizeMatrix(inventory) {
     }
 
     return {
-        version: 1,
+        version: 2,
+        storefront: inventory.storefront && typeof inventory.storefront === 'object'
+            ? { showListingWhenFullySoldOut: !!(inventory.storefront.showListingWhenFullySoldOut === true) }
+            : { showListingWhenFullySoldOut: false },
         byColor,
         lookupByColorId: lookup
     };

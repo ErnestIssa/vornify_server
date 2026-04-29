@@ -121,12 +121,21 @@ function validateCloudinaryMedia(media, imagePublicIds) {
  * @param {Object} product - Raw product from DB
  * @returns {Object} - Same object with id and variant.quantity guaranteed
  */
+function ensureInventoryStorefrontDefaults(inv) {
+    if (!inv) return;
+    if (!inv.storefront || typeof inv.storefront !== 'object') inv.storefront = {};
+    if (typeof inv.storefront.showListingWhenFullySoldOut !== 'boolean') {
+        inv.storefront.showListingWhenFullySoldOut = false;
+    }
+}
+
 function normalizeProductForResponse(product) {
     if (!product) return product;
     if (!product.id && product._id) {
         product.id = typeof product._id === 'string' ? product._id : product._id.toString();
     }
     const inv = product.inventory;
+    ensureInventoryStorefrontDefaults(inv);
     if (inv && inv.variants && Array.isArray(inv.variants)) {
         inv.variants = inv.variants.map(v => ({
             ...v,
@@ -979,13 +988,14 @@ router.post('/', authenticateAdmin, async (req, res) => {
             });
         }
         
-        // At least one variant with quantity > 0 (inventory.variants or top-level variants)
+        // At least one variant with quantity > 0 unless merchant opts into “visible when sold out” (inventory.storefront.showListingWhenFullySoldOut).
         const variants = productData.inventory?.variants || productData.variants || [];
         const hasVariantWithStock = Array.isArray(variants) && variants.some(v => (v.quantity ?? v.stock ?? 0) > 0);
-        if (!hasVariantWithStock) {
+        const allowAllZeroSku = productData.inventory?.storefront?.showListingWhenFullySoldOut === true;
+        if (!hasVariantWithStock && !allowAllZeroSku) {
             return res.status(400).json({
                 success: false,
-                error: 'At least one variant with quantity > 0 is required',
+                error: 'At least one variant with quantity > 0 is required (or set inventory.storefront.showListingWhenFullySoldOut to true)',
                 code: 'VALIDATION_ERROR'
             });
         }

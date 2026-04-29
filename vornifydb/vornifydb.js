@@ -529,6 +529,15 @@ class VortexDB {
             // Server-computed API projection only (GET); do not store even if a client posts it
             delete processedInventory.colorSizeMatrix;
 
+            // Storefront catalog behavior (merchant-controlled); optional on legacy products until next save
+            const sfIncoming = processedInventory.storefront && typeof processedInventory.storefront === 'object'
+                ? processedInventory.storefront
+                : {};
+            processedInventory.storefront = {
+                /** When true, storefront may keep PDP / listing visible when every variant qty is 0 (see ADMIN docs). Default false preserves legacy UX. */
+                showListingWhenFullySoldOut: sfIncoming.showListingWhenFullySoldOut === true
+            };
+
             return processedData;
         } catch (error) {
             console.error('Error processing inventory data:', error);
