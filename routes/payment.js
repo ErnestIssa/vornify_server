@@ -1497,16 +1497,52 @@ router.post('/payment-failed', async (req, res) => {
             command: '--read',
             data: { orderId }
         });
-        
-        if (!findResult.success || !findResult.data) {
-            console.warn(`⚠️ [PAYMENT FAILURE] Order ${orderId} not found when handling payment failure from frontend`);
-            return res.status(404).json({
-                success: false,
-                error: 'Order not found'
+
+        const order = findResult.success ? normalizeReadFirst(findResult.data) : null;
+
+        // Checkout often uses TEMP ids or creates the orders row only after payment — do not 404:
+        // the client still needs 200 + checkoutNavigation to reach the payment-failed page.
+        if (!order) {
+            console.warn(
+                `⚠️ [PAYMENT FAILURE] Order ${orderId} not in DB (draft / pre-submit) — acknowledging, optional PI snapshot`
+            );
+
+            let paymentIntentObj = null;
+            if (paymentIntentId) {
+                try {
+                    paymentIntentObj = await stripe.paymentIntents.retrieve(paymentIntentId);
+                } catch (piErr) {
+                    console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve PaymentIntent for orphan failure:', piErr.message);
+                }
+            }
+
+            if (paymentIntentObj) {
+                const paymentFailureService = require('../services/paymentFailureService');
+                const syntheticOrder = {
+                    orderId,
+                    items: [],
+                    totals: { total: paymentIntentObj.amount / 100 },
+                    paymentStatus: 'failed'
+                };
+                try {
+                    const saveResult = await paymentFailureService.saveFailedCheckout(paymentIntentObj, syntheticOrder);
+                    if (!saveResult?.success) {
+                        console.warn('⚠️ [PAYMENT FAILURE] saveFailedCheckout (no order row):', saveResult?.error);
+                    }
+                } catch (saveErr) {
+                    console.warn('⚠️ [PAYMENT FAILURE] saveFailedCheckout exception:', saveErr.message);
+                }
+            }
+
+            return res.json({
+                success: true,
+                message: 'Payment failure noted (order record not created yet)',
+                orderId,
+                paymentIntentId: paymentIntentId || null,
+                orderNotFound: true,
+                ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true })
             });
         }
-        
-        const order = findResult.data;
         
         // Only update if payment hasn't succeeded yet
         if (order.paymentStatus !== 'succeeded') {
