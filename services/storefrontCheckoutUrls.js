@@ -25,6 +25,49 @@ function joinUrl(base, path) {
 }
 
 /**
+ * Env paths may be set as "/payment-failed" or mistakenly as a full URL.
+ * Full URLs must be reduced to pathname (+ search) before joining with STOREFRONT_URL,
+ * or you get: base + "/https://host/path" → "https://host/https://host/path".
+ */
+function normalizePathConfig(raw, defaultPath) {
+    const d = defaultPath.startsWith('/') ? defaultPath : `/${defaultPath}`;
+    const s = String(raw || '').trim();
+    if (!s) return d;
+    if (/^https?:\/\//i.test(s)) {
+        try {
+            const u = new URL(s);
+            return u.pathname + u.search;
+        } catch {
+            return d;
+        }
+    }
+    // e.g. env copy-paste "/https://peakmode.se/payment-failed" → "/payment-failed"
+    if (/^\/https?:\/\//i.test(s)) {
+        try {
+            const u = new URL(s.slice(1));
+            return u.pathname + u.search;
+        } catch {
+            return d;
+        }
+    }
+    return s.startsWith('/') ? s : `/${s}`;
+}
+
+function pathnameForSpa(pathnameAndSearch) {
+    const i = pathnameAndSearch.indexOf('?');
+    return i === -1 ? pathnameAndSearch : pathnameAndSearch.slice(0, i);
+}
+
+/** Build one canonical absolute URL: prefer URL(base + path), never string-concat base + fullUrl. */
+function absoluteUrlFromBase(baseTrimmed, pathnameAndSearch) {
+    try {
+        return new URL(pathnameAndSearch, `${baseTrimmed}/`).href;
+    } catch {
+        return joinUrl(baseTrimmed, pathnameAndSearch);
+    }
+}
+
+/**
  * Shared Stripe PaymentIntent options: SCA / 3DS for cards + redirect methods (Klarna, etc.).
  * Use on create and on amount update so intent never loses security settings.
  */
@@ -45,20 +88,18 @@ function getPaymentIntentSecurityOptions() {
 
 function getCheckoutUrls() {
     const base = getStorefrontBaseUrl();
-    const failedPath = process.env.STOREFRONT_PAYMENT_FAILED_PATH || '/payment-failed';
-    const returnPath = process.env.STOREFRONT_PAYMENT_RETURN_PATH || '/checkout';
-    const successPath = process.env.STOREFRONT_ORDER_SUCCESS_PATH || '/thank-you';
+    const failedNorm = normalizePathConfig(process.env.STOREFRONT_PAYMENT_FAILED_PATH, '/payment-failed');
+    const returnNorm = normalizePathConfig(process.env.STOREFRONT_PAYMENT_RETURN_PATH, '/checkout');
+    const successNorm = normalizePathConfig(process.env.STOREFRONT_ORDER_SUCCESS_PATH, '/thank-you');
 
-    const paymentFailedUrl = base ? joinUrl(base, failedPath) : null;
-    const confirmPaymentReturnUrl = base ? joinUrl(base, returnPath) : null;
-    const orderSuccessUrl = base ? joinUrl(base, successPath) : null;
+    const paymentFailedUrl = base ? absoluteUrlFromBase(base, failedNorm) : null;
+    const confirmPaymentReturnUrl = base ? absoluteUrlFromBase(base, returnNorm) : null;
+    const orderSuccessUrl = base ? absoluteUrlFromBase(base, successNorm) : null;
 
-    // Same routes as pathname+search only — use these with React Router `navigate()`, not the
-    // absolute URLs (passing `https://host/path` to navigate() is treated as a relative segment
-    // and becomes `/https://host/path` → 404).
-    const fp = failedPath.startsWith('/') ? failedPath : `/${failedPath}`;
-    const rp = returnPath.startsWith('/') ? returnPath : `/${returnPath}`;
-    const sp = successPath.startsWith('/') ? successPath : `/${successPath}`;
+    // Pathname-only for React Router (query strings for failures are usually appended client-side).
+    const paymentFailedPath = pathnameForSpa(failedNorm);
+    const confirmPaymentReturnPath = pathnameForSpa(returnNorm);
+    const orderSuccessPath = pathnameForSpa(successNorm);
 
     return {
         baseUrl: base || null,
@@ -66,9 +107,9 @@ function getCheckoutUrls() {
         /** Pass to stripe.confirmPayment({ return_url }) for 3DS / bank / wallet redirects */
         confirmPaymentReturnUrl,
         orderSuccessUrl,
-        paymentFailedPath: fp,
-        confirmPaymentReturnPath: rp,
-        orderSuccessPath: sp,
+        paymentFailedPath,
+        confirmPaymentReturnPath,
+        orderSuccessPath,
         configured: Boolean(base)
     };
 }
