@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const path = require('path');
+const { buildStripePaymentCsp } = require('./config/contentSecurityPolicy');
 const fs = require('fs');
 const dbRoutes = require('./routes/db');
 const paymentRoutes = require('./routes/payment');
@@ -111,13 +112,19 @@ process.on('SIGINT', () => {
 app.use(cookieParser());
 
 // Security Headers Middleware (Defense in Depth)
+// CSP applies to EVERY response from this app. Browsers enforce CSP on HTML documents;
+// /api JSON responses carry the header but do not change CSP for HTML loaded from peakmode.se.
+// If checkout is only on a static/edge host, that host must emit its own CSP (or proxy HTML here).
 app.use((req, res, next) => {
-    // Content Security Policy - Prevents XSS
-    res.setHeader(
-        'Content-Security-Policy',
-        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:;"
-    );
-    
+    const cspPolicy = buildStripePaymentCsp();
+
+    // Enforce by default. Set CSP_REPORT_ONLY=1 to send only Report-Only (no enforce) — useful while tuning.
+    if (process.env.CSP_REPORT_ONLY === 'true' || process.env.CSP_REPORT_ONLY === '1') {
+        res.setHeader('Content-Security-Policy-Report-Only', cspPolicy);
+    } else {
+        res.setHeader('Content-Security-Policy', cspPolicy);
+    }
+
     // Prevent clickjacking
     res.setHeader('X-Frame-Options', 'DENY');
     

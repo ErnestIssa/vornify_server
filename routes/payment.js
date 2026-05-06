@@ -6,7 +6,8 @@ const emailService = require('../services/emailService');
 const storefrontCheckoutUrls = require('../services/storefrontCheckoutUrls');
 const {
     getPaymentIntentSecurityOptions,
-    checkoutNavigationExtras
+    checkoutNavigationExtras,
+    classifyPaymentFailure
 } = storefrontCheckoutUrls;
 
 // Validate Stripe configuration at startup
@@ -969,6 +970,37 @@ async function handleChargeRefunded(charge) {
  *   discountCode (optional)
  *   customerEmail, orderId, metadata (optional – for Stripe/customer)
  */
+
+/**
+ * GET /api/payments/checkout-navigation
+ * Returns checkoutNavigation URLs (payment failed, confirm return URL) without creating a PI.
+ * Use when Stripe.js throws client-side after confirmPayment (e.g. payment_intent_authentication_failure)
+ * and the SPA no longer has checkoutNavigation from create-intent in memory.
+ *
+ * Query (optional): stripeCode — e.g. payment_intent_authentication_failure → maps to failureCategory
+ */
+router.get('/checkout-navigation', (req, res) => {
+    try {
+        let failureHint = null;
+        const rawCode = req.query.stripeCode || req.query.code;
+        if (rawCode && typeof rawCode === 'string') {
+            const { failureCategory } = classifyPaymentFailure({ code: rawCode.trim() });
+            failureHint = failureCategory;
+        }
+        return res.json({
+            success: true,
+            purpose: 'Use after any terminal Stripe customer-facing error before navigate to paymentFailedUrl',
+            ...checkoutNavigationExtras({ shouldRedirectToFailurePage: Boolean(failureHint), failureHint })
+        });
+    } catch (error) {
+        console.error('[PAYMENTS] checkout-navigation error:', error);
+        return res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to build checkout navigation'
+        });
+    }
+});
+
 router.post('/create-intent', async (req, res) => {
     try {
         const body = req.body || {};
