@@ -252,8 +252,10 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
     if (cartExists) {
         // Cart exists - use delete + create for full replacement
         // This avoids MongoDB $set issues with arrays/nested objects
-        const originalId = originalCart._id;
-        
+        //
+        // Do NOT reuse originalCart._id on insert: parallel syncs both delete then insert with the
+        // same _id → E11000 duplicate key. Reads/writes key by userId only; a fresh _id is correct.
+
         // Remove all carts for this userId (idempotent); deleteOne falsely "failed" when
         // deletedCount === 0 (concurrent sync, or doc already gone) — see vornifydb deleteManyRecords.
         const deleteResult = await db.executeOperation({
@@ -270,14 +272,10 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
                 details: deleteResult.error || deleteResult.message || 'Database operation failed'
             };
         }
-        
-        // Preserve original _id if it exists
-        if (originalId) {
-            cart._id = originalId;
-        }
-        
+
         // Create new cart with updated data - ensure we pass a plain object
-        const cartToSave = { ...cart }; // Create a shallow copy to ensure it's a plain object
+        const cartToSave = { ...cart };
+        delete cartToSave._id;
         const createResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
@@ -288,7 +286,8 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
         return createResult;
     } else {
         // Cart doesn't exist - create new one - ensure we pass a plain object
-        const cartToSave = { ...cart }; // Create a shallow copy to ensure it's a plain object
+        const cartToSave = { ...cart };
+        delete cartToSave._id;
         return await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
