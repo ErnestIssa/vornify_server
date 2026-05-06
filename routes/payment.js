@@ -3,6 +3,11 @@ const router = express.Router();
 const VornifyPay = require('../vornifypay/vornifypay');
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
+const storefrontCheckoutUrls = require('../services/storefrontCheckoutUrls');
+const {
+    getPaymentIntentSecurityOptions,
+    checkoutNavigationExtras
+} = storefrontCheckoutUrls;
 
 // Validate Stripe configuration at startup
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -1141,33 +1146,10 @@ router.post('/create-intent', async (req, res) => {
             amount: amountInCents,
             currency: currencyLower,
             metadata: paymentMetadata,
-            // PaymentElement requires automatic_payment_methods (not payment_method_types)
-            // This enables Stripe to automatically show available payment methods:
-            // - Card (credit/debit cards)
-            // - Link (if customer has it saved)
-            // - Klarna (if available for amount/currency)
-            // - Apple Pay (if device supports it)
-            // - Google Pay (if device supports it)
-            // - Other wallet payment methods enabled in Stripe Dashboard
-            automatic_payment_methods: {
-                enabled: true,
-                allow_redirects: 'always' // Allows redirect-based payment methods like Klarna
-            },
-            // Enable 3D Secure authentication for card payments (SCA compliance)
-            // CRITICAL: 3DS must trigger for all card payments (SCA/PSD2 requirement)
-            // 'any' means: Always request 3DS if the card supports it (forces 3DS for all cards)
-            // This ensures SCA compliance and better security
-            payment_method_options: {
-                card: {
-                    request_three_d_secure: 'any' // Force 3DS for all card payments (SCA compliance)
-                    // 'any' ensures 3DS is requested for all cards that support it
-                    // This provides better security and SCA compliance
-                }
-            }
-            // Note: 
-            // - Removed setup_future_usage to ensure PaymentElement compatibility
-            // - confirmation_method is NOT needed with automatic_payment_methods (they conflict)
-            // - PaymentElement handles confirmation via stripe.confirmPayment() on frontend
+            // Cards: request 3DS whenever supported (issuer/bank portal) before capture.
+            // Wallets / Klarna: automatic_payment_methods + allow_redirects (issuer/hosted flows).
+            ...getPaymentIntentSecurityOptions()
+            // PaymentElement: confirm only on submit; 3DS and redirects run inside confirmPayment().
         };
 
         // Add customer if email provided
@@ -1286,7 +1268,7 @@ router.post('/create-intent', async (req, res) => {
         console.log(`✅ [PAYMENT] Automatic payment methods allow_redirects: ${paymentIntent.automatic_payment_methods?.allow_redirects || 'Not set'}`);
         console.log(`✅ [PAYMENT] Payment method types (auto-determined by Stripe): ${paymentIntent.payment_method_types?.join(', ') || 'None (auto-determined)'}`);
         console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
-        console.log(`🔐 [PAYMENT] 3D Secure configuration: ${paymentIntent.payment_method_options?.card?.request_three_d_secure || 'Not set'} (should be 'automatic' for SCA compliance)`);
+        console.log(`🔐 [PAYMENT] 3D Secure configuration: ${paymentIntent.payment_method_options?.card?.request_three_d_secure || 'Not set'} (expect 'any' for strong SCA)`);
         console.log(`📱 [PAYMENT] Mobile support: ${isMobile ? 'Mobile device detected - Apple Pay/Google Pay should be available' : 'Desktop device'}`);
         
         // Log the complete payment intent object for debugging (redact sensitive data)
@@ -1355,7 +1337,9 @@ router.post('/create-intent', async (req, res) => {
             afterVerificationCancelShowPaymentMethods: true,
             clientInstructions: {
                 doNotConfirmUntil: 'User has clicked the "Complete my order" (or equivalent) button. Do not call stripe.confirmPayment() on mount, on payment method change, or on field blur.',
-                afterVerificationCancel: 'If the user exits or cancels the verification (e.g. 3DS), keep the payment section visible and allow choosing another payment method; do not hide or disable the Payment Element. Optionally request a new clientSecret via create-intent if the intent is no longer in requires_payment_method.'
+                afterVerificationCancel: 'If the user exits or cancels the verification (e.g. 3DS), keep the payment section visible and allow choosing another payment method; do not hide or disable the Payment Element. Optionally request a new clientSecret via create-intent if the intent is no longer in requires_payment_method.',
+                onTerminalFailure: 'Navigate to checkoutNavigation.paymentFailedUrl (or equivalent route). Call POST /api/payments/payment-failed with orderId + paymentIntentId when possible.',
+                returnUrlForConfirmPayment: 'Use checkoutNavigation.confirmPaymentReturnUrl as stripe.confirmPayment({ return_url }) so 3DS and redirect-based PMs return to your SPA.'
             },
             // Payment intent uses automatic_payment_methods (PaymentElement requirement)
             automaticPaymentMethods: {
@@ -1376,10 +1360,15 @@ router.post('/create-intent', async (req, res) => {
                 isMobile: isMobile,
                 platform: deviceInfo.platform
             },
+            authenticationPolicy: {
+                cardsThreeDSecure: paymentIntent.payment_method_options?.card?.request_three_d_secure || 'not_set',
+                redirectPaymentMethods: 'automatic_payment_methods.allow_redirects is always so Klarna/hosted methods use provider flows before success.',
+                note: 'Funds are not captured until Stripe confirms the PaymentIntent after authentication and issuer checks. Do not advance order UX until status is succeeded (or processing for async methods).'
+            },
             threeDSecure: {
-                configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'automatic',
+                configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'any',
                 request_three_d_secure: paymentIntent.payment_method_options?.card?.request_three_d_secure || 'not_set',
-                note: '3DS runs only after the client calls confirmPayment(); do not confirm until user clicks Complete my order.'
+                note: '3DS runs when the user submits payment via confirmPayment(); do not confirm until user clicks Complete my order.'
             },
             debug: {
                 automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled,
@@ -1387,7 +1376,8 @@ router.post('/create-intent', async (req, res) => {
                 requires_payment_method: paymentIntent.status === 'requires_payment_method',
                 three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'any',
                 device: deviceInfo.platform
-            }
+            },
+            ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
         const userAgent = req.headers['user-agent'] || '';
@@ -1425,7 +1415,8 @@ router.post('/create-intent', async (req, res) => {
                 type: error.type,
                 code: error.code,
                 message: error.message
-            } : undefined
+            } : undefined,
+            ...checkoutNavigationExtras()
         });
     }
 });
@@ -1551,7 +1542,8 @@ router.post('/payment-failed', async (req, res) => {
             success: true,
             message: 'Payment failure recorded',
             orderId: orderId,
-            paymentIntentId: paymentIntentId || order.paymentIntentId || null
+            paymentIntentId: paymentIntentId || order.paymentIntentId || null,
+            ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true })
         });
         
     } catch (error) {
@@ -1689,7 +1681,9 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
                 vatAmount: (totals.vatAmount || 0).toString(),
                 discountAmount: (totals.discountAmount || 0).toString(),
                 updatedAt: new Date().toISOString()
-            }
+            },
+            // Keep SCA / 3DS + redirect PM settings in sync with create-intent
+            ...getPaymentIntentSecurityOptions()
         };
 
         const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
@@ -1707,7 +1701,8 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
             paymentIntentId: paymentIntent.id,
             amount: paymentIntent.amount / 100,
             currency: paymentIntent.currency,
-            status: paymentIntent.status
+            status: paymentIntent.status,
+            ...checkoutNavigationExtras({ paymentIntent })
         });
 
     } catch (error) {
@@ -1882,7 +1877,8 @@ router.post('/confirm', async (req, res) => {
                 alreadyConfirmed: true,
                 shouldRedirectToSuccess: true,
                 userMessage: 'Your payment was already completed. Redirecting you to your order confirmation…',
-                message: 'Payment was already confirmed'
+                message: 'Payment was already confirmed',
+                ...checkoutNavigationExtras({ paymentIntent })
             });
         }
 
@@ -1898,7 +1894,8 @@ router.post('/confirm', async (req, res) => {
                 message: 'Payment is already being processed - do not call confirmCardPayment again',
                 action: 'wait_for_webhook', // Frontend should wait for webhook or poll status
                 shouldNotConfirm: true, // Explicit flag for frontend
-                userMessage: 'Your payment is processing. Please wait a moment—do not refresh or try again.'
+                userMessage: 'Your payment is processing. Please wait a moment—do not refresh or try again.',
+                ...checkoutNavigationExtras({ paymentIntent })
             });
         }
 
@@ -1908,7 +1905,9 @@ router.post('/confirm', async (req, res) => {
                 error: 'Payment intent has been canceled',
                 paymentStatus: 'canceled',
                 code: 'payment_canceled',
-                userMessage: 'This payment was canceled. Please try again.'
+                userMessage: 'This payment was canceled. Please try again.',
+                shouldRedirectToPaymentFailedPage: true,
+                ...checkoutNavigationExtras({ paymentIntent, shouldRedirectToFailurePage: true })
             });
         }
 
@@ -1978,17 +1977,26 @@ router.post('/confirm', async (req, res) => {
             }
         });
 
+        const terminalFailure =
+            paymentIntent.status === 'canceled' ||
+            (paymentStatus === 'failed' && paymentIntent.last_payment_error);
+
         res.json({
             success: true,
             paymentStatus: paymentIntent.status,
             orderId: targetOrderId,
             amount: paymentIntent.amount / 100,
             currency: paymentIntent.currency,
+            orderPaymentStatus: paymentStatus,
+            lastPaymentError: paymentIntent.last_payment_error || null,
+            shouldRedirectToPaymentFailedPage: terminalFailure,
+            shouldRedirectToSuccess: paymentStatus === 'succeeded',
             userMessage: paymentStatus === 'succeeded'
                 ? 'Payment completed. Redirecting…'
                 : (paymentStatus === 'processing'
                     ? 'Your payment is processing. Please wait…'
-                    : 'Payment status updated.')
+                    : 'Payment status updated.'),
+            ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
         console.error('Confirm payment error:', error);
@@ -1996,7 +2004,9 @@ router.post('/confirm', async (req, res) => {
             success: false,
             error: error.message || 'Failed to confirm payment',
             code: error.code || 'payment_confirmation_failed',
-            userMessage: 'We could not confirm your payment. Please try again, or use another payment method.'
+            userMessage: 'We could not confirm your payment. Please try again, or use another payment method.',
+            shouldRedirectToPaymentFailedPage: true,
+            ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true })
         });
     }
 });
@@ -2060,6 +2070,10 @@ router.get('/status/:paymentIntentId', async (req, res) => {
         const isProcessing = paymentIntent.status === 'processing';
         const isCompleted = ['succeeded', 'canceled'].includes(paymentIntent.status);
 
+        const failedTerminal =
+            paymentIntent.status === 'canceled' ||
+            (paymentIntent.status === 'requires_payment_method' && paymentIntent.last_payment_error);
+
         res.json({
             success: true,
             paymentIntentId: paymentIntent.id,
@@ -2068,16 +2082,19 @@ router.get('/status/:paymentIntentId', async (req, res) => {
             currency: paymentIntent.currency,
             orderId: paymentIntent.metadata.orderId,
             created: new Date(paymentIntent.created * 1000).toISOString(),
+            lastPaymentError: paymentIntent.last_payment_error || null,
             canConfirm,
             isProcessing,
             isCompleted,
+            shouldRedirectToPaymentFailedPage: failedTerminal,
             message: isProcessing 
                 ? 'Payment is currently being processed' 
                 : isCompleted 
                     ? `Payment is ${paymentIntent.status}` 
                     : canConfirm 
                         ? 'Payment can be confirmed' 
-                        : 'Payment status unknown'
+                        : 'Payment status unknown',
+            ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
         console.error('Get payment status error:', error);
@@ -2137,7 +2154,8 @@ router.post('/check-before-confirm', async (req, res) => {
                     ? `Payment is already ${status} - no confirmation needed`
                     : canConfirm 
                         ? 'Payment can be confirmed safely'
-                        : `Payment status is ${status} - check Stripe documentation`
+                        : `Payment status is ${status} - check Stripe documentation`,
+            ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
         console.error('Check before confirm error:', error);
