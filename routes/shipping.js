@@ -137,7 +137,7 @@ function validateShippingAddress(address) {
 router.post('/options', async (req, res) => {
     try {
         const { country, postalCode, street, city, currency } = req.body;
-
+        
         if (!country || !postalCode) {
             return res.status(400).json({
                 success: false,
@@ -146,16 +146,16 @@ router.post('/options', async (req, res) => {
                 validationError: true
             });
         }
-
+        
         const recipientAddress = {
             country: country.toUpperCase(),
             postalCode: postalCode,
             street: street || '',
             city: city || ''
         };
-
+        
         validateDeliveryOptionsAddress(recipientAddress);
-
+        
         const addressValidation = validateShippingAddress(recipientAddress);
         if (!addressValidation.valid) {
             return res.status(400).json({
@@ -203,7 +203,7 @@ router.post('/options', async (req, res) => {
                 field: 'country'
             });
         }
-
+        
         return res.json({
             success: true,
             deliveryOptions: { home: [], servicePoint: [], parcelLocker: [], mailbox: [], all: [] },

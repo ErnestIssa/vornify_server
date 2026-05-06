@@ -328,6 +328,7 @@ class VortexDB {
                 '--read': this.readRecords.bind(this),
                 '--update': this.updateRecord.bind(this),
                 '--delete': this.deleteRecord.bind(this),
+                '--delete-many': this.deleteManyRecords.bind(this),
                 '--verify': this.verifyRecord.bind(this),
                 '--append': this.appendRecord.bind(this),
                 '--update-field': this.updateField.bind(this),
@@ -828,6 +829,31 @@ class VortexDB {
             };
         } catch (error) {
             console.error('Error in deleteRecord:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    /**
+     * Delete all documents matching the filter (idempotent: zero matches still succeeds).
+     * Use for cart replace flows where deleteOne falsely "fails" when deletedCount === 0
+     * (race, or document already removed) before re-insert.
+     */
+    async deleteManyRecords(collection, query) {
+        try {
+            let normalizedQuery = query || {};
+            if (query && query._id != null && typeof query._id === 'string' && ObjectId.isValid(query._id)) {
+                normalizedQuery = { ...query, _id: new ObjectId(query._id) };
+            }
+            const result = await collection.deleteMany(normalizedQuery);
+            return {
+                success: true,
+                data: result
+            };
+        } catch (error) {
+            console.error('Error in deleteManyRecords:', error);
             return {
                 success: false,
                 error: error.message

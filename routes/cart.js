@@ -254,11 +254,12 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
         // This avoids MongoDB $set issues with arrays/nested objects
         const originalId = originalCart._id;
         
-        // Delete existing cart first
+        // Remove all carts for this userId (idempotent); deleteOne falsely "failed" when
+        // deletedCount === 0 (concurrent sync, or doc already gone) — see vornifydb deleteManyRecords.
         const deleteResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
-            command: '--delete',
+            command: '--delete-many',
             data: { userId }
         });
         
@@ -715,10 +716,18 @@ router.delete('/:userId/clear', async (req, res) => {
         const result = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'carts',
-            command: '--delete',
+            command: '--delete-many',
             data: { userId }
         });
-        
+
+        if (!result.success) {
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to clear cart',
+                details: result.error || result.message
+            });
+        }
+
         res.json({
             success: true,
             message: 'Cart cleared successfully'
