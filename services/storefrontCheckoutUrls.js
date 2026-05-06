@@ -53,12 +53,22 @@ function getCheckoutUrls() {
     const confirmPaymentReturnUrl = base ? joinUrl(base, returnPath) : null;
     const orderSuccessUrl = base ? joinUrl(base, successPath) : null;
 
+    // Same routes as pathname+search only — use these with React Router `navigate()`, not the
+    // absolute URLs (passing `https://host/path` to navigate() is treated as a relative segment
+    // and becomes `/https://host/path` → 404).
+    const fp = failedPath.startsWith('/') ? failedPath : `/${failedPath}`;
+    const rp = returnPath.startsWith('/') ? returnPath : `/${returnPath}`;
+    const sp = successPath.startsWith('/') ? successPath : `/${successPath}`;
+
     return {
         baseUrl: base || null,
         paymentFailedUrl,
         /** Pass to stripe.confirmPayment({ return_url }) for 3DS / bank / wallet redirects */
         confirmPaymentReturnUrl,
         orderSuccessUrl,
+        paymentFailedPath: fp,
+        confirmPaymentReturnPath: rp,
+        orderSuccessPath: sp,
         configured: Boolean(base)
     };
 }
@@ -95,8 +105,14 @@ function checkoutNavigationExtras(options = {}) {
             failureCategory: classification?.failureCategory || (failureHint || null),
             stripeDeclineOrErrorCode: classification?.stripeCode || null,
             frontendInstructions: urls.configured
-                ? 'On any terminal payment failure (decline, cancel, insufficient funds, 3DS abandon, network error after trying confirm), navigate to paymentFailedUrl (or your router equivalent). Pass orderId and paymentIntentId as query params if you use them.'
+                ? 'On failure, use checkoutNavigation.paymentFailedPath with query string for SPA navigate (e.g. navigate(paymentFailedPath + "?..." )). Do NOT pass paymentFailedUrl to react-router navigate() — absolute URLs are treated as relative paths and produce /https://.../route (404). Use paymentFailedUrl only with window.location.assign or <a href>.'
                 : 'Set STOREFRONT_URL (or FRONTEND_URL) on the server so paymentFailedUrl and confirmPaymentReturnUrl are returned for redirects.',
+            spaNavigation: {
+                paymentFailedPath: urls.paymentFailedPath,
+                confirmPaymentReturnPath: urls.confirmPaymentReturnPath,
+                orderSuccessPath: urls.orderSuccessPath,
+                rule: 'React Router: navigate(paymentFailedPath + searchParamsString). Full-page: location.assign(paymentFailedUrl).'
+            },
             confirmPayment: {
                 returnUrlMustMatch: urls.confirmPaymentReturnUrl,
                 note: 'Use confirmPaymentReturnUrl as return_url so users return to your app after bank/issuer or Klarna redirects. Then retrieve PaymentIntent status before showing success.'
