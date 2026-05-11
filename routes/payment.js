@@ -19,6 +19,7 @@ const { ensureIdempotencyKey } = require('../core/guards/idempotency');
 const { buildCartVersionSource, computeCartVersion } = require('../core/guards/cartVersion');
 const { logger } = require('../core/logging/logger');
 const { devLog, devWarn } = require('../core/logging/devConsole');
+const tiktokEvents = require('../services/tiktokEvents');
 
 // Validate Stripe configuration at startup (no secret material in logs)
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -281,10 +282,43 @@ async function resolveShippingMethodIdFromPayload(shippingMethod, body) {
     const b = body && typeof body === 'object' ? body : {};
     push(b.shippingMethodId);
     push(b.methodId);
-    if (b.deliveryOption && typeof b.deliveryOption === 'object') {
-        push(b.deliveryOption.id);
-        push(b.deliveryOption.methodId);
-        push(b.deliveryOption._id);
+    const pickDel = (d) => {
+        if (!d || typeof d !== 'object') return;
+        push(d.id);
+        push(d.methodId);
+        push(d._id);
+        push(d.shippingMethodId);
+    };
+    if (b.deliveryOption && typeof b.deliveryOption === 'object') pickDel(b.deliveryOption);
+    if (b.formData && typeof b.formData === 'object') {
+        const fd = b.formData;
+        push(fd.shippingMethodId);
+        push(fd.methodId);
+        if (fd.selectedDeliveryOption != null) {
+            if (typeof fd.selectedDeliveryOption === 'object') pickDel(fd.selectedDeliveryOption);
+            else push(fd.selectedDeliveryOption);
+        }
+        pickDel(fd.deliveryOption);
+    }
+    if (b.checkout && typeof b.checkout === 'object') {
+        const c = b.checkout;
+        push(c.shippingMethodId);
+        push(c.methodId);
+        pickDel(c.deliveryOption);
+        if (c.selectedDeliveryOption != null) {
+            if (typeof c.selectedDeliveryOption === 'object') pickDel(c.selectedDeliveryOption);
+            else push(c.selectedDeliveryOption);
+        }
+    }
+    if (b.orderData && typeof b.orderData === 'object') {
+        const o = b.orderData;
+        push(o.shippingMethodId);
+        push(o.methodId);
+        pickDel(o.deliveryOption);
+        if (o.selectedDeliveryOption != null) {
+            if (typeof o.selectedDeliveryOption === 'object') pickDel(o.selectedDeliveryOption);
+            else push(o.selectedDeliveryOption);
+        }
     }
     const seen = new Set();
     const unique = candidates.filter((x) => (seen.has(x) ? false : (seen.add(x), true)));
@@ -302,10 +336,130 @@ function extractShippingCountryRaw(shippingAddress) {
         a.country ||
         a.countryCode ||
         a.country_code ||
+        a.countryISO ||
+        a.countryIso ||
+        a.isoCountryCode ||
         a.Country ||
         a.nationality ||
         ''
     );
+}
+
+/**
+ * Storefront payloads vary (flat vs formData vs checkout). Normalize before validation.
+ */
+function mergePrepareCheckoutInput(body) {
+    const b = body && typeof body === 'object' ? body : {};
+    const fd = b.formData && typeof b.formData === 'object' ? b.formData : null;
+    const checkout = b.checkout && typeof b.checkout === 'object' ? b.checkout : null;
+    const od = b.orderData && typeof b.orderData === 'object' ? b.orderData : null;
+
+    let shippingAddress =
+        b.shippingAddress ||
+        b.customer ||
+        b.address ||
+        b.deliveryAddress ||
+        b.shipping_address ||
+        (typeof b.shipping === 'object' && b.shipping ? b.shipping : null) ||
+        (fd ? fd.shippingAddress || fd.address || fd.deliveryAddress : null) ||
+        (checkout ? checkout.shippingAddress || checkout.address : null) ||
+        (od ? od.shippingAddress || od.address || od.customer || od.deliveryAddress : null) ||
+        null;
+
+    const sameBilling =
+        b.sameAsBilling === true ||
+        b.shippingSameAsBilling === true ||
+        (fd && (fd.sameAsBilling === true || fd.shippingSameAsBilling === true)) ||
+        (od && (od.sameAsBilling === true || od.shippingSameAsBilling === true));
+    if ((!shippingAddress || typeof shippingAddress !== 'object') && sameBilling) {
+        const bill = b.billingAddress || (fd && fd.billingAddress) || (od && od.billingAddress);
+        if (bill && typeof bill === 'object') shippingAddress = bill;
+    }
+
+    const rootCountryFallback =
+        b.country ||
+        b.countryCode ||
+        b.country_code ||
+        (fd && (fd.country || fd.countryCode)) ||
+        (checkout && (checkout.country || checkout.countryCode)) ||
+        (od && (od.country || od.countryCode)) ||
+        '';
+    let looseCountry = (shippingAddress && String(extractShippingCountryRaw(shippingAddress) || '').trim()) || rootCountryFallback;
+    if (!shippingAddress || typeof shippingAddress !== 'object') {
+        if (rootCountryFallback || looseCountry) {
+            const ctry = looseCountry || rootCountryFallback;
+            shippingAddress = {
+                country: ctry,
+                countryCode: String(ctry).length === 2 ? String(ctry).toUpperCase() : undefined,
+                city: b.city || (fd && fd.city) || (od && od.city),
+                municipality:
+                    b.municipality ||
+                    (fd && fd.municipality) ||
+                    b.city ||
+                    (fd && fd.city) ||
+                    (od && (od.municipality || od.city)),
+                postalCode: b.postalCode || b.zip || (fd && (fd.postalCode || fd.zip)) || (od && (od.postalCode || od.zip)),
+                line1: b.addressLine1 || b.street || (fd && (fd.addressLine1 || fd.street)) || (od && (od.addressLine1 || od.street))
+            };
+        }
+    } else if (shippingAddress && !String(extractShippingCountryRaw(shippingAddress) || '').trim() && rootCountryFallback) {
+        shippingAddress = {
+            ...shippingAddress,
+            country: shippingAddress.country || rootCountryFallback,
+            countryCode: shippingAddress.countryCode || (String(rootCountryFallback).length === 2 ? String(rootCountryFallback).toUpperCase() : undefined)
+        };
+    }
+
+    let shippingMethod =
+        b.shippingMethod ||
+        (b.shippingMethodId ? { id: b.shippingMethodId, type: b.shippingMethodType } : null) ||
+        b.selectedShippingMethod ||
+        b.selectedDeliveryOption ||
+        b.delivery_option ||
+        (fd && (fd.shippingMethod || fd.selectedDeliveryOption || fd.deliveryOption)) ||
+        (checkout && (checkout.shippingMethod || checkout.selectedDeliveryOption)) ||
+        (od &&
+            (od.shippingMethod ||
+                (od.shippingMethodId ? { id: od.shippingMethodId, type: od.shippingMethodType } : null) ||
+                od.selectedDeliveryOption ||
+                od.deliveryOption)) ||
+        null;
+    if (shippingMethod != null && typeof shippingMethod !== 'object') {
+        shippingMethod = { id: String(shippingMethod).trim() };
+    }
+
+    const applyDeliveryOption = (d) => {
+        if (!d || typeof d !== 'object') return;
+        shippingMethod = {
+            id: d.id,
+            shippingMethodId: d.shippingMethodId,
+            methodId: d.methodId,
+            _id: d._id,
+            type: d.type
+        };
+    };
+    if (!shippingMethod || typeof shippingMethod !== 'object') {
+        if (b.deliveryOption && typeof b.deliveryOption === 'object') applyDeliveryOption(b.deliveryOption);
+        else if (fd && fd.deliveryOption && typeof fd.deliveryOption === 'object') applyDeliveryOption(fd.deliveryOption);
+        else if (checkout && checkout.deliveryOption && typeof checkout.deliveryOption === 'object') {
+            applyDeliveryOption(checkout.deliveryOption);
+        } else if (od && od.deliveryOption && typeof od.deliveryOption === 'object') {
+            applyDeliveryOption(od.deliveryOption);
+        }
+    }
+
+    const discountCode =
+        b.discountCode != null && b.discountCode !== ''
+            ? b.discountCode
+            : fd && fd.discountCode != null && fd.discountCode !== ''
+                ? fd.discountCode
+                : checkout && checkout.discountCode != null && checkout.discountCode !== ''
+                    ? checkout.discountCode
+                    : od && od.discountCode != null && od.discountCode !== ''
+                        ? od.discountCode
+                        : null;
+
+    return { shippingAddress, shippingMethod, discountCode };
 }
 
 /**
@@ -1149,6 +1303,73 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             }
         }
 
+        // -------------------------------------------------------------------
+        // TikTok Events API — CompletePayment (server-side conversion)
+        // Fire after payment confirmation, BEFORE returning. Fire-and-forget
+        // so a TikTok outage cannot affect order finalization.
+        // Uses the event_id captured at /api/orders/create so the frontend
+        // Pixel event with the SAME event_id deduplicates correctly.
+        // -------------------------------------------------------------------
+        setImmediate(async () => {
+            try {
+                if (!tiktokEvents.isEnabled()) return;
+                // GDPR consent gate — never fire server-side if the storefront's
+                // Pixel was held back by the cookie banner. Default is "granted"
+                // for legacy/admin-created orders that never carried the flag.
+                if (order.tiktok && order.tiktok.consentGranted === false) {
+                    devLog('payment_webhook_tiktok_skipped_consent_denied', { orderId });
+                    return;
+                }
+                // Merge latest update fields onto a working copy of the order so
+                // currency/total/totals reflect what the customer actually paid.
+                const orderForTracking = {
+                    ...order,
+                    ...updateData,
+                    paymentIntentId: paymentIntent.id,
+                    total: updateData.totals?.total ?? order.total,
+                    currency: updateData.currency || order.currency || 'SEK'
+                };
+                const ttResult = await tiktokEvents.trackCompletePayment(orderForTracking, {
+                    // event_id MUST match the value the storefront's Pixel uses on the thank-you page
+                    eventId: order.tiktok?.completePaymentEventId || undefined,
+                    ttclid: order.tiktok?.ttclid || null,
+                    ttp: order.tiktok?.ttp || null,
+                    ip: order.tiktok?.ip || null,
+                    userAgent: order.tiktok?.userAgent || null,
+                    pageUrl: order.tiktok?.pageUrl || null,
+                    referrer: order.tiktok?.referrer || null
+                });
+                if (ttResult?.ok) {
+                    devLog('payment_webhook_tiktok_complete_payment_sent', { orderId, eventId: ttResult.eventId });
+                    try {
+                        await db.executeOperation({
+                            database_name: 'peakmode',
+                            collection_name: 'orders',
+                            command: '--update',
+                            data: {
+                                filter: { orderId },
+                                update: {
+                                    'tiktok.completePaymentSentAt': new Date().toISOString(),
+                                    'tiktok.completePaymentEventIdSent': ttResult.eventId || order.tiktok?.completePaymentEventId || null,
+                                    'tiktok.completePaymentApiCode': ttResult.code ?? null
+                                }
+                            }
+                        });
+                    } catch (writeErr) {
+                        logger.warn('payment_webhook_tiktok_persist_failed', { orderId, message: writeErr.message });
+                    }
+                } else if (!ttResult?.skipped) {
+                    logger.warn('payment_webhook_tiktok_complete_payment_failed', {
+                        orderId,
+                        code: ttResult?.code,
+                        message: ttResult?.message || ttResult?.error
+                    });
+                }
+            } catch (tkErr) {
+                logger.warn('payment_webhook_tiktok_exception', { orderId, message: tkErr.message });
+            }
+        });
+
         // CRITICAL: Mark discount code as used ONLY after successful payment
         // This ensures codes remain valid if payment fails
         if (order.appliedDiscount?.code) {
@@ -1398,19 +1619,8 @@ router.post('/prepare-confirmation', async (req, res) => {
         const userId = body.userId;
         const paymentIntentId = body.paymentIntentId || null;
         const orderIdIncoming = body.orderId || null;
-        const shippingAddress = body.shippingAddress || body.customer;
-        let shippingMethod = body.shippingMethod || (body.shippingMethodId ? { id: body.shippingMethodId, type: body.shippingMethodType } : null);
-        if ((!shippingMethod || typeof shippingMethod !== 'object') && body.deliveryOption && typeof body.deliveryOption === 'object') {
-            const d = body.deliveryOption;
-            shippingMethod = {
-                id: d.id,
-                shippingMethodId: d.shippingMethodId,
-                methodId: d.methodId,
-                _id: d._id,
-                type: d.type
-            };
-        }
-        const discountCode = body.discountCode || null;
+        const merged = mergePrepareCheckoutInput(body);
+        let { shippingAddress, shippingMethod, discountCode } = merged;
 
         const hasShippingAddress = !!(shippingAddress && String(extractShippingCountryRaw(shippingAddress) || '').trim());
         const hasShippingMethodHint =
@@ -1421,15 +1631,37 @@ router.post('/prepare-confirmation', async (req, res) => {
                     shippingMethod._id)) ||
             !!(body.shippingMethodId || body.methodId) ||
             !!(body.deliveryOption &&
-                (body.deliveryOption.id || body.deliveryOption.methodId || body.deliveryOption._id));
+                (body.deliveryOption.id || body.deliveryOption.methodId || body.deliveryOption._id)) ||
+            !!(body.formData &&
+                body.formData.deliveryOption &&
+                (body.formData.deliveryOption.id ||
+                    body.formData.deliveryOption.methodId ||
+                    body.formData.deliveryOption._id)) ||
+            !!(body.orderData &&
+                (body.orderData.shippingMethodId ||
+                    body.orderData.shippingMethod ||
+                    body.orderData.deliveryOption ||
+                    body.orderData.selectedDeliveryOption));
         if (!hasShippingAddress || !hasShippingMethodHint) {
+            logger.warn('prepare_confirmation_missing_shipping_fields', {
+                requestId: req.requestId,
+                bodyKeys: Object.keys(body).sort(),
+                hasFormData: !!(body.formData && typeof body.formData === 'object'),
+                hasCheckout: !!(body.checkout && typeof body.checkout === 'object')
+            });
             throw new AppError({
                 code: ErrorCodes.VALIDATION_FAILED,
                 httpStatus: 400,
                 severity: 'warn',
                 message: 'Shipping address and method required before confirmation',
-                userMessage: 'Please enter your delivery address and select a shipping method before paying.',
-                details: { hasShippingAddress, hasShippingMethod: hasShippingMethodHint }
+                userMessage:
+                    'Please enter your delivery address and select a shipping method before paying. If you already did, refresh the page—checkout data may not have been sent to the server.',
+                details: {
+                    hasShippingAddress,
+                    hasShippingMethod: hasShippingMethodHint,
+                    bodyKeys: Object.keys(body).sort(),
+                    hint: 'prepare-confirmation expects country + shipping option in the POST body (e.g. shippingAddress + shippingMethod/deliveryOption, or nested formData)'
+                }
             });
         }
 

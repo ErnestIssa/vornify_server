@@ -39,6 +39,7 @@ const adminNotificationsRoutes = require('./routes/adminNotifications');
 const adminShippingRoutes = require('./routes/adminShipping');
 const metaFeedRoutes = require('./routes/metaFeed');
 const vatRoutes = require('./routes/vat');
+const tiktokRoutes = require('./routes/tiktok');
 const errorHandler = require('./middleware/errorHandler');
 const abandonedCartService = require('./services/abandonedCartService');
 const abandonedCheckoutService = require('./services/abandonedCheckoutService');
@@ -419,6 +420,7 @@ app.use('/api/tracking', trackingRoutes); // Package tracking
 app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
 app.use('/api/vat', vatRoutes); // VAT country/rate for request (CF-IPCountry)
+app.use('/api/tiktok', tiktokRoutes); // TikTok Events API (server-side conversion tracking)
 app.use('/api', currencyRoutes); // Currency conversion and settings
 app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication (login, verify, logout)
 app.use('/api/admin', adminAuthRoutes); // Also expose invite + accept-invite at /api/admin/invite, /api/admin/accept-invite (frontend expects these paths)

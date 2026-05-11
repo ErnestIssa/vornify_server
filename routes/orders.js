@@ -21,6 +21,7 @@ const {
 } = require('../utils/trackingCodeGenerator');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 const { logger } = require('../core/logging/logger');
+const tiktokEvents = require('../services/tiktokEvents');
 
 const db = getDBInstance();
 
@@ -389,6 +390,53 @@ router.post('/create', async (req, res) => {
         const isRetry = orderData.isRetry === true;
         const retryToken = orderData.retryToken || null;
 
+        // -------------------------------------------------------------------
+        // TikTok Events API: capture event_id + ttclid + client context now so
+        // CompletePayment fired by the Stripe webhook can deduplicate against
+        // the frontend Pixel. Accepts multiple field shapes from the frontend.
+        // Source-of-truth fields live on `order.tiktok`.
+        // -------------------------------------------------------------------
+        const tiktokInput = orderData.tiktok || {};
+        const tiktokEventIdsIncoming = orderData.tiktokEventIds || tiktokInput.eventIds || {};
+        const clientCtx = tiktokEvents.extractClientContextFromReq(req);
+
+        // GDPR / TTDSG consent gate. Frontend must mirror its Pixel-load gate here:
+        // - true  → backend Events API may fire (Pixel did too → properly deduplicated)
+        // - false → backend Events API must NOT fire (Pixel did not fire either)
+        // - null/undefined → treat as granted (legacy clients without CMP wiring)
+        const tiktokConsentRaw =
+            tiktokInput.consent ??
+            tiktokInput.consentGranted ??
+            orderData.tiktokConsent ??
+            null;
+        const tiktokConsentGranted = tiktokConsentRaw === false ? false : true;
+
+        const tiktokMeta = {
+            ttclid: orderData.ttclid || tiktokInput.ttclid || null,
+            ttp: orderData.ttp || tiktokInput.ttp || null,
+            consentGranted: tiktokConsentGranted,
+            consentSignal: tiktokConsentRaw === null ? 'assumed_granted' : (tiktokConsentGranted ? 'granted' : 'denied'),
+            initiateCheckoutEventId:
+                tiktokEventIdsIncoming.initiateCheckout ||
+                tiktokInput.initiateCheckoutEventId ||
+                null,
+            addPaymentInfoEventId:
+                tiktokEventIdsIncoming.addPaymentInfo ||
+                tiktokInput.addPaymentInfoEventId ||
+                null,
+            // CRITICAL: this id MUST match the event_id the frontend Pixel uses
+            // for ttq.track('CompletePayment', ..., { event_id }) on the thank-you page.
+            completePaymentEventId:
+                tiktokEventIdsIncoming.completePayment ||
+                tiktokInput.completePaymentEventId ||
+                null,
+            pageUrl: tiktokInput.pageUrl || orderData.pageUrl || null,
+            referrer: tiktokInput.referrer || clientCtx.referrer || null,
+            ip: clientCtx.ip,
+            userAgent: clientCtx.userAgent,
+            capturedAt: new Date().toISOString()
+        };
+
         // Prepare order with enhanced customer data structure
         const order = {
             ...orderData,
@@ -513,7 +561,12 @@ router.post('/create', async (req, res) => {
                     description: 'Order initiated — awaiting payment confirmation',
                     timestamp: new Date().toISOString()
                 }
-            ]
+            ],
+
+            // TikTok Events API metadata — flows from pending_checkout → real order
+            // so the webhook can fire CompletePayment with deduplicated event_id.
+            tiktok: tiktokMeta,
+            ttclid: tiktokMeta.ttclid // mirrored for legacy/admin readability
         };
         
         // IMPORTANT: Do NOT create a real order until payment succeeds.
@@ -596,6 +649,37 @@ router.post('/create', async (req, res) => {
 
                     // IMPORTANT: Do not create/update customer and do not email until payment succeeds.
                     devLog('[ORDER CREATE] Background: Pending checkout saved; webhook will finalize order.');
+
+                    // TikTok InitiateCheckout — fire-and-forget. Failures must never affect checkout.
+                    // event_id MUST match the InitiateCheckout id the Pixel used on the storefront.
+                    // Consent gate: skip server-side firing when frontend reports denied consent
+                    // (Pixel didn't fire there either → would otherwise cause non-deduped count).
+                    try {
+                        if (!tiktokMeta.consentGranted) {
+                            devLog('[ORDER CREATE] TikTok InitiateCheckout skipped (consent denied)', { orderId });
+                        } else if (tiktokEvents.isEnabled()) {
+                            const ttResult = await tiktokEvents.trackInitiateCheckout({
+                                eventId: tiktokMeta.initiateCheckoutEventId || undefined,
+                                ttclid: tiktokMeta.ttclid,
+                                ttp: tiktokMeta.ttp,
+                                email: order.customer?.email,
+                                phone: order.customer?.phone,
+                                externalId: order.userId || order.customer?.email,
+                                ip: tiktokMeta.ip,
+                                userAgent: tiktokMeta.userAgent,
+                                pageUrl: tiktokMeta.pageUrl,
+                                referrer: tiktokMeta.referrer,
+                                items: order.items,
+                                value: order.total || order.totals?.total || 0,
+                                currency: order.currency || 'SEK'
+                            });
+                            if (ttResult?.ok) {
+                                devLog('[ORDER CREATE] TikTok InitiateCheckout sent', { eventId: ttResult.eventId });
+                            }
+                        }
+                    } catch (tkErr) {
+                        logger.warn('order_create_tiktok_initiate_checkout_failed', { message: tkErr.message, orderId });
+                    }
                     
                     const totalTime = Date.now() - startTime;
                     devLog(`[ORDER CREATE] Background operations completed in ${totalTime}ms total`);
