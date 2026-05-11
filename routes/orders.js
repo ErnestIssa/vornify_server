@@ -1082,7 +1082,7 @@ router.get('/verify-email', async (req, res) => {
  *
  * IMPORTANT: This route must be defined BEFORE /:orderId to avoid route conflicts
  */
-router.get('/track', async (req, res) => {
+async function handleOrderTrackByQuery(req, res) {
     try {
         devLog('[ORDER TRACK] Request received', {
             query: req.query,
@@ -1381,7 +1381,42 @@ router.get('/track', async (req, res) => {
             logger.error('order_track_response_already_sent', {});
         }
     }
+}
+
+/**
+ * GET /api/orders/track/:orderId?email=
+ * Checkout / retry-payment uses path style; TEMP-* ids never exist as DB rows yet.
+ */
+router.get('/track/:orderId', async (req, res) => {
+    try {
+        const oid = decodeURIComponent(String(req.params.orderId || '').trim());
+        if (!oid) {
+            return res.status(400).json({
+                error: 'Invalid parameters',
+                message: 'orderId is required'
+            });
+        }
+        if (oid.startsWith('TEMP-')) {
+            return res.json({
+                success: true,
+                temporaryDraft: true,
+                orderId: oid,
+                message: 'Checkout draft — no order record exists until payment succeeds. Start or retry checkout with create-intent / prepare-confirmation.',
+                canRetryPayment: true
+            });
+        }
+        if (!req.query || typeof req.query !== 'object') req.query = {};
+        req.query.orderId = oid;
+        return handleOrderTrackByQuery(req, res);
+    } catch (error) {
+        logger.error('order_track_by_path_failed', { message: error.message });
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Internal server error', message: error.message });
+        }
+    }
 });
+
+router.get('/track', handleOrderTrackByQuery);
 
 // Get all orders (for admin) - Also supports email query parameter
 router.get('/all', async (req, res) => {

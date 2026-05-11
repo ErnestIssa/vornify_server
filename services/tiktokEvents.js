@@ -367,6 +367,10 @@ async function performRequest(eventLabel, eventId, body, cfg) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
+    // Quality / observability snapshot — computed once, reused for logs.
+    const firstEvent = body?.data?.[0] || {};
+    const quality = computeEventQuality(firstEvent);
+
     try {
         const response = await fetch(TIKTOK_TRACK_URL, {
             method: 'POST',
@@ -394,16 +398,25 @@ async function performRequest(eventLabel, eventId, body, cfg) {
         const apiOk = apiCode === 0 || apiCode === '0';
         const success = httpOk && (apiOk || apiCode === undefined);
 
+        // Structured quality log — always emit so we can correlate EMQ with TikTok dashboard.
+        const logCtx = {
+            event: eventLabel,
+            eventId,
+            requestId,
+            apiCode,
+            httpStatus: response.status,
+            emqScore: quality.emqScore,
+            fieldCoverage: quality.fieldCoverage,
+            testMode: !!cfg.testEventCode
+        };
+
         if (success) {
-            devLog('tiktok_event_sent', { event: eventLabel, eventId, requestId, testMode: !!cfg.testEventCode });
+            // Info-level — funnel-critical signal. Use logger so it survives prod.
+            logger.info('tiktok_event_sent', logCtx);
         } else {
             logger.warn('tiktok_event_failed', {
-                event: eventLabel,
-                eventId,
-                httpStatus: response.status,
-                apiCode,
+                ...logCtx,
                 apiMessage,
-                requestId,
                 hint: 'verify TIKTOK_PIXEL_ID + TIKTOK_ACCESS_TOKEN belong to the same pixel and that the access token has Events API permission'
             });
         }
@@ -414,7 +427,9 @@ async function performRequest(eventLabel, eventId, body, cfg) {
             code: apiCode,
             message: apiMessage,
             eventId,
-            requestId
+            requestId,
+            emqScore: quality.emqScore,
+            fieldCoverage: quality.fieldCoverage
         };
     } catch (err) {
         const aborted = err && (err.name === 'AbortError' || err.code === 'ABORT_ERR');
@@ -422,11 +437,15 @@ async function performRequest(eventLabel, eventId, body, cfg) {
             event: eventLabel,
             eventId,
             aborted,
+            emqScore: quality.emqScore,
+            fieldCoverage: quality.fieldCoverage,
             message: err?.message || String(err)
         });
         return {
             ok: false,
             eventId,
+            emqScore: quality.emqScore,
+            fieldCoverage: quality.fieldCoverage,
             error: aborted ? 'timeout' : (err?.message || 'unknown_error')
         };
     } finally {
@@ -435,24 +454,164 @@ async function performRequest(eventLabel, eventId, body, cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// Event quality / EMQ scoring
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute a 0..10 quality score plus a field-coverage bitmap for an event
+ * entry already shaped for the TikTok API (user object hashed). Mirrors
+ * TikTok's documented EMQ weighting: ttclid > email > phone > external_id >
+ * ip / user_agent. Pure function — never throws.
+ */
+function computeEventQuality(eventEntry) {
+    const user = eventEntry?.user || {};
+    const page = eventEntry?.page || {};
+    const props = eventEntry?.properties || {};
+
+    const has = {
+        eventId: !!eventEntry?.event_id,
+        ttclid: !!user.ttclid,
+        ttp: !!user.ttp,
+        email: !!user.email,
+        phone: !!user.phone,
+        externalId: !!user.external_id,
+        ip: !!user.ip,
+        userAgent: !!user.user_agent,
+        pageUrl: !!page.url,
+        referrer: !!page.referrer,
+        value: typeof props.value === 'number',
+        currency: !!props.currency,
+        contents: Array.isArray(props.contents) && props.contents.length > 0,
+        contentIds: Array.isArray(props.content_ids) && props.content_ids.length > 0
+    };
+
+    let score = 0;
+    if (has.ttclid) score += 3.0;       // single strongest signal
+    if (has.email) score += 2.0;
+    if (has.phone) score += 1.5;
+    if (has.externalId) score += 1.0;
+    if (has.ip) score += 1.0;
+    if (has.userAgent) score += 0.7;
+    if (has.ttp) score += 0.4;
+    if (has.pageUrl) score += 0.2;
+    if (has.contents || has.contentIds) score += 0.2;
+    score = Math.min(10, Math.round(score * 10) / 10);
+
+    return {
+        emqScore: score,
+        fieldCoverage: has
+    };
+}
+
+// ---------------------------------------------------------------------------
 // High-level convenience helpers — one per supported event
 // ---------------------------------------------------------------------------
 
 /**
+ * Generic commerce-event sender. All ecommerce helpers delegate to this so
+ * payload shape, hashing, and quality logging stay consistent.
+ *
+ * @param {string} eventName
+ * @param {object} opts
+ * @param {string} [opts.eventId]
+ * @param {string} [opts.ttclid]
+ * @param {string} [opts.ttp]
+ * @param {string} [opts.email]              raw, will be hashed
+ * @param {string} [opts.phone]              raw, will be hashed
+ * @param {string} [opts.externalId]         raw, will be hashed
+ * @param {string} [opts.ip]
+ * @param {string} [opts.userAgent]
+ * @param {string} [opts.pageUrl]
+ * @param {string} [opts.referrer]
+ * @param {Array}  [opts.items]              cart/order items
+ * @param {Array}  [opts.contentIds]         explicit content_ids override
+ * @param {number} [opts.value]
+ * @param {string} [opts.currency]
+ * @param {string} [opts.orderId]
+ * @param {string} [opts.query]              for Search
+ * @param {string} [opts.description]
+ * @param {string} [opts.contentCategory]
+ * @param {string} [opts.contentName]
+ * @param {string} [opts.contentType]        defaults to 'product'
+ * @param {boolean}[opts.logToDb]            when true (and TIKTOK_EVENT_LOG_ENABLED=true),
+ *                                           persist outcome to tiktok_events_log
+ * @param {string} [opts.context]            free-form string for logs (e.g. 'webhook')
+ * @returns {Promise<object>} result envelope from sendTikTokEvent
+ */
+async function trackCommerceEvent(eventName, opts = {}) {
+    try {
+        const cur = (opts.currency || DEFAULT_CURRENCY).toUpperCase();
+        const properties = {
+            content_type: opts.contentType || 'product'
+        };
+
+        if (opts.value !== undefined && opts.value !== null) {
+            const v = Number(opts.value);
+            if (Number.isFinite(v)) properties.value = v;
+        }
+        // currency only useful if value present, but always include for events
+        // that imply commerce intent (AddToCart, ViewContent, etc.).
+        properties.currency = cur;
+
+        const ids = Array.isArray(opts.contentIds) && opts.contentIds.length
+            ? opts.contentIds.map(String)
+            : buildContentIdsFromItems(opts.items);
+        if (ids.length) properties.content_ids = ids;
+
+        const contents = buildContentsFromItems(opts.items);
+        if (contents.length) properties.contents = contents;
+
+        if (opts.contentName) properties.content_name = String(opts.contentName);
+        if (opts.contentCategory) properties.content_category = String(opts.contentCategory);
+        if (opts.description) properties.description = String(opts.description);
+        if (opts.orderId) properties.order_id = String(opts.orderId);
+        if (opts.query) properties.query = String(opts.query);
+
+        const result = await sendTikTokEvent(eventName, {
+            eventId: opts.eventId,
+            user: buildUserObject({
+                email: opts.email,
+                phone: opts.phone,
+                externalId: opts.externalId,
+                ttclid: opts.ttclid,
+                ttp: opts.ttp,
+                ip: opts.ip,
+                userAgent: opts.userAgent
+            }),
+            page: { url: opts.pageUrl, referrer: opts.referrer },
+            properties
+        });
+
+        if (opts.logToDb) {
+            // Fire-and-forget audit log (gated by TIKTOK_EVENT_LOG_ENABLED).
+            writeEventLog({
+                event: eventName,
+                eventId: result?.eventId,
+                status: result?.ok ? 'success' : (result?.skipped ? 'skipped' : 'failure'),
+                ttCode: result?.code ?? null,
+                ttRequestId: result?.requestId || null,
+                ttMessage: result?.message || result?.error || null,
+                emqScore: result?.emqScore ?? null,
+                fieldCoverage: result?.fieldCoverage || null,
+                orderId: opts.orderId || null,
+                userId: opts.externalId || null,
+                value: properties.value ?? null,
+                currency: properties.currency,
+                context: opts.context || null
+            }).catch(() => {});
+        }
+
+        return result;
+    } catch (err) {
+        logger.warn('tiktok_commerce_event_exception', { event: eventName, message: err?.message });
+        return { ok: false, error: err?.message || 'exception' };
+    }
+}
+
+/**
  * Fire CompletePayment for a Peak Mode order.
  * Should be called AFTER Stripe confirms payment success (webhook).
- *
- * @param {object} order             The full order document from MongoDB
- * @param {object} [options]
- * @param {string} [options.eventId] Override event_id. Falls back to
- *                                   order.tiktok?.completePaymentEventId →
- *                                   order.tiktokEventIds?.completePayment →
- *                                   newly generated (no dedup possible).
- * @param {string} [options.ttclid]  Override ttclid. Falls back to order.tiktok?.ttclid.
- * @param {string} [options.ip]      Client IP (raw)
- * @param {string} [options.userAgent]
- * @param {string} [options.pageUrl]
- * @returns {Promise<object>}        Result envelope from sendTikTokEvent
+ * Builds payload from the order document so the call site stays a one-liner.
  */
 async function trackCompletePayment(order, options = {}) {
     try {
@@ -468,128 +627,122 @@ async function trackCompletePayment(order, options = {}) {
             legacyIds.completePayment ||
             null;
 
-        const ttclid = options.ttclid || tk.ttclid || order.ttclid || null;
-        const ttp = options.ttp || tk.ttp || null;
-
-        const items = Array.isArray(order.items) ? order.items : [];
-        const currency = (order.currency || order.totals?.currency || DEFAULT_CURRENCY).toUpperCase();
-        const totalValue =
-            Number(order.totals?.total) ||
-            Number(order.total) ||
-            0;
-
-        const email = order.customer?.email || order.customerEmail;
-        const phone = order.customer?.phone || order.shippingAddress?.phone;
-        const externalId = order.userId || order.customerId || email || null;
-
-        const payload = {
+        return trackCommerceEvent('CompletePayment', {
             eventId: eventId || undefined,
-            user: buildUserObject({
-                email,
-                phone,
-                externalId,
-                ttclid,
-                ttp,
-                ip: options.ip || tk.ip || null,
-                userAgent: options.userAgent || tk.userAgent || null
-            }),
-            page: {
-                url: options.pageUrl || tk.pageUrl || null,
-                referrer: options.referrer || tk.referrer || null
-            },
-            properties: {
-                currency,
-                value: totalValue,
-                content_type: 'product',
-                content_ids: buildContentIdsFromItems(items),
-                contents: buildContentsFromItems(items, { fallbackCurrency: currency }),
-                order_id: order.orderId || order.id || null,
-                description: `Order ${order.orderId || ''}`.trim()
-            }
-        };
-
-        return sendTikTokEvent('CompletePayment', payload);
+            ttclid: options.ttclid || tk.ttclid || order.ttclid || null,
+            ttp: options.ttp || tk.ttp || null,
+            email: order.customer?.email || order.customerEmail,
+            phone: order.customer?.phone || order.shippingAddress?.phone,
+            externalId: order.userId || order.customerId || order.customer?.email || null,
+            ip: options.ip || tk.ip || null,
+            userAgent: options.userAgent || tk.userAgent || null,
+            pageUrl: options.pageUrl || tk.pageUrl || null,
+            referrer: options.referrer || tk.referrer || null,
+            items: Array.isArray(order.items) ? order.items : [],
+            value: Number(order.totals?.total) || Number(order.total) || 0,
+            currency: order.currency || order.totals?.currency || DEFAULT_CURRENCY,
+            orderId: order.orderId || order.id || null,
+            description: `Order ${order.orderId || ''}`.trim(),
+            logToDb: true,
+            context: options.context || 'webhook'
+        });
     } catch (err) {
         logger.warn('tiktok_complete_payment_exception', { message: err?.message });
         return { ok: false, error: err?.message || 'exception' };
     }
 }
 
+// Thin per-event wrappers. All accept the same options bag as trackCommerceEvent.
+const trackInitiateCheckout      = (opts) => trackCommerceEvent('InitiateCheckout', { ...opts, logToDb: true, context: opts?.context || 'orders_create' });
+const trackAddPaymentInfo        = (opts) => trackCommerceEvent('AddPaymentInfo', { ...opts, logToDb: true, context: opts?.context || 'payment_element' });
+const trackViewContent           = (opts) => trackCommerceEvent('ViewContent', opts);
+const trackAddToCart             = (opts) => trackCommerceEvent('AddToCart', opts);
+const trackAddToWishlist         = (opts) => trackCommerceEvent('AddToWishlist', opts);
+const trackViewCategory          = (opts) => trackCommerceEvent('ViewCategory', opts);
+const trackSearch                = (opts) => trackCommerceEvent('Search', opts);
+const trackSubscribe             = (opts) => trackCommerceEvent('Subscribe', opts);
+const trackContact               = (opts) => trackCommerceEvent('Contact', opts);
+const trackSubmitForm            = (opts) => trackCommerceEvent('SubmitForm', opts);
+const trackCompleteRegistration  = (opts) => trackCommerceEvent('CompleteRegistration', opts);
+const trackLead                  = (opts) => trackCommerceEvent('Lead', opts);
+const trackStartTrial            = (opts) => trackCommerceEvent('StartTrial', opts);
+
+// ---------------------------------------------------------------------------
+// Recovery / session stitching
+// ---------------------------------------------------------------------------
+
 /**
- * Fire InitiateCheckout when the customer commits to pay (e.g. after
- * Peak Mode's /api/orders/create OR /api/payments/prepare-confirmation).
+ * Look up `tiktok_sessions` by userId (preferred) or sessionId and return
+ * any stitching context (ttclid, ttp, eventIds, pageUrl, ip, userAgent).
+ *
+ * Returns `null` when nothing is stored — callers must tolerate that.
+ * Never throws; all DB errors are swallowed and logged at warn level.
  */
-async function trackInitiateCheckout({
-    eventId,
-    ttclid,
-    ttp,
-    email,
-    phone,
-    externalId,
-    ip,
-    userAgent,
-    pageUrl,
-    referrer,
-    items,
-    value,
-    currency
-} = {}) {
+async function findStoredSessionContext({ userId, sessionId } = {}) {
+    if (!userId && !sessionId) return null;
     try {
-        const cur = (currency || DEFAULT_CURRENCY).toUpperCase();
-        return sendTikTokEvent('InitiateCheckout', {
-            eventId,
-            user: buildUserObject({ email, phone, externalId, ttclid, ttp, ip, userAgent }),
-            page: { url: pageUrl, referrer },
-            properties: {
-                currency: cur,
-                value: Number(value) || 0,
-                content_type: 'product',
-                content_ids: buildContentIdsFromItems(items),
-                contents: buildContentsFromItems(items)
-            }
+        const getDBInstance = require('../vornifydb/dbInstance');
+        const db = getDBInstance();
+        const filter = userId ? { userId: String(userId) } : { sessionId: String(sessionId) };
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'tiktok_sessions',
+            command: '--read',
+            data: filter
         });
+        if (!result.success || !result.data) return null;
+        const doc = Array.isArray(result.data) ? result.data[0] : result.data;
+        return doc || null;
     } catch (err) {
-        logger.warn('tiktok_initiate_checkout_exception', { message: err?.message });
-        return { ok: false, error: err?.message || 'exception' };
+        logger.warn('tiktok_session_lookup_failed', { message: err?.message });
+        return null;
     }
 }
 
 /**
- * Fire AddPaymentInfo (optional). Fire when the user successfully attaches
- * a payment method but BEFORE confirming the payment.
+ * Merge stored session context into an outgoing options bag, only filling in
+ * fields the caller didn't already provide. Used to recover ttclid + event_ids
+ * when the order body was incomplete.
  */
-async function trackAddPaymentInfo({
-    eventId,
-    ttclid,
-    ttp,
-    email,
-    phone,
-    externalId,
-    ip,
-    userAgent,
-    pageUrl,
-    referrer,
-    items,
-    value,
-    currency
-} = {}) {
+function mergeSessionContext(opts, stored) {
+    if (!stored) return opts;
+    const merged = { ...opts };
+    if (!merged.ttclid && stored.ttclid) merged.ttclid = stored.ttclid;
+    if (!merged.ttp && stored.ttp) merged.ttp = stored.ttp;
+    if (!merged.pageUrl && stored.pageUrl) merged.pageUrl = stored.pageUrl;
+    if (!merged.referrer && stored.referrer) merged.referrer = stored.referrer;
+    if (!merged.ip && stored.ip) merged.ip = stored.ip;
+    if (!merged.userAgent && stored.userAgent) merged.userAgent = stored.userAgent;
+    // Event id recovery — only when caller passed an `eventKey` hint.
+    if (!merged.eventId && merged.eventKey && stored.eventIds?.[merged.eventKey]) {
+        merged.eventId = stored.eventIds[merged.eventKey];
+    }
+    return merged;
+}
+
+// ---------------------------------------------------------------------------
+// Events log (optional analytics — gated by env)
+// ---------------------------------------------------------------------------
+
+const EVENT_LOG_ENABLED = () => process.env.TIKTOK_EVENT_LOG_ENABLED === 'true';
+
+async function writeEventLog(entry) {
+    if (!EVENT_LOG_ENABLED()) return;
     try {
-        const cur = (currency || DEFAULT_CURRENCY).toUpperCase();
-        return sendTikTokEvent('AddPaymentInfo', {
-            eventId,
-            user: buildUserObject({ email, phone, externalId, ttclid, ttp, ip, userAgent }),
-            page: { url: pageUrl, referrer },
-            properties: {
-                currency: cur,
-                value: Number(value) || 0,
-                content_type: 'product',
-                content_ids: buildContentIdsFromItems(items),
-                contents: buildContentsFromItems(items)
+        const getDBInstance = require('../vornifydb/dbInstance');
+        const db = getDBInstance();
+        await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'tiktok_events_log',
+            command: '--create',
+            data: {
+                ...entry,
+                createdAt: new Date().toISOString()
             }
         });
     } catch (err) {
-        logger.warn('tiktok_add_payment_info_exception', { message: err?.message });
-        return { ok: false, error: err?.message || 'exception' };
+        // Never fail because of logging
+        logger.warn('tiktok_event_log_write_failed', { message: err?.message });
     }
 }
 
@@ -624,11 +777,30 @@ module.exports = {
     // Core
     sendTikTokEvent,
     sendTikTokEventsBatch,
+    trackCommerceEvent,
 
-    // Helpers per event
+    // Funnel-critical helpers (auto-log to tiktok_events_log)
     trackCompletePayment,
     trackInitiateCheckout,
     trackAddPaymentInfo,
+
+    // Awareness / engagement helpers
+    trackViewContent,
+    trackAddToCart,
+    trackAddToWishlist,
+    trackViewCategory,
+    trackSearch,
+    trackSubscribe,
+    trackContact,
+    trackSubmitForm,
+    trackCompleteRegistration,
+    trackLead,
+    trackStartTrial,
+
+    // Recovery / session stitching
+    findStoredSessionContext,
+    mergeSessionContext,
+    writeEventLog,
 
     // Utilities (exported for reuse / testing)
     buildUserObject,
@@ -639,6 +811,7 @@ module.exports = {
     hashEmail,
     hashPhone,
     hashExternalId,
+    computeEventQuality,
 
     // Diagnostics
     isEnabled,

@@ -1,229 +1,435 @@
 const express = require('express');
 const router = express.Router();
 const tiktokEvents = require('../services/tiktokEvents');
+const getDBInstance = require('../vornifydb/dbInstance');
 const { logger } = require('../core/logging/logger');
 const { devLog } = require('../core/logging/devConsole');
+
+const db = getDBInstance();
 
 /**
  * TikTok Events API — public routes
  * ---------------------------------------------------------------------------
- * These routes are OPTIONAL for the core conversion flow. The two events
- * that matter most (InitiateCheckout, CompletePayment) are fired
- * automatically from the order/payment pipeline, so the frontend does not
- * need to ping these endpoints to get deduplicated CompletePayment.
+ * Funnel events that ride the order pipeline (InitiateCheckout +
+ * CompletePayment) fire automatically server-side. These endpoints exist for:
  *
- * Use these endpoints when the frontend wants a server-side mirror for:
- *   - ViewContent / AddToCart / AddToWishlist / Search / Subscribe
- *   - AddPaymentInfo (mirror)
- *   - Any future custom events
+ *   1. Server-side mirror of any other event (ViewContent, AddToCart, etc.)
+ *      that the frontend Pixel fires — for ad-blocker resilience and EMQ.
+ *   2. AddPaymentInfo mirror once Stripe PaymentElement reports completion.
+ *   3. Early session stitching (`/session`) so ttclid + event_ids survive
+ *      even if the checkout payload is incomplete or a redirected payment
+ *      method (3DS / Klarna) reloads the SPA.
  *
- * SECURITY:
- *   - Backend hashes PII (email/phone) — frontend MUST send raw, not hashed.
- *   - Backend overrides client IP + user agent from request headers.
- *   - Frontend MUST always send a deterministic `event_id` if a corresponding
- *     Pixel event was fired in the browser. Otherwise deduplication breaks.
+ * Security contract:
+ *   - PII (email/phone/externalId) is hashed by the backend; frontend MUST
+ *     send raw values, never pre-hashed.
+ *   - Backend overrides client IP + user agent from request headers
+ *     (Cloudflare / Render aware).
+ *   - Frontend MUST send a `consent` boolean — `false` short-circuits the
+ *     server-side firing for GDPR/TTDSG compliance.
+ *   - Frontend MUST send a deterministic `eventId` per occurrence so the
+ *     Pixel and Events API deduplicate inside TikTok.
  */
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// Standard TikTok event names that don't require special handling.
+// Custom event names are accepted too (any non-empty string), but we warn so
+// typos like `AddtoCart` don't silently break dedup.
+const STANDARD_NAMES = tiktokEvents.STANDARD_EVENTS;
+
+function consentDenied(body) {
+    return body?.consent === false || body?.consentGranted === false;
+}
+
+function safeRespond(res, payload) {
+    // Storefront must never see a 5xx because of TikTok. Wrap everything in 200.
+    return res.json(payload);
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/tiktok/track
 // Generic server-side mirror of any standard or custom TikTok event.
 //
-// Body:
+// Body shape:
 // {
-//   "event": "AddToCart",                      // required (standard or custom)
-//   "eventId": "<uuid>",                       // strongly recommended — must match Pixel event_id
-//   "eventTime": 1731331200,                   // optional, unix seconds
-//   "ttclid": "E.C.P....",                     // optional
+//   "event": "AddToCart",                      // required
+//   "eventId": "<uuid>",                       // strongly recommended (dedup)
+//   "eventTime": 1731331200,                   // optional unix seconds
+//   "consent": true,                           // required boolean
+//   "userId": "user_or_guest_id",              // optional → triggers session auto-merge
+//   "sessionId": "<frontend-generated id>",    // optional alternative to userId for anon
+//   "ttclid": "E.C.P....",                     // optional (auto-merged if userId/sessionId given)
 //   "ttp": "...",                              // optional
 //   "email": "user@example.com",               // raw, will be hashed
 //   "phone": "+46701234567",                   // raw, will be hashed
 //   "externalId": "user_123",                  // raw, will be hashed
 //   "pageUrl": "https://peakmode.se/p/xyz",
 //   "referrer": "https://peakmode.se/",
-//   "value": 499,
+//   "value": 499,                              // for value-bearing events
 //   "currency": "SEK",
-//   "items": [ { id, productId, title, price, quantity, brand, category } ]
+//   "contentType": "product",
+//   "items": [ { id, productId, title, price, quantity, brand, category } ],
+//   "contentIds": [ "SKU1" ],                  // alternative to items
+//   "contentName": "...",
+//   "contentCategory": "Apparel > Tops",
+//   "description": "...",                      // free-form
+//   "query": "...",                            // for Search
+//   "orderId": "..."                           // for post-purchase events
 // }
 // ---------------------------------------------------------------------------
 router.post('/track', async (req, res) => {
     try {
         const body = req.body || {};
-        if (!body.event) {
+        if (!body.event || typeof body.event !== 'string') {
             return res.status(400).json({
                 success: false,
-                error: 'event is required',
+                error: 'event is required and must be a string',
                 code: 'missing_event'
             });
         }
 
-        // Skip clearly bad payloads early
-        if (typeof body.event !== 'string') {
-            return res.status(400).json({ success: false, error: 'event must be a string' });
+        const eventName = body.event;
+        if (!STANDARD_NAMES.has(eventName)) {
+            // Accept but flag — useful for catching typos in dev.
+            logger.warn('tiktok_track_non_standard_event', { event: eventName });
         }
 
-        // GDPR / TTDSG consent gate. Frontend MUST send consent:false (or
-        // consentGranted:false) when its CMP has not granted analytics consent.
-        // Null/undefined defaults to granted (legacy callers / admin tools).
-        if (body.consent === false || body.consentGranted === false) {
-            return res.json({
+        if (consentDenied(body)) {
+            return safeRespond(res, {
                 success: true,
-                tiktok: { ok: false, skipped: true, message: 'consent_denied' }
+                tiktok: { ok: false, skipped: true, message: 'consent_denied', event: eventName }
             });
         }
 
+        if (!body.eventId) {
+            logger.warn('tiktok_track_missing_event_id', { event: eventName });
+        }
+
         const ctx = tiktokEvents.extractClientContextFromReq(req);
-        const result = await tiktokEvents.sendTikTokEvent(body.event, {
+
+        // Session auto-merge: if frontend passed userId/sessionId, fill in
+        // missing ttclid/ttp from the stored session record.
+        let stored = null;
+        if (body.userId || body.sessionId) {
+            stored = await tiktokEvents.findStoredSessionContext({
+                userId: body.userId || null,
+                sessionId: body.sessionId || null
+            });
+        }
+
+        // Always log funnel-critical events to tiktok_events_log so /stats can
+        // show end-to-end funnel health. Cheap mirror events (ViewContent,
+        // AddToCart) skip DB writes to keep collection size bounded.
+        const isFunnelEvent =
+            eventName === 'CompletePayment' ||
+            eventName === 'InitiateCheckout' ||
+            eventName === 'AddPaymentInfo';
+
+        const baseOpts = {
             eventId: body.eventId,
             eventTime: body.eventTime,
-            user: {
-                email: body.email,
-                phone: body.phone,
-                externalId: body.externalId,
-                ttclid: body.ttclid,
-                ttp: body.ttp,
-                ip: ctx.ip,
-                userAgent: ctx.userAgent
-            },
-            page: {
-                url: body.pageUrl,
-                referrer: body.referrer || ctx.referrer
-            },
-            properties: {
-                value: body.value,
-                currency: body.currency,
-                content_type: body.contentType || 'product',
-                content_ids: Array.isArray(body.items)
-                    ? tiktokEvents.buildContentIdsFromItems(body.items)
-                    : (body.contentIds || undefined),
-                contents: Array.isArray(body.items)
-                    ? tiktokEvents.buildContentsFromItems(body.items)
-                    : (body.contents || undefined),
-                description: body.description,
-                query: body.query,
-                order_id: body.orderId
-            }
-        });
+            ttclid: body.ttclid,
+            ttp: body.ttp,
+            email: body.email,
+            phone: body.phone,
+            externalId: body.externalId || body.userId,
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+            pageUrl: body.pageUrl,
+            referrer: body.referrer || ctx.referrer,
+            value: body.value,
+            currency: body.currency,
+            contentType: body.contentType,
+            items: body.items,
+            contentIds: body.contentIds,
+            contentName: body.contentName,
+            contentCategory: body.contentCategory,
+            description: body.description,
+            query: body.query,
+            orderId: body.orderId,
+            logToDb: isFunnelEvent || body.logToDb === true,
+            context: 'route_track'
+        };
+        const finalOpts = tiktokEvents.mergeSessionContext(baseOpts, stored);
 
-        // Always 200 — TikTok problems must not surface to the storefront
-        return res.json({
+        const result = await tiktokEvents.trackCommerceEvent(eventName, finalOpts);
+
+        return safeRespond(res, {
             success: true,
-            tiktok: result
+            tiktok: { ...result, event: eventName, mergedFromSession: !!stored }
         });
     } catch (err) {
         logger.warn('tiktok_route_track_exception', { message: err?.message });
-        return res.json({ success: true, tiktok: { ok: false, error: err?.message || 'exception' } });
+        return safeRespond(res, {
+            success: true,
+            tiktok: { ok: false, error: err?.message || 'exception' }
+        });
     }
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/tiktok/session
-// Bind a TikTok click id (ttclid) + per-event event_ids to a user/cart so
-// later checkout requests can still resolve them even if the user reloads.
-// Stored in the `tiktok_sessions` collection — best-effort, non-blocking.
+// Early session stitching. Persist ttclid + event_ids as soon as they're
+// known so attribution + deduplication survive partial checkouts, 3DS
+// redirects, page reloads, and incomplete order payloads.
 //
 // Body:
 // {
-//   "userId": "guest_or_user_id",     // required
-//   "ttclid": "E.C.P....",            // optional
-//   "ttp": "...",                     // optional
-//   "eventIds": {                      // optional, but used for dedup downstream
-//     "initiateCheckout": "...",
-//     "addPaymentInfo": "...",
-//     "completePayment": "..."
+//   "userId": "user_or_guest_id",     // either userId OR sessionId required
+//   "sessionId": "frontend-uuid",     //   (sessionId for true anonymous visitors)
+//   "ttclid": "E.C.P....",
+//   "ttp": "...",
+//   "eventIds": {
+//     "initiateCheckout": "ic_<uuid>",
+//     "addPaymentInfo":   "api_<uuid>",
+//     "completePayment":  "cp_<uuid>"
 //   },
 //   "pageUrl": "...",
-//   "referrer": "..."
+//   "referrer": "...",
+//   "consent": true                   // recommended; defaults to true
 // }
+//
+// Idempotent: subsequent POSTs UPDATE the existing record (don't blow away
+// already-stored event_ids if a later call sends an incomplete eventIds map).
 // ---------------------------------------------------------------------------
 router.post('/session', async (req, res) => {
     try {
         const body = req.body || {};
-        if (!body.userId) {
-            return res.status(400).json({ success: false, error: 'userId is required' });
+        const userId = body.userId ? String(body.userId) : null;
+        const sessionId = body.sessionId ? String(body.sessionId) : null;
+        if (!userId && !sessionId) {
+            return res.status(400).json({
+                success: false,
+                error: 'userId or sessionId is required',
+                code: 'missing_identifier'
+            });
         }
 
-        const getDBInstance = require('../vornifydb/dbInstance');
-        const db = getDBInstance();
         const ctx = tiktokEvents.extractClientContextFromReq(req);
-
         const nowIso = new Date().toISOString();
-        const doc = {
-            userId: String(body.userId),
-            ttclid: body.ttclid || null,
-            ttp: body.ttp || null,
-            eventIds: body.eventIds && typeof body.eventIds === 'object' ? body.eventIds : {},
-            pageUrl: body.pageUrl || null,
-            referrer: body.referrer || ctx.referrer || null,
-            ip: ctx.ip,
-            userAgent: ctx.userAgent,
-            updatedAt: nowIso
-        };
+        const filter = userId ? { userId } : { sessionId };
 
-        // Upsert-like behavior using VornifyDB
+        // Read existing (so we can merge eventIds rather than clobber them)
+        let existing = null;
         try {
-            const existing = await db.executeOperation({
+            const existingResult = await db.executeOperation({
                 database_name: 'peakmode',
                 collection_name: 'tiktok_sessions',
                 command: '--read',
-                data: { userId: doc.userId }
+                data: filter
             });
-            const found = existing.success && existing.data
-                ? (Array.isArray(existing.data) ? existing.data[0] : existing.data)
-                : null;
-            if (found) {
+            if (existingResult.success && existingResult.data) {
+                existing = Array.isArray(existingResult.data)
+                    ? existingResult.data[0]
+                    : existingResult.data;
+            }
+        } catch (_) {
+            existing = null;
+        }
+
+        const mergedEventIds = {
+            ...(existing?.eventIds || {}),
+            ...(body.eventIds && typeof body.eventIds === 'object' ? body.eventIds : {})
+        };
+
+        const doc = {
+            userId,
+            sessionId,
+            ttclid: body.ttclid || existing?.ttclid || null,
+            ttp: body.ttp || existing?.ttp || null,
+            eventIds: mergedEventIds,
+            pageUrl: body.pageUrl || existing?.pageUrl || null,
+            referrer: body.referrer || ctx.referrer || existing?.referrer || null,
+            ip: ctx.ip || existing?.ip || null,
+            userAgent: ctx.userAgent || existing?.userAgent || null,
+            consentGranted: body.consent === false || body.consentGranted === false
+                ? false
+                : (existing?.consentGranted ?? true),
+            updatedAt: nowIso,
+            createdAt: existing?.createdAt || nowIso
+        };
+
+        try {
+            if (existing) {
                 await db.executeOperation({
                     database_name: 'peakmode',
                     collection_name: 'tiktok_sessions',
                     command: '--update',
-                    data: {
-                        filter: { userId: doc.userId },
-                        update: doc
-                    }
+                    data: { filter, update: doc }
                 });
             } else {
                 await db.executeOperation({
                     database_name: 'peakmode',
                     collection_name: 'tiktok_sessions',
                     command: '--create',
-                    data: { ...doc, createdAt: nowIso }
+                    data: doc
                 });
             }
+            devLog('tiktok_session_stored', {
+                identifier: userId || sessionId,
+                hasTtclid: !!doc.ttclid,
+                eventIdKeys: Object.keys(mergedEventIds)
+            });
         } catch (dbErr) {
-            logger.warn('tiktok_session_persist_failed', { userId: doc.userId, message: dbErr.message });
-            // Continue — session binding is opportunistic
+            logger.warn('tiktok_session_persist_failed', {
+                identifier: userId || sessionId,
+                message: dbErr.message
+            });
         }
 
-        return res.json({ success: true });
+        return safeRespond(res, {
+            success: true,
+            session: {
+                userId,
+                sessionId,
+                hasTtclid: !!doc.ttclid,
+                eventIds: doc.eventIds,
+                consentGranted: doc.consentGranted
+            }
+        });
     } catch (err) {
         logger.warn('tiktok_route_session_exception', { message: err?.message });
-        return res.json({ success: false, error: err?.message || 'exception' });
+        return safeRespond(res, { success: false, error: err?.message || 'exception' });
     }
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/tiktok/session/:userId
-// Read back the stored ttclid + event_ids for a user (used during recovery /
-// abandoned-checkout flows). Returns 200 with `null` data when nothing stored.
+// GET /api/tiktok/session/:id
+// Read back the stored ttclid + event_ids for a userId OR sessionId.
+// Returns 200 with `null` data when nothing stored.
 // ---------------------------------------------------------------------------
-router.get('/session/:userId', async (req, res) => {
+router.get('/session/:id', async (req, res) => {
     try {
-        const userId = String(req.params.userId || '').trim();
-        if (!userId) return res.status(400).json({ success: false, error: 'userId is required' });
+        const id = String(req.params.id || '').trim();
+        if (!id) return res.status(400).json({ success: false, error: 'id is required' });
 
-        const getDBInstance = require('../vornifydb/dbInstance');
-        const db = getDBInstance();
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'tiktok_sessions',
-            command: '--read',
-            data: { userId }
-        });
-        const doc = result.success && result.data
-            ? (Array.isArray(result.data) ? result.data[0] : result.data)
-            : null;
-        return res.json({ success: true, data: doc || null });
+        const tryFilters = [{ userId: id }, { sessionId: id }];
+        let doc = null;
+        for (const filter of tryFilters) {
+            const result = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'tiktok_sessions',
+                command: '--read',
+                data: filter
+            });
+            if (result.success && result.data) {
+                doc = Array.isArray(result.data) ? result.data[0] : result.data;
+                if (doc) break;
+            }
+        }
+        return safeRespond(res, { success: true, data: doc || null });
     } catch (err) {
         logger.warn('tiktok_route_session_get_exception', { message: err?.message });
+        return safeRespond(res, { success: false, error: err?.message || 'exception' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/tiktok/session/cleanup
+// Admin-style maintenance — delete tiktok_sessions older than `days` days
+// (default 30). Use to keep the collection bounded; ttclid attribution windows
+// max out at 28 days on TikTok so anything older has no value.
+// Body: { days?: number }
+// ---------------------------------------------------------------------------
+router.post('/session/cleanup', async (req, res) => {
+    try {
+        const days = Number(req.body?.days) > 0 ? Math.floor(Number(req.body.days)) : 30;
+        const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+        let deleted = 0;
+        try {
+            const result = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'tiktok_sessions',
+                command: '--delete-many',
+                data: { updatedAt: { $lt: cutoff } }
+            });
+            deleted = Number(result?.data?.deletedCount) || 0;
+        } catch (dbErr) {
+            logger.warn('tiktok_session_cleanup_failed', { message: dbErr.message, days });
+        }
+        return res.json({ success: true, days, cutoff, deleted });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: err?.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/tiktok/stats
+// Lightweight diagnostics — counts of recent server-side events. Returns:
+//   - last24h: { sent, failed, byEvent }
+//   - last7d:  { sent, failed }
+//   - emqAvg:  rolling EMQ score for CompletePayment
+// Requires TIKTOK_EVENT_LOG_ENABLED=true so events are persisted.
+// ---------------------------------------------------------------------------
+router.get('/stats', async (req, res) => {
+    try {
+        if (process.env.TIKTOK_EVENT_LOG_ENABLED !== 'true') {
+            return res.json({
+                success: true,
+                enabled: false,
+                hint: 'set TIKTOK_EVENT_LOG_ENABLED=true to enable analytics'
+            });
+        }
+
+        const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+        // VornifyDB --read with $gte; tolerate adapter quirks by falling back to empty.
+        const readSafe = async (filter) => {
+            try {
+                const r = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'tiktok_events_log',
+                    command: '--read',
+                    data: filter
+                });
+                if (!r.success || !r.data) return [];
+                return Array.isArray(r.data) ? r.data : [r.data];
+            } catch (_) {
+                return [];
+            }
+        };
+
+        const rows24 = await readSafe({ createdAt: { $gte: since24h } });
+        const rows7d = await readSafe({ createdAt: { $gte: since7d } });
+
+        const summarize = (rows) => {
+            const out = { sent: 0, failed: 0, skipped: 0, byEvent: {} };
+            for (const r of rows) {
+                const evt = r.event || 'unknown';
+                out.byEvent[evt] = out.byEvent[evt] || { sent: 0, failed: 0, skipped: 0 };
+                if (r.status === 'success') {
+                    out.sent += 1;
+                    out.byEvent[evt].sent += 1;
+                } else if (r.status === 'failure') {
+                    out.failed += 1;
+                    out.byEvent[evt].failed += 1;
+                } else {
+                    out.skipped += 1;
+                    out.byEvent[evt].skipped += 1;
+                }
+            }
+            return out;
+        };
+
+        // Rolling EMQ for CompletePayment over last 7d
+        const cpRows = rows7d.filter((r) => r.event === 'CompletePayment' && typeof r.emqScore === 'number');
+        const emqAvg = cpRows.length
+            ? Number((cpRows.reduce((s, r) => s + r.emqScore, 0) / cpRows.length).toFixed(2))
+            : null;
+
+        return res.json({
+            success: true,
+            enabled: true,
+            last24h: summarize(rows24),
+            last7d: summarize(rows7d),
+            completePaymentEmqAvg7d: emqAvg
+        });
+    } catch (err) {
+        logger.warn('tiktok_route_stats_exception', { message: err?.message });
         return res.json({ success: false, error: err?.message || 'exception' });
     }
 });
@@ -241,21 +447,25 @@ router.get('/health', (req, res) => {
         version: 'v1.3',
         endpoint: tiktokEvents.TIKTOK_TRACK_URL,
         ...status,
+        eventLogEnabled: process.env.TIKTOK_EVENT_LOG_ENABLED === 'true',
         supportedEvents: Array.from(tiktokEvents.STANDARD_EVENTS),
         consentContract: {
-            field: 'tiktok.consent (boolean) on /api/orders/create, or `consent` on /api/tiktok/track',
+            field: 'tiktok.consent (boolean) on /api/orders/create, or `consent` on /api/tiktok/track and /api/tiktok/session',
             default: 'true (granted) when omitted — legacy callers',
             denied: 'backend skips ALL server-side firing for that order/request',
             granted: 'backend fires server-side events, deduplicated against frontend Pixel by event_id'
+        },
+        recovery: {
+            sessionLookup: 'webhook auto-recovers ttclid + completePaymentEventId from tiktok_sessions when missing on the order',
+            idempotency: 'webhook never re-fires CompletePayment when order.tiktok.completePaymentSentAt is set'
         }
     });
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/tiktok/test
-// Owner-only manual smoke test (firing a no-op test event). Useful right
-// after credentials are filled in. Set TIKTOK_TEST_EVENT_CODE to keep these
-// out of production stats.
+// Manual smoke test (best run with TIKTOK_TEST_EVENT_CODE to keep noise out of
+// production stats). Useful right after credentials are filled in.
 // Body: { event?: 'ViewContent', eventId?: '...', email?, value?, currency? }
 // ---------------------------------------------------------------------------
 router.post('/test', async (req, res) => {
@@ -263,30 +473,25 @@ router.post('/test', async (req, res) => {
         const body = req.body || {};
         const ctx = tiktokEvents.extractClientContextFromReq(req);
         const event = body.event || 'ViewContent';
-        const result = await tiktokEvents.sendTikTokEvent(event, {
+        const result = await tiktokEvents.trackCommerceEvent(event, {
             eventId: body.eventId,
-            user: {
-                email: body.email,
-                phone: body.phone,
-                externalId: body.externalId,
-                ttclid: body.ttclid,
-                ip: ctx.ip,
-                userAgent: ctx.userAgent
-            },
-            page: { url: body.pageUrl || 'https://peakmode.se/' },
-            properties: {
-                value: body.value ?? 1,
-                currency: body.currency || 'SEK',
-                content_type: 'product',
-                content_ids: body.contentIds || ['TEST_SKU'],
-                contents: [{
-                    content_id: 'TEST_SKU',
-                    content_type: 'product',
-                    content_name: 'TikTok Events API smoke test',
-                    quantity: 1,
-                    price: Number(body.value ?? 1)
-                }]
-            }
+            ttclid: body.ttclid,
+            email: body.email,
+            phone: body.phone,
+            externalId: body.externalId,
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+            pageUrl: body.pageUrl || 'https://peakmode.se/',
+            value: body.value ?? 1,
+            currency: body.currency || 'SEK',
+            contentIds: body.contentIds || ['TEST_SKU'],
+            items: [{
+                id: 'TEST_SKU',
+                title: 'TikTok Events API smoke test',
+                price: Number(body.value ?? 1),
+                quantity: 1
+            }],
+            context: 'route_test'
         });
         devLog('tiktok_smoke_test', result);
         return res.json({ success: true, result });

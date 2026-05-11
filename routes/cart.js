@@ -16,6 +16,17 @@ const db = getDBInstance();
 const STORE_BASE_CURRENCY = 'SEK';
 const VAT_RATE_SE = 0.25;
 
+/** Serialize DB cart writes per user to avoid delete+insert races (parallel add/sync dropping lines). */
+const cartWriteTailByUser = new Map();
+
+function runCartWriteSerialized(userId, fn) {
+    const k = String(userId);
+    const prev = cartWriteTailByUser.get(k) || Promise.resolve();
+    const next = prev.then(fn, fn);
+    cartWriteTailByUser.set(k, next.catch(() => {}));
+    return next;
+}
+
 /** Build product lookup query by id (string or ObjectId). */
 function buildProductLookupQuery(id) {
     if (!id) return { id: '' };
@@ -313,7 +324,7 @@ function calculateCartTotals(cart) {
 }
 
 // Helper function to save cart to database (handles full document replacement correctly)
-async function saveCartToDatabase(userId, cart, originalCart = null) {
+async function saveCartToDatabaseImpl(userId, cart, originalCart = null) {
     const cartExists = originalCart !== null;
     
     // CRITICAL: Ensure cart is a plain object, not an array
@@ -402,6 +413,10 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
             data: cartToSave
         });
     }
+}
+
+async function saveCartToDatabase(userId, cart, originalCart = null) {
+    return runCartWriteSerialized(userId, () => saveCartToDatabaseImpl(userId, cart, originalCart));
 }
 
 // Helper function to ensure cart has totals calculated

@@ -1320,27 +1320,82 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                     devLog('payment_webhook_tiktok_skipped_consent_denied', { orderId });
                     return;
                 }
+
+                // Idempotency guard — Stripe webhooks can replay. We also fire
+                // from /api/payments/confirm as a safety net. Re-read the order
+                // fresh from DB so we observe writes from earlier deliveries of
+                // the same event_id. If we already sent it, skip.
+                let freshOrder = order;
+                try {
+                    const refresh = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--read',
+                        data: { orderId }
+                    });
+                    if (refresh.success && refresh.data) {
+                        freshOrder = normalizeReadFirst(refresh.data) || order;
+                    }
+                } catch (_) {
+                    // Fall back to in-memory order if re-read fails
+                }
+                if (freshOrder?.tiktok?.completePaymentSentAt) {
+                    devLog('payment_webhook_tiktok_idempotent_skip', {
+                        orderId,
+                        sentAt: freshOrder.tiktok.completePaymentSentAt,
+                        eventId: freshOrder.tiktok.completePaymentEventIdSent
+                    });
+                    return;
+                }
+
+                // Recovery: if event_id or ttclid are missing on the order
+                // (frontend forgot to pass them, payload was truncated, etc.),
+                // try to recover them from tiktok_sessions keyed by userId.
+                const baseTk = freshOrder.tiktok || order.tiktok || {};
+                let recovered = null;
+                const needsRecovery =
+                    !baseTk.completePaymentEventId ||
+                    !baseTk.ttclid;
+                if (needsRecovery && freshOrder.userId) {
+                    recovered = await tiktokEvents.findStoredSessionContext({ userId: freshOrder.userId });
+                    if (recovered) {
+                        devLog('payment_webhook_tiktok_session_recovered', {
+                            orderId,
+                            userId: freshOrder.userId,
+                            recoveredTtclid: !!recovered.ttclid,
+                            recoveredEventId: !!recovered.eventIds?.completePayment
+                        });
+                    }
+                }
+
                 // Merge latest update fields onto a working copy of the order so
                 // currency/total/totals reflect what the customer actually paid.
                 const orderForTracking = {
-                    ...order,
+                    ...freshOrder,
                     ...updateData,
                     paymentIntentId: paymentIntent.id,
-                    total: updateData.totals?.total ?? order.total,
-                    currency: updateData.currency || order.currency || 'SEK'
+                    total: updateData.totals?.total ?? freshOrder.total,
+                    currency: updateData.currency || freshOrder.currency || 'SEK'
                 };
                 const ttResult = await tiktokEvents.trackCompletePayment(orderForTracking, {
                     // event_id MUST match the value the storefront's Pixel uses on the thank-you page
-                    eventId: order.tiktok?.completePaymentEventId || undefined,
-                    ttclid: order.tiktok?.ttclid || null,
-                    ttp: order.tiktok?.ttp || null,
-                    ip: order.tiktok?.ip || null,
-                    userAgent: order.tiktok?.userAgent || null,
-                    pageUrl: order.tiktok?.pageUrl || null,
-                    referrer: order.tiktok?.referrer || null
+                    eventId:
+                        baseTk.completePaymentEventId ||
+                        recovered?.eventIds?.completePayment ||
+                        undefined,
+                    ttclid: baseTk.ttclid || recovered?.ttclid || null,
+                    ttp: baseTk.ttp || recovered?.ttp || null,
+                    ip: baseTk.ip || recovered?.ip || null,
+                    userAgent: baseTk.userAgent || recovered?.userAgent || null,
+                    pageUrl: baseTk.pageUrl || recovered?.pageUrl || null,
+                    referrer: baseTk.referrer || recovered?.referrer || null
                 });
                 if (ttResult?.ok) {
-                    devLog('payment_webhook_tiktok_complete_payment_sent', { orderId, eventId: ttResult.eventId });
+                    devLog('payment_webhook_tiktok_complete_payment_sent', {
+                        orderId,
+                        eventId: ttResult.eventId,
+                        emqScore: ttResult.emqScore
+                    });
                     try {
                         await db.executeOperation({
                             database_name: 'peakmode',
@@ -1350,8 +1405,14 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                                 filter: { orderId },
                                 update: {
                                     'tiktok.completePaymentSentAt': new Date().toISOString(),
-                                    'tiktok.completePaymentEventIdSent': ttResult.eventId || order.tiktok?.completePaymentEventId || null,
-                                    'tiktok.completePaymentApiCode': ttResult.code ?? null
+                                    'tiktok.completePaymentEventIdSent':
+                                        ttResult.eventId ||
+                                        baseTk.completePaymentEventId ||
+                                        null,
+                                    'tiktok.completePaymentApiCode': ttResult.code ?? null,
+                                    'tiktok.completePaymentRequestId': ttResult.requestId || null,
+                                    'tiktok.completePaymentEmqScore': ttResult.emqScore ?? null,
+                                    'tiktok.completePaymentRecoveredFromSession': !!recovered
                                 }
                             }
                         });
@@ -1362,7 +1423,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                     logger.warn('payment_webhook_tiktok_complete_payment_failed', {
                         orderId,
                         code: ttResult?.code,
-                        message: ttResult?.message || ttResult?.error
+                        message: ttResult?.message || ttResult?.error,
+                        emqScore: ttResult?.emqScore
                     });
                 }
             } catch (tkErr) {
@@ -2907,10 +2969,9 @@ router.post('/finalize-after-payment', async (req, res) => {
 });
 
 /**
- * GET /api/payments/status/:paymentIntentId
- * Check payment status
+ * Shared: GET /status/:id and GET /intent/:id (storefront alias).
  */
-router.get('/status/:paymentIntentId', async (req, res) => {
+async function handleGetPaymentIntentStatus(req, res) {
     try {
         const { paymentIntentId } = req.params;
 
@@ -2944,24 +3005,43 @@ router.get('/status/:paymentIntentId', async (req, res) => {
             isProcessing,
             isCompleted,
             shouldRedirectToPaymentFailedPage: failedTerminal,
-            message: isProcessing 
-                ? 'Payment is currently being processed' 
-                : isCompleted 
-                    ? `Payment is ${paymentIntent.status}` 
-                    : canConfirm 
-                        ? 'Payment can be confirmed' 
+            message: isProcessing
+                ? 'Payment is currently being processed'
+                : isCompleted
+                    ? `Payment is ${paymentIntent.status}`
+                    : canConfirm
+                        ? 'Payment can be confirmed'
                         : 'Payment status unknown',
             ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
-        logger.error('get_payment_status_error', { message: error.message });
-        res.status(500).json({
+        logger.error('get_payment_status_error', { message: error.message, code: error.code });
+        const notFound =
+            error.code === 'resource_missing' ||
+            (typeof error.message === 'string' && error.message.toLowerCase().includes('no such paymentintent'));
+        const status = notFound ? 404 : 500;
+        res.status(status).json({
             success: false,
             error: error.message || 'Failed to retrieve payment status',
-            code: error.code || 'payment_status_retrieval_failed'
+            code: notFound ? 'PAYMENT_INTENT_NOT_FOUND' : error.code || 'payment_status_retrieval_failed',
+            userMessage: notFound
+                ? 'This payment session is no longer available. Please start checkout again.'
+                : 'Could not load payment status.'
         });
     }
-});
+}
+
+/**
+ * GET /api/payments/status/:paymentIntentId
+ * Check payment status
+ */
+router.get('/status/:paymentIntentId', handleGetPaymentIntentStatus);
+
+/**
+ * GET /api/payments/intent/:paymentIntentId
+ * Alias used by storefront hydration / retry flows (same payload as /status).
+ */
+router.get('/intent/:paymentIntentId', handleGetPaymentIntentStatus);
 
 /**
  * POST /api/payments/check-before-confirm
