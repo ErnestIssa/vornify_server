@@ -103,7 +103,40 @@ function normalizeCountryCode(countryOrCode) {
     if (!countryOrCode || typeof countryOrCode !== 'string') return '';
     const upper = countryOrCode.toUpperCase().trim();
     if (upper.length === 2) return upper;
-    const map = { SWEDEN: 'SE', GERMANY: 'DE', FRANCE: 'FR', DENMARK: 'DK', NORWAY: 'NO', FINLAND: 'FI', ITALY: 'IT', SPAIN: 'ES', NETHERLANDS: 'NL', POLAND: 'PL', AUSTRIA: 'AT', BELGIUM: 'BE', CROATIA: 'HR', CYPRUS: 'CY', CZECH: 'CZ', CZECHIA: 'CZ', ESTONIA: 'EE', GREECE: 'GR', HUNGARY: 'HU', IRELAND: 'IE', LATVIA: 'LV', LITHUANIA: 'LT', LUXEMBOURG: 'LU', MALTA: 'MT', PORTUGAL: 'PT', ROMANIA: 'RO', SLOVAKIA: 'SK', SLOVENIA: 'SI', BULGARIA: 'BG' };
+    const map = {
+        SWEDEN: 'SE',
+        SVERIGE: 'SE',
+        GERMANY: 'DE',
+        FRANCE: 'FR',
+        DENMARK: 'DK',
+        NORWAY: 'NO',
+        FINLAND: 'FI',
+        ITALY: 'IT',
+        SPAIN: 'ES',
+        NETHERLANDS: 'NL',
+        POLAND: 'PL',
+        AUSTRIA: 'AT',
+        BELGIUM: 'BE',
+        CROATIA: 'HR',
+        CYPRUS: 'CY',
+        CZECH: 'CZ',
+        CZECHIA: 'CZ',
+        ESTONIA: 'EE',
+        GREECE: 'GR',
+        HUNGARY: 'HU',
+        IRELAND: 'IE',
+        LATVIA: 'LV',
+        LITHUANIA: 'LT',
+        LUXEMBOURG: 'LU',
+        MALTA: 'MT',
+        PORTUGAL: 'PT',
+        ROMANIA: 'RO',
+        SLOVAKIA: 'SK',
+        SLOVENIA: 'SI',
+        BULGARIA: 'BG',
+        UK: 'GB',
+        'UNITED KINGDOM': 'GB'
+    };
     return map[upper] || upper;
 }
 
@@ -1279,7 +1312,12 @@ router.post('/prepare-confirmation', async (req, res) => {
         const discountCode = body.discountCode || null;
 
         const hasShippingAddress = shippingAddress && (shippingAddress.country || shippingAddress.countryCode);
-        const hasShippingMethod = shippingMethod && (shippingMethod.id || body.shippingMethodId);
+        const hasShippingMethod =
+            shippingMethod &&
+            !!(shippingMethod.id ||
+                shippingMethod.shippingMethodId ||
+                shippingMethod._id ||
+                body.shippingMethodId);
         if (!hasShippingAddress || !hasShippingMethod) {
             throw new AppError({
                 code: ErrorCodes.VALIDATION_FAILED,
@@ -1291,11 +1329,10 @@ router.post('/prepare-confirmation', async (req, res) => {
             });
         }
 
-        const { totals, shippingQuote, shippingVersion } = await withRetry(
+        const { cart, totals, shippingQuote, shippingVersion } = await withRetry(
             () => computeCheckoutTotalsForUser({ req, userId, shippingAddress, shippingMethod, discountCode }),
             { retries: 2 }
         );
-        const { cart } = await computeCheckoutTotalsForUser({ req, userId, shippingAddress, shippingMethod, discountCode });
         const cartVersion = computeCartVersion(
             buildCartVersionSource({ cart, shippingAddress, shippingMethod, discountCode })
         );
@@ -1402,7 +1439,9 @@ router.post('/prepare-confirmation', async (req, res) => {
         logger.error('prepare_confirmation_failed', {
             requestId: req.requestId,
             idempotencyKey,
-            message: msg
+            message: msg,
+            code: err?.code,
+            details: err?.details
         });
         const httpStatus = err?.httpStatus && Number.isFinite(err.httpStatus) ? err.httpStatus : 500;
         return res.status(httpStatus).json({
@@ -1410,6 +1449,7 @@ router.post('/prepare-confirmation', async (req, res) => {
             error: msg,
             code: err?.code || 'prepare_confirmation_failed',
             userMessage: err?.userMessage || 'We could not prepare your payment. Please try again.',
+            requestId: req.requestId || req.headers['x-request-id'] || null,
             ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true })
         });
     }

@@ -92,6 +92,42 @@ async function getPrices() {
     return result.data;
 }
 
+/** All DB keys admin may store on a price row for zone / method joins. */
+function zoneKeysForPriceMatch(zone) {
+    if (!zone || typeof zone !== 'object') return [];
+    const keys = new Set();
+    if (zone._id != null) keys.add(String(zone._id));
+    if (zone.id != null) keys.add(String(zone.id));
+    if (zone.name != null) keys.add(String(zone.name));
+    return [...keys];
+}
+
+function methodKeysForPriceMatch(method) {
+    if (!method || typeof method !== 'object') return [];
+    const keys = new Set();
+    if (method.id != null) keys.add(String(method.id));
+    if (method._id != null) keys.add(String(method._id));
+    return [...keys];
+}
+
+/**
+ * Resolve price the same way as getDeliveryOptionsFromDb (slug + Mongo _id on both sides).
+ * Prevents prepare-confirmation 400s when shipping_prices.methodId is an ObjectId string but the client sends method.id.
+ */
+async function getPriceForResolvedZoneMethod(zone, method) {
+    const zKeys = zoneKeysForPriceMatch(zone);
+    const mKeys = methodKeysForPriceMatch(method);
+    if (zKeys.length === 0 || mKeys.length === 0) return null;
+    const prices = await getPrices();
+    const priceRow = prices.find((p) => {
+        const pz = p.zoneId != null ? String(p.zoneId) : '';
+        const pm = p.methodId != null ? String(p.methodId) : '';
+        return zKeys.includes(pz) && mKeys.includes(pm);
+    });
+    if (!priceRow || typeof priceRow.basePrice !== 'number') return null;
+    return priceRow.basePrice;
+}
+
 /**
  * Get price for a zone + method. zoneId and methodId can be _id (ObjectId/string) or method id string (e.g. 'home_delivery').
  * @param {string} zoneId - zone _id or zone name/code
@@ -100,17 +136,29 @@ async function getPrices() {
  */
 async function getPriceForZoneAndMethod(zoneId, methodId) {
     if (!zoneId || !methodId) return null;
-    const prices = await getPrices();
+    const pricesFirst = await getPrices();
     const zoneIdStr = String(zoneId);
     const methodIdStr = String(methodId);
-    const priceRow = prices.find(p => {
+    const cheapRow = pricesFirst.find(p => {
         const pZone = p.zoneId ? String(p.zoneId) : '';
         const pMethod = p.methodId ? String(p.methodId) : '';
         return (pZone === zoneIdStr || pZone === zoneId) &&
                (pMethod === methodIdStr || pMethod === methodId);
     });
-    if (!priceRow || typeof priceRow.basePrice !== 'number') return null;
-    return priceRow.basePrice;
+    if (cheapRow && typeof cheapRow.basePrice === 'number') return cheapRow.basePrice;
+
+    const method = await getMethodById(methodId);
+    if (!method) return null;
+    const zones = await getZones();
+    const zone = zones.find(
+        (z) =>
+            (z._id != null && String(z._id) === zoneIdStr) ||
+            (z.id != null && String(z.id) === zoneIdStr) ||
+            (z.name != null && String(z.name) === zoneIdStr)
+    );
+    if (!zone) return null;
+    const resolved = await getPriceForResolvedZoneMethod(zone, method);
+    return typeof resolved === 'number' && !isNaN(resolved) ? resolved : null;
 }
 
 /**
@@ -211,8 +259,11 @@ async function getShippingCostFromDb(countryCode, methodId, municipality) {
     if (await isFreeDelivery(countryCode, municipality)) return 0;
     const zone = await getZoneByCountry(countryCode);
     if (!zone) return 0;
-    const cost = await getPriceForZoneAndMethod(zone._id?.toString() || zone.id, methodId);
-    return typeof cost === 'number' && !isNaN(cost) ? cost : 0;
+    const method = await getMethodById(methodId);
+    if (!method) return 0;
+    const cost = await getPriceForResolvedZoneMethod(zone, method);
+    if (typeof cost === 'number' && !isNaN(cost)) return cost;
+    return 0;
 }
 
 /**
@@ -233,7 +284,7 @@ async function validateAndQuoteShipping(countryCode, methodId, municipality, cur
     const freeDelivery = await isFreeDelivery(country, municipality);
     const zoneIdStr = zone._id?.toString() || zone.id || zone.name;
     const methodIdStr = method.id || method._id?.toString() || String(methodId);
-    const cost = freeDelivery ? 0 : await getPriceForZoneAndMethod(zone._id?.toString() || zone.id, methodIdStr);
+    const cost = freeDelivery ? 0 : await getPriceForResolvedZoneMethod(zone, method);
     if (!freeDelivery && (cost == null || typeof cost !== 'number' || isNaN(cost))) {
         return { ok: false, errorCode: 'SHIPPING_METHOD_INVALID', userMessage: 'Selected shipping method is not available for your address. Please choose another.' };
     }
@@ -270,6 +321,7 @@ module.exports = {
     getMethods,
     getMethodById,
     getPrices,
+    getPriceForResolvedZoneMethod,
     getFreeAreas,
     isFreeDelivery,
     hasZoneConfig,
