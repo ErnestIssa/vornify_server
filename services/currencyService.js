@@ -100,9 +100,11 @@ async function getRateFromDB(currency, rateCache = null) {
         });
 
         if (result.success && result.data) {
-            const rateData = Array.isArray(result.data) ? result.data[0] : result.data;
-            
-            if (rateData.rate) {
+            const raw = Array.isArray(result.data) ? result.data[0] : result.data;
+            const rateData =
+                raw && typeof raw === 'object' ? raw : null;
+
+            if (rateData && rateData.rate != null) {
                 const rate = parseFloat(rateData.rate);
                 if (!isNaN(rate)) {
                     // Store in per-request cache for reuse

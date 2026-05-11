@@ -209,7 +209,19 @@ const apiCorsOptions = {
         callback(new Error('Not allowed by CORS'));
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'api-key', 'X-Request-Id'],
+    // If-Match + X-Cart-Version: storefront optimistic concurrency / cart versioning (OPTIONS preflight must list them).
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'X-Requested-With',
+        'Accept',
+        'api-key',
+        'X-Request-Id',
+        'If-Match',
+        'X-Cart-Version',
+        'Idempotency-Key'
+    ],
+    exposedHeaders: ['X-Cart-Version', 'X-Request-Id'],
     credentials: true,
     maxAge: 86400,
     preflightContinue: false,
