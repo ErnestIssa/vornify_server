@@ -65,12 +65,18 @@ async function getMethods() {
  * @returns {Promise<object | null>}
  */
 async function getMethodById(id) {
-    if (!id) return null;
+    if (id === undefined || id === null || id === '') return null;
+    const sid = String(id).trim();
+    if (!sid) return null;
     const methods = await getMethods();
-    const byId = methods.find(m => (m.id && m.id === id) || (m._id && String(m._id) === String(id)));
+    const byId = methods.find(
+        (m) =>
+            (m.id != null && String(m.id) === sid) ||
+            (m._id != null && String(m._id) === sid)
+    );
     if (byId) return byId;
-    if (ObjectId.isValid(id)) {
-        const byMongoId = methods.find(m => m._id && String(m._id) === String(id));
+    if (ObjectId.isValid(sid)) {
+        const byMongoId = methods.find((m) => m._id && String(m._id) === sid);
         return byMongoId || null;
     }
     return null;

@@ -262,10 +262,69 @@ function sumCartProductGross(cartItems) {
 }
 
 /**
+ * Try several client payload shapes (slug, Mongo id, deliveryOption) until one matches an active method.
+ */
+async function resolveShippingMethodIdFromPayload(shippingMethod, body) {
+    const shippingConfigService = require('../services/shippingConfigService');
+    const candidates = [];
+    const push = (v) => {
+        if (v === undefined || v === null) return;
+        const s = String(v).trim();
+        if (s !== '') candidates.push(s);
+    };
+    if (shippingMethod && typeof shippingMethod === 'object') {
+        push(shippingMethod.id);
+        push(shippingMethod.shippingMethodId);
+        push(shippingMethod.methodId);
+        push(shippingMethod._id);
+    }
+    const b = body && typeof body === 'object' ? body : {};
+    push(b.shippingMethodId);
+    push(b.methodId);
+    if (b.deliveryOption && typeof b.deliveryOption === 'object') {
+        push(b.deliveryOption.id);
+        push(b.deliveryOption.methodId);
+        push(b.deliveryOption._id);
+    }
+    const seen = new Set();
+    const unique = candidates.filter((x) => (seen.has(x) ? false : (seen.add(x), true)));
+    for (const cand of unique) {
+        const m = await shippingConfigService.getMethodById(cand);
+        if (m) return cand;
+    }
+    return null;
+}
+
+function extractShippingCountryRaw(shippingAddress) {
+    if (!shippingAddress || typeof shippingAddress !== 'object') return '';
+    const a = shippingAddress;
+    return (
+        a.country ||
+        a.countryCode ||
+        a.country_code ||
+        a.Country ||
+        a.nationality ||
+        ''
+    );
+}
+
+/**
  * Compute canonical checkout totals for a userId from the current cart + selected shipping/discount.
  * This is used for create-intent, update-intent, and the new prepare-confirmation endpoint.
+ *
+ * @param {object} opts
+ * @param {object} [opts.checkoutContextBody] - raw POST body (prepare-confirmation) for nested deliveryOption / alternate keys
+ * @param {boolean} [opts.tolerateInvalidDiscount] - if true, invalid/expired cart discount is dropped (amount 0) instead of 400
  */
-async function computeCheckoutTotalsForUser({ req, userId, shippingAddress, shippingMethod, discountCode }) {
+async function computeCheckoutTotalsForUser({
+    req,
+    userId,
+    shippingAddress,
+    shippingMethod,
+    discountCode,
+    checkoutContextBody = null,
+    tolerateInvalidDiscount = false
+}) {
     const checkoutTotalsService = require('../services/checkoutTotalsService');
     const discountService = require('../services/discountService');
     const vatService = require('../services/vatService');
@@ -293,17 +352,26 @@ async function computeCheckoutTotalsForUser({ req, userId, shippingAddress, ship
         });
     }
 
-    const countryForZone = normalizeCountryCode(
-        (shippingAddress && (shippingAddress.country || shippingAddress.countryCode))
-            ? String(shippingAddress.country || shippingAddress.countryCode)
-            : ''
-    );
+    let countryForZone = normalizeCountryCode(String(extractShippingCountryRaw(shippingAddress) || ''));
+    if (!countryForZone) {
+        countryForZone = normalizeCountryCode(String(vatService.getCountryFromRequest(req) || ''));
+    }
 
     const countryForVat = countryForZone || vatService.getCountryFromRequest(req);
     const vatRate = vatService.getVatRate(countryForVat);
 
     // Shipping validation + versioned quote from DB (do not silently treat invalid as 0)
-    const methodId = shippingMethod?.id || shippingMethod?.shippingMethodId || (shippingMethod?._id && shippingMethod._id.toString()) || null;
+    const methodId = await resolveShippingMethodIdFromPayload(shippingMethod, checkoutContextBody);
+    if (!methodId) {
+        throw new AppError({
+            code: ErrorCodes.VALIDATION_FAILED,
+            httpStatus: 400,
+            severity: 'warn',
+            message: 'Could not resolve shipping method id from request',
+            userMessage: 'Please choose a delivery option again, then try paying.',
+            details: { reason: 'unresolved_shipping_method' }
+        });
+    }
     const municipality = (shippingAddress && (shippingAddress.municipality || shippingAddress.city) ? String(shippingAddress.municipality || shippingAddress.city) : '').trim();
     const quoteResult = await shippingConfigService.validateAndQuoteShipping(countryForZone, methodId, municipality, 'SEK');
     if (!quoteResult.ok) {
@@ -321,22 +389,37 @@ async function computeCheckoutTotalsForUser({ req, userId, shippingAddress, ship
 
     const effectiveDiscountCode = discountService.pickEffectiveDiscountCode(discountCode, cart);
     const productGrossForDiscount = sumCartProductGross(cart.items);
-    const discountResolution = await discountService.validateAndComputeDiscountAmount(
-        productGrossForDiscount,
-        shippingCost,
-        effectiveDiscountCode
-    );
-    if (!discountResolution.ok) {
-        throw new AppError({
-            code: discountResolution.errorCode,
-            httpStatus: 400,
-            severity: 'warn',
-            message: discountResolution.error,
-            userMessage: discountResolution.userMessage,
-            details: { discountCode: effectiveDiscountCode }
-        });
+    let discountAmount = 0;
+    let discountDropped = false;
+    if (effectiveDiscountCode) {
+        const discountResolution = await discountService.validateAndComputeDiscountAmount(
+            productGrossForDiscount,
+            shippingCost,
+            effectiveDiscountCode
+        );
+        if (!discountResolution.ok) {
+            if (tolerateInvalidDiscount) {
+                discountDropped = true;
+                logger.warn('prepare_confirmation_discount_dropped', {
+                    userId,
+                    discountCode: effectiveDiscountCode,
+                    errorCode: discountResolution.errorCode
+                });
+                discountAmount = 0;
+            } else {
+                throw new AppError({
+                    code: discountResolution.errorCode,
+                    httpStatus: 400,
+                    severity: 'warn',
+                    message: discountResolution.error,
+                    userMessage: discountResolution.userMessage,
+                    details: { discountCode: effectiveDiscountCode }
+                });
+            }
+        } else {
+            discountAmount = discountResolution.discountAmount;
+        }
     }
-    const discountAmount = discountResolution.discountAmount;
 
     const totals = checkoutTotalsService.calculateTotals(
         cart.items,
@@ -347,7 +430,15 @@ async function computeCheckoutTotalsForUser({ req, userId, shippingAddress, ship
         { country: countryForVat }
     );
 
-    return { cart, totals, countryForVat, shippingQuote: quoteResult.quote, shippingVersion };
+    return {
+        cart,
+        totals,
+        countryForVat,
+        shippingQuote: quoteResult.quote,
+        shippingVersion,
+        discountDropped,
+        clearedDiscountCode: discountDropped ? effectiveDiscountCode : null
+    };
 }
 
 /**
@@ -1308,29 +1399,51 @@ router.post('/prepare-confirmation', async (req, res) => {
         const paymentIntentId = body.paymentIntentId || null;
         const orderIdIncoming = body.orderId || null;
         const shippingAddress = body.shippingAddress || body.customer;
-        const shippingMethod = body.shippingMethod || (body.shippingMethodId ? { id: body.shippingMethodId, type: body.shippingMethodType } : null);
+        let shippingMethod = body.shippingMethod || (body.shippingMethodId ? { id: body.shippingMethodId, type: body.shippingMethodType } : null);
+        if ((!shippingMethod || typeof shippingMethod !== 'object') && body.deliveryOption && typeof body.deliveryOption === 'object') {
+            const d = body.deliveryOption;
+            shippingMethod = {
+                id: d.id,
+                shippingMethodId: d.shippingMethodId,
+                methodId: d.methodId,
+                _id: d._id,
+                type: d.type
+            };
+        }
         const discountCode = body.discountCode || null;
 
-        const hasShippingAddress = shippingAddress && (shippingAddress.country || shippingAddress.countryCode);
-        const hasShippingMethod =
-            shippingMethod &&
-            !!(shippingMethod.id ||
-                shippingMethod.shippingMethodId ||
-                shippingMethod._id ||
-                body.shippingMethodId);
-        if (!hasShippingAddress || !hasShippingMethod) {
+        const hasShippingAddress = !!(shippingAddress && String(extractShippingCountryRaw(shippingAddress) || '').trim());
+        const hasShippingMethodHint =
+            !!(shippingMethod &&
+                (shippingMethod.id ||
+                    shippingMethod.shippingMethodId ||
+                    shippingMethod.methodId ||
+                    shippingMethod._id)) ||
+            !!(body.shippingMethodId || body.methodId) ||
+            !!(body.deliveryOption &&
+                (body.deliveryOption.id || body.deliveryOption.methodId || body.deliveryOption._id));
+        if (!hasShippingAddress || !hasShippingMethodHint) {
             throw new AppError({
                 code: ErrorCodes.VALIDATION_FAILED,
                 httpStatus: 400,
                 severity: 'warn',
                 message: 'Shipping address and method required before confirmation',
                 userMessage: 'Please enter your delivery address and select a shipping method before paying.',
-                details: { hasShippingAddress: !!hasShippingAddress, hasShippingMethod: !!hasShippingMethod }
+                details: { hasShippingAddress, hasShippingMethod: hasShippingMethodHint }
             });
         }
 
-        const { cart, totals, shippingQuote, shippingVersion } = await withRetry(
-            () => computeCheckoutTotalsForUser({ req, userId, shippingAddress, shippingMethod, discountCode }),
+        const { cart, totals, shippingQuote, shippingVersion, discountDropped, clearedDiscountCode } = await withRetry(
+            () =>
+                computeCheckoutTotalsForUser({
+                    req,
+                    userId,
+                    shippingAddress,
+                    shippingMethod,
+                    discountCode,
+                    checkoutContextBody: body,
+                    tolerateInvalidDiscount: true
+                }),
             { retries: 2 }
         );
         const cartVersion = computeCartVersion(
@@ -1429,6 +1542,9 @@ router.post('/prepare-confirmation', async (req, res) => {
             cartVersion,
             shippingVersion,
             shippingQuote,
+            ...(discountDropped
+                ? { discountDropped: true, clearedDiscountCode: clearedDiscountCode || null }
+                : {}),
             // Frontend should always use this before confirmPayment/redirect for provider parity
             mustUseBeforeConfirm: true,
             ...checkoutNavigationExtras({ paymentIntent: intent })
@@ -1450,6 +1566,7 @@ router.post('/prepare-confirmation', async (req, res) => {
             code: err?.code || 'prepare_confirmation_failed',
             userMessage: err?.userMessage || 'We could not prepare your payment. Please try again.',
             requestId: req.requestId || req.headers['x-request-id'] || null,
+            details: err?.details,
             ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true })
         });
     }
