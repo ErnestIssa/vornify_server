@@ -5,6 +5,7 @@
  */
 
 const getDBInstance = require('../../vornifydb/dbInstance');
+const { logger } = require('../../core/logging/logger');
 
 const SHIPIT_BASE_URL = (process.env.SHIPIT_BASE_URL || 'https://api.shipit.ax/v1').replace(/\/$/, '');
 const SHIPIT_API_KEY = process.env.SHIPIT_API_KEY || '';
@@ -161,7 +162,7 @@ async function createShipment(orderId) {
             }
         };
     } catch (e) {
-        console.error('[SHIPIT] createShipment error:', e);
+        logger.error('shipit_create_shipment', { message: e.message });
         return { success: false, error: e.message || 'SHIPIT request failed' };
     }
 }
@@ -205,7 +206,7 @@ async function trackShipment(trackingNumber) {
 
         return { success: true, events, status };
     } catch (e) {
-        console.error('[SHIPIT] trackShipment error:', e);
+        logger.error('shipit_track_shipment', { message: e.message });
         return { success: false, error: e.message || 'SHIPIT request failed' };
     }
 }
@@ -245,7 +246,7 @@ async function getPickupPoints(postcode, country, serviceId) {
         const agents = data.agents || data.pickup_points || data.points || [];
         return { success: true, agents: Array.isArray(agents) ? agents : [] };
     } catch (e) {
-        console.error('[SHIPIT] getPickupPoints error:', e);
+        logger.error('shipit_pickup_points', { message: e.message });
         return { success: false, error: e.message || 'SHIPIT request failed', agents: [] };
     }
 }
@@ -284,7 +285,7 @@ async function syncCarrierServices() {
 
         return { success: true, methods: list };
     } catch (e) {
-        console.error('[SHIPIT] syncCarrierServices error:', e);
+        logger.error('shipit_sync_carrier_services', { message: e.message });
         return { success: false, error: e.message || 'SHIPIT request failed', methods: [] };
     }
 }

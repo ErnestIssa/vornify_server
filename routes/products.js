@@ -10,6 +10,8 @@ const variantService = require('../services/variantService');
 const vatService = require('../services/vatService');
 const currencySelectionService = require('../services/currencySelectionService');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { devLog, devWarn } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
 
 const STORE_BASE_CURRENCY = 'SEK';
 const optionalAuthenticateAdmin = authenticateAdmin.optionalAuthenticateAdmin || (async (req, res, next) => { req.isAdminRequest = false; next(); });
@@ -84,7 +86,7 @@ setInterval(() => {
     keysToDelete.forEach(key => viewThrottleCache.delete(key));
     
     if (keysToDelete.length > 0) {
-        console.log(`🧹 [View Throttle] Cleaned up ${keysToDelete.length} expired throttle entries`);
+        devLog(`[View Throttle] Cleaned up ${keysToDelete.length} expired throttle entries`);
     }
 }, 60 * 60 * 1000); // Every hour
 
@@ -229,7 +231,7 @@ function validateProductDetailContent(data, onlyIfPresent = false) {
 // This route must be defined before /:id to avoid route conflicts
 router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
     try {
-        console.log('🔍 [MOST VIEWED] Request received:', {
+        devLog('[MOST VIEWED] Request received', {
             limit: req.query.limit,
             timestamp: new Date().toISOString()
         });
@@ -238,7 +240,7 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
         
         // Check if db instance is available
         if (!db) {
-            console.error('❌ [MOST VIEWED] Database instance not available');
+            logger.error('products_most_viewed_db_unavailable', {});
             return res.status(500).json({
                 success: false,
                 error: 'Database not initialized',
@@ -248,7 +250,7 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
 
         // Check if executeOperation method exists
         if (typeof db.executeOperation !== 'function') {
-            console.error('❌ [MOST VIEWED] executeOperation method not available');
+            logger.error('products_most_viewed_execute_operation_missing', {});
             return res.status(500).json({
                 success: false,
                 error: 'Database method not available',
@@ -256,7 +258,7 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
 
-        console.log('🔍 [MOST VIEWED] Querying database for products...');
+        devLog('[MOST VIEWED] Querying database for products…');
         // Storefront: filter published at DB level; admin: all products
         const query = req.isAdminRequest ? {} : { published: true };
         const result = await db.executeOperation({
@@ -266,7 +268,7 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
             data: query
         });
         
-        console.log('🔍 [MOST VIEWED] Database query result:', {
+        devLog('[MOST VIEWED] Database query result', {
             success: result?.success,
             hasData: !!result?.data,
             dataType: Array.isArray(result?.data) ? 'array' : typeof result?.data
@@ -307,18 +309,14 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
             // Limit results
             products = products.slice(0, limit);
             
-            console.log(`📊 [Most Viewed] Returning ${products.length} most viewed products (sorted from ${result.data?.length || 0} total)`);
-            
-            console.log(`✅ [MOST VIEWED] Returning ${products.length} products`);
+            devLog(`[Most Viewed] Returning ${products.length} products (sorted from ${result.data?.length || 0} total)`);
             res.json({
                 success: true,
                 data: products
             });
         } else {
-            console.error('❌ [MOST VIEWED] Database query failed:', {
-                result: result,
-                hasError: !!result?.error,
-                errorMessage: result?.error || result?.message
+            logger.error('products_most_viewed_query_failed', {
+                message: result?.error || result?.message || 'unknown'
             });
             res.status(500).json({
                 success: false,
@@ -326,7 +324,7 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('❌ [Most Viewed] Error:', error);
+        logger.error('products_most_viewed_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve most viewed products',
@@ -392,7 +390,7 @@ router.get('/categories', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Get categories error:', error);
+        logger.error('products_get_categories_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve categories'
@@ -405,7 +403,7 @@ router.get('/categories', optionalAuthenticateAdmin, async (req, res) => {
 router.get('/sitemap', async (req, res) => {
     try {
         if (process.env.NODE_ENV === 'development' || req.query._ping) {
-            console.log('🔔 [CRON/PING] GET /api/products/sitemap hit');
+            devLog('[CRON/PING] GET /api/products/sitemap hit');
         }
         // Filter published at DB level (sitemap never includes drafts)
         const result = await db.executeOperation({
@@ -446,7 +444,7 @@ router.get('/sitemap', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Get sitemap products error:', error);
+        logger.error('products_sitemap_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve products for sitemap'
@@ -508,7 +506,7 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
                         product.compare_at_price_including_vat = Math.round(compareAtInclVatSEK * rate * 100) / 100;
                     }
                 } catch (e) {
-                    console.warn('Product detail: currency conversion failed, using SEK', e.message);
+                    devWarn('Product detail: currency conversion failed, using SEK', e.message);
                 }
             }
             product.currency = displayCurrency || STORE_BASE_CURRENCY;
@@ -526,7 +524,9 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
                     product.converted_price = multiCurrencyPrices[requestedCurrency];
                 }
             } catch (currencyError) {
-                console.warn('Failed to get multi-currency prices:', currencyError);
+                logger.warn('products_detail_multi_currency_failed', {
+                    message: currencyError.message || String(currencyError)
+                });
                 product.base_price = basePrice;
                 product.prices = { [STORE_BASE_CURRENCY]: basePrice };
             }
@@ -592,7 +592,7 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
             try {
                 reviewStats = await reviewStatsHelper.getProductReviewStats(product.id);
             } catch (error) {
-                console.warn('Failed to get review stats for SEO:', error);
+                logger.warn('products_detail_review_stats_seo_failed', { message: error.message });
             }
             
             // Add SEO fields (additive only, does not modify existing product data)
@@ -616,7 +616,7 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Get product error:', error);
+        logger.error('products_get_one_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve product'
@@ -634,7 +634,7 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
         
         // Check server-side throttling (30 minutes per IP + product ID)
         if (shouldThrottleView(clientIp, id)) {
-            console.log(`⏸️ [View Throttled] Product ${id} from IP ${clientIp} - view rejected (within 30 min window)`);
+            devLog(`[View Throttled] Product ${id} from IP ${clientIp} — rejected (within 30 min)`);
             return res.status(200).json({
                 success: true,
                 views: 0,
@@ -709,7 +709,7 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
         });
         
         if (updateResult.success) {
-            console.log(`👁️ [View Tracked] Product ${productId || product_id} - Total: ${views}, Last 7 days: ${viewsLast7Days}`);
+            devLog(`[View Tracked] Product ${productId || product_id} — total ${views}, last 7d ${viewsLast7Days}`);
             
             res.json({
                 success: true,
@@ -717,7 +717,10 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
                 viewsLast7Days: viewsLast7Days
             });
         } else {
-            console.error(`❌ [View Tracking] Failed to update product ${productId || product_id}:`, updateResult.error);
+            logger.error('products_view_track_update_failed', {
+                productRef: productId || String(product_id),
+                message: updateResult.error || 'unknown'
+            });
             res.status(500).json({
                 success: false,
                 error: 'Failed to update view count',
@@ -725,7 +728,7 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('❌ [View Tracking] Error:', error);
+        logger.error('products_view_track_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to track product view',
@@ -817,7 +820,7 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 try {
                     sekToDisplayRate = await currencyService.getExchangeRate(STORE_BASE_CURRENCY, displayCurrency, rateCache);
                 } catch (e) {
-                    console.warn('Product list: currency rate fetch failed, using SEK', e.message);
+                    devWarn('Product list: currency rate fetch failed, using SEK', e.message);
                 }
             }
 
@@ -839,7 +842,10 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                     product.base_price = basePrice;
                     product.prices = multiCurrencyPrices;
                 } catch (currencyError) {
-                    console.warn(`Failed to get multi-currency prices for product ${product.id}:`, currencyError);
+                    logger.warn('products_list_multi_currency_failed', {
+                        productId: product.id,
+                        message: currencyError.message || String(currencyError)
+                    });
                     product.base_price = basePrice;
                     product.prices = { [STORE_BASE_CURRENCY]: basePrice };
                 }
@@ -897,7 +903,7 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                     reviewStatsMap = await reviewStatsHelper.getMultipleProductReviewStats(productIds);
                 }
             } catch (error) {
-                console.warn('Failed to get review stats for SEO:', error);
+                logger.warn('products_detail_review_stats_seo_failed', { message: error.message });
             }
             
             // Add SEO fields to each product (additive only)
@@ -925,7 +931,7 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Get products error:', error);
+        logger.error('products_list_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve products'
@@ -1054,7 +1060,7 @@ router.post('/', authenticateAdmin, async (req, res) => {
         const swedishTranslations = productTranslationHelper.generateSwedishTranslations(productData);
         if (Object.keys(swedishTranslations).length > 0) {
             Object.assign(productData, swedishTranslations);
-            console.log(`🌐 [Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for new product`);
+            devLog(`[Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for new product`);
         }
         
         const result = await db.executeOperation({
@@ -1085,7 +1091,7 @@ router.post('/', authenticateAdmin, async (req, res) => {
             data: created
         });
     } catch (error) {
-        console.error('Create product error:', error);
+        logger.error('products_create_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to create product'
@@ -1211,7 +1217,7 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
         if (Object.keys(swedishTranslations).length > 0) {
             // Merge Swedish translations into update data
             Object.assign(updateData, swedishTranslations);
-            console.log(`🌐 [Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for updated product`);
+            devLog(`[Auto-Translation] Generated ${Object.keys(swedishTranslations).length} Swedish translation(s) for updated product`);
         }
         // Ensure published is persisted when admin sends it (list badge toggle or edit form)
         if (hasPublishedInBody) {
@@ -1238,7 +1244,7 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
             res.status(400).json(result);
         }
     } catch (error) {
-        console.error('Update product error:', error);
+        logger.error('products_update_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to update product'
@@ -1380,7 +1386,7 @@ router.post('/:id/seed-color-media', authenticateAdmin, async (req, res) => {
             data: updated
         });
     } catch (e) {
-        console.error('Seed colorMedia error:', e);
+        logger.error('products_seed_color_media_error', { message: e.message });
         return res.status(500).json({ success: false, error: e.message || 'Failed to seed colorMedia' });
     }
 });
@@ -1406,7 +1412,7 @@ router.delete('/:id', authenticateAdmin, async (req, res) => {
             res.status(400).json(result);
         }
     } catch (error) {
-        console.error('Delete product error:', error);
+        logger.error('products_delete_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to delete product'
@@ -1449,7 +1455,7 @@ router.get('/:id/variants', optionalAuthenticateAdmin, async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Get product variants error:', error);
+        logger.error('products_variants_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve product variants'

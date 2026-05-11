@@ -5,6 +5,12 @@ const checkoutTotalsService = require('../services/checkoutTotalsService');
 const vatService = require('../services/vatService');
 const currencySelectionService = require('../services/currencySelectionService');
 const currencyService = require('../services/currencyService');
+const { buildCartVersionSource, computeCartVersion } = require('../core/guards/cartVersion');
+const { DISCOUNT_ADJUSTMENT_REMOVED } = require('../core/guards/discountLifecycle');
+const { ErrorCodes } = require('../core/errors/codes');
+const { AppError } = require('../core/errors/AppError');
+const { devLog, devWarn } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
 
 const db = getDBInstance();
 const STORE_BASE_CURRENCY = 'SEK';
@@ -44,9 +50,58 @@ async function getProductPriceSEKGross(productId) {
         const basePrice = typeof product.price === 'number' && !isNaN(product.price) ? product.price : 0;
         return Math.round(basePrice * (1 + VAT_RATE_SE) * 100) / 100;
     } catch (e) {
-        console.warn('[cart] getProductPriceSEKGross failed for', productId, e.message);
+        devWarn('[cart] getProductPriceSEKGross failed', productId, e.message);
         return null;
     }
+}
+
+/** Fetch product doc for inventory enforcement (best-effort). */
+async function getProductForCart(productId) {
+    if (!productId) return null;
+    try {
+        const query = buildProductLookupQuery(productId);
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: query
+        });
+        if (!result.success || !result.data) return null;
+        return Array.isArray(result.data) ? result.data[0] : result.data;
+    } catch (e) {
+        devWarn('[cart] getProductForCart failed', productId, e.message);
+        return null;
+    }
+}
+
+function pickVariantForItem(product, item) {
+    const inv = product?.inventory;
+    const variants = Array.isArray(inv?.variants) ? inv.variants : [];
+    const variantId = item?.variantId != null ? String(item.variantId) : null;
+    const colorId = item?.colorId != null ? String(item.colorId) : null;
+    const sizeId = item?.sizeId != null ? String(item.sizeId) : null;
+
+    if (variantId) {
+        return variants.find(v => String(v?.id) === variantId) || null;
+    }
+    if (colorId && sizeId) {
+        return variants.find(v => String(v?.colorId) === colorId && String(v?.sizeId) === sizeId) || null;
+    }
+    return null;
+}
+
+function clampQuantity(requested, available) {
+    const reqQ = typeof requested === 'number' && !isNaN(requested) ? requested : Number(requested);
+    const aQ = typeof available === 'number' && !isNaN(available) ? available : Number(available);
+    const rq = Number.isFinite(reqQ) ? reqQ : 1;
+    const aq = Number.isFinite(aQ) ? aQ : 0;
+    const normalizedReq = rq > 0 ? Math.floor(rq) : 0;
+    const normalizedAvail = aq > 0 ? Math.floor(aq) : 0;
+    return Math.max(0, Math.min(normalizedReq, normalizedAvail));
+}
+
+function normalizeCartItemId(raw, index) {
+    return raw?.id || raw?.productId || `item_${index}`;
 }
 
 /** Convert totals object (all numeric values) from SEK to display currency; add currency and currencySymbol. */
@@ -113,6 +168,58 @@ function getBackendTotals(cart, opts = {}) {
     const country = opts.country || vatService.DEFAULT_COUNTRY;
     const vatRate = typeof opts.vatRate === 'number' ? opts.vatRate : vatService.getVatRate(country);
     return checkoutTotalsService.calculateTotals(items, shipping, discountAmount, 'SEK', vatRate, { country });
+}
+
+function attachCartVersion(cart, req) {
+    // Cart version includes appliedDiscount + items/qty/price. Shipping inputs can be added later
+    // once the cart stores shipping method/address; for now we version core cart state.
+    const source = buildCartVersionSource({
+        cart,
+        shippingAddress: null,
+        shippingMethod: null,
+        discountCode: null
+    });
+    const v = computeCartVersion(source);
+    cart.cartVersion = v;
+    // ETag-like hint for clients to coordinate.
+    if (req?.res) {
+        try {
+            req.res.setHeader('X-Cart-Version', v);
+        } catch {
+            // ignore
+        }
+    }
+    return v;
+}
+
+function getIncomingCartVersion(req) {
+    const h = req.headers['if-match'] || req.headers['x-cart-version'];
+    if (typeof h === 'string' && h.trim() !== '') return h.trim().slice(0, 64);
+    const bodyV = req.body?.cartVersion;
+    if (typeof bodyV === 'string' && bodyV.trim() !== '') return bodyV.trim().slice(0, 64);
+    return null;
+}
+
+async function respondCartConflict(res, req, cart, message) {
+    const vatOpts = getVatOptsFromRequest(req);
+    let totals = getBackendTotals(cart, vatOpts);
+    const { totals: resolvedTotals, rateFromSEK } = await ensureTotalsWithDisplayCurrency(totals, req);
+    totals = resolvedTotals;
+    cart.totals = totals;
+    enrichCartItemsForDisplay(cart, rateFromSEK);
+    const cartVersion = attachCartVersion(cart, req);
+    return res.status(409).json({
+        success: false,
+        code: ErrorCodes.CART_STALE,
+        error: 'Cart was updated elsewhere',
+        userMessage: 'Your cart changed in another tab/device. We refreshed it—please review and try again.',
+        message,
+        cart,
+        totals,
+        cartVersion,
+        currency: totals.currency,
+        currencySymbol: totals.currencySymbol
+    });
 }
 
 // Helper function to validate cart item structure
@@ -211,7 +318,7 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
     
     // CRITICAL: Ensure cart is a plain object, not an array
     if (Array.isArray(cart)) {
-        console.error(`❌ [CART SAVE] Cart is an array, expected object for userId: ${userId}`);
+        logger.error('cart_save_invalid_shape_array', { userId });
         return {
             success: false,
             error: 'Invalid cart data: expected object, received array'
@@ -220,7 +327,7 @@ async function saveCartToDatabase(userId, cart, originalCart = null) {
     
     // Ensure cart is a valid object with required fields
     if (!cart || typeof cart !== 'object') {
-        console.error(`❌ [CART SAVE] Invalid cart data type for userId: ${userId}`, typeof cart);
+        logger.error('cart_save_invalid_type', { userId, typeofCart: typeof cart });
         return {
             success: false,
             error: 'Invalid cart data: expected object'
@@ -397,12 +504,14 @@ router.get('/:userId', async (req, res) => {
             totals = resolvedTotals;
             cart.totals = totals;
             enrichCartItemsForDisplay(cart, rateFromSEK);
+            const cartVersion = attachCartVersion(cart, req);
             res.json({
                 success: true,
                 cart,
                 totals,
                 currency: totals.currency,
-                currencySymbol: totals.currencySymbol
+                currencySymbol: totals.currencySymbol,
+                cartVersion
             });
         } else {
             res.status(500).json({
@@ -411,7 +520,7 @@ router.get('/:userId', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Get cart error:', error);
+        logger.error('cart_get_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve cart'
@@ -530,7 +639,7 @@ router.post('/:userId/add', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Add to cart error:', error);
+        logger.error('cart_add_error', { message: error.message });
         res.status(400).json({
             success: false,
             error: error.message || 'Failed to add item to cart'
@@ -619,7 +728,7 @@ router.put('/:userId/update', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Update cart error:', error);
+        logger.error('cart_update_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to update cart'
@@ -699,7 +808,7 @@ router.delete('/:userId/remove/:cartItemId', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Remove from cart error:', error);
+        logger.error('cart_remove_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to remove item from cart'
@@ -732,7 +841,7 @@ router.delete('/:userId/clear', async (req, res) => {
             message: 'Cart cleared successfully'
         });
     } catch (error) {
-        console.error('Clear cart error:', error);
+        logger.error('cart_clear_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to clear cart'
@@ -809,12 +918,7 @@ router.put('/:userId/save-email', async (req, res) => {
         const saveResult = await saveCartToDatabase(userId, cart, originalCart);
         
         if (saveResult.success) {
-            console.log(`📧 [CART] Email saved to cart for user ${userId}:`, {
-                email: normalizedEmail,
-                hasItems: (cart.items?.length || 0) > 0,
-                itemsCount: cart.items?.length || 0,
-                total: cart.totals?.total || 0
-            });
+            devLog('[CART] email saved', { userId, itemsCount: cart.items?.length || 0 });
             
             res.json({
                 success: true,
@@ -827,14 +931,14 @@ router.put('/:userId/save-email', async (req, res) => {
                 }
             });
         } else {
-            console.error(`❌ [CART] Failed to save email to cart for user ${userId}`);
+            logger.error('cart_email_save_failed', { userId });
             res.status(500).json({
                 success: false,
                 error: 'Failed to save email to cart'
             });
         }
     } catch (error) {
-        console.error('Save email to cart error:', error);
+        logger.error('cart_email_save_exception', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to save email to cart'
@@ -852,11 +956,12 @@ router.post('/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         const { items } = req.body;
+        const incomingCartVersion = getIncomingCartVersion(req);
         
-        console.log(`🛒 [CART SYNC] Syncing cart for userId: ${userId}, items count: ${items?.length || 0}`);
+        devLog('[CART SYNC]', { userId, itemCount: items?.length || 0 });
         
         if (!items || !Array.isArray(items)) {
-            console.error(`❌ [CART SYNC] Invalid items array for userId: ${userId}`);
+            logger.warn('cart_sync_invalid_items', { userId });
             return res.status(400).json({
                 success: false,
                 error: 'Items array is required'
@@ -882,6 +987,21 @@ router.post('/:userId', async (req, res) => {
                 existingCartData = cartResult.data;
             }
         }
+
+        // Conflict detection: if client acted on a stale snapshot, return 409 with latest canonical cart.
+        if (incomingCartVersion && existingCartData && typeof existingCartData === 'object') {
+            const currentV = computeCartVersion(
+                buildCartVersionSource({ cart: existingCartData, shippingAddress: null, shippingMethod: null, discountCode: null })
+            );
+            if (incomingCartVersion !== currentV) {
+                return await respondCartConflict(
+                    res,
+                    req,
+                    existingCartData,
+                    'Client cartVersion did not match current backend cartVersion'
+                );
+            }
+        }
         
         let cart = existingCartData || {
             userId,
@@ -900,7 +1020,7 @@ router.post('/:userId', async (req, res) => {
         
         // CRITICAL: Ensure cart is an object, not an array
         if (Array.isArray(cart)) {
-            console.error(`❌ [CART SYNC] Cart is an array after initialization for userId: ${userId}`);
+            logger.error('cart_sync_cart_was_array', { userId });
             cart = {
                 userId,
                 items: [],
@@ -919,35 +1039,121 @@ router.post('/:userId', async (req, res) => {
         
         // Validate and map items; normalize prices to SEK (gross) from product catalog
         try {
+            const productPromises = items.map((item) => getProductForCart(item.id || item.productId));
+            const products = await Promise.all(productPromises);
             const pricePromises = items.map(item => getProductPriceSEKGross(item.id || item.productId));
             const pricesSEK = await Promise.all(pricePromises);
-            cart.items = items.map((item, index) => {
+
+            const adjustments = [];
+            const mapped = items.map((item, index) => {
+                const product = products[index];
+                const productId = normalizeCartItemId(item, index);
+
                 if (!item.id && !item.productId) {
-                    console.warn(`⚠️ [CART SYNC] Item at index ${index} missing id/productId`);
+                    devWarn('[CART SYNC] item missing id/productId', { index });
                 }
                 if (!item.name) {
-                    console.warn(`⚠️ [CART SYNC] Item at index ${index} missing name`);
+                    devWarn('[CART SYNC] item missing name', { index });
                 }
+
+                // Product deleted/inactive → remove from cart
+                if (!product) {
+                    adjustments.push({
+                        type: 'removed',
+                        code: 'PRODUCT_NOT_FOUND',
+                        productId,
+                        reason: 'Product no longer exists'
+                    });
+                    return null;
+                }
+                if (product.active === false) {
+                    adjustments.push({
+                        type: 'removed',
+                        code: 'PRODUCT_INACTIVE',
+                        productId,
+                        reason: 'Product is inactive'
+                    });
+                    return null;
+                }
+
+                // Stock enforcement (variants are canonical)
+                const v = pickVariantForItem(product, item);
+                if (product.inventory?.trackPerVariant !== false && Array.isArray(product.inventory?.variants)) {
+                    if (!v) {
+                        adjustments.push({
+                            type: 'removed',
+                            code: 'VARIANT_NOT_OFFERED',
+                            productId,
+                            variantId: item.variantId || null,
+                            colorId: item.colorId || null,
+                            sizeId: item.sizeId || null,
+                            reason: 'Variant not offered'
+                        });
+                        return null;
+                    }
+                    if (v.available === false) {
+                        adjustments.push({
+                            type: 'removed',
+                            code: 'VARIANT_UNAVAILABLE',
+                            productId,
+                            variantId: v.id || null,
+                            reason: 'Variant unavailable'
+                        });
+                        return null;
+                    }
+                    const requestedQty = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : Number(item.quantity);
+                    const allowedQty = clampQuantity(requestedQty, v.quantity || 0);
+                    if (allowedQty <= 0) {
+                        adjustments.push({
+                            type: 'removed',
+                            code: 'SOLD_OUT',
+                            productId,
+                            variantId: v.id || null,
+                            requestedQty: requestedQty || 0,
+                            availableQty: v.quantity || 0,
+                            reason: 'Offered but sold out'
+                        });
+                        return null;
+                    }
+                    if (allowedQty !== Math.floor(requestedQty || 0)) {
+                        adjustments.push({
+                            type: 'clamped',
+                            code: 'INSUFFICIENT_STOCK',
+                            productId,
+                            variantId: v.id || null,
+                            requestedQty: requestedQty || 0,
+                            availableQty: v.quantity || 0,
+                            newQty: allowedQty
+                        });
+                    }
+                    item = { ...item, quantity: allowedQty, variantId: item.variantId || v.id || null, colorId: item.colorId || v.colorId || null, sizeId: item.sizeId || v.sizeId || null };
+                }
+
                 const price = pricesSEK[index] != null ? pricesSEK[index] : (typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0);
+                const q = typeof item.quantity === 'number' && !isNaN(item.quantity) && item.quantity > 0 ? item.quantity : 1;
+
                 return {
                     cartItemId: item.cartItemId || generateCartItemId(),
-                    id: item.id || item.productId || `item_${index}`,
-                    name: item.name || 'Unknown Product',
+                    id: productId,
+                    name: item.name || product.name || 'Unknown Product',
                     price,
-                    image: item.image || '',
+                    image: item.image || product.image || '',
                     size: item.size || null,
                     color: item.color || null,
                     sizeId: item.sizeId || null,
                     colorId: item.colorId || null,
                     variantId: item.variantId || null,
-                    quantity: typeof item.quantity === 'number' && !isNaN(item.quantity) && item.quantity > 0 ? item.quantity : 1,
+                    quantity: q,
                     currency: STORE_BASE_CURRENCY,
                     source: item.source || null,
                     addedAt: item.addedAt || new Date().toISOString()
                 };
-            });
+            }).filter(Boolean);
+
+            cart.items = mapped;
+            cart.cartAdjustments = adjustments.length > 0 ? adjustments : undefined;
         } catch (mapError) {
-            console.error(`❌ [CART SYNC] Error mapping items:`, mapError);
+            logger.error('cart_sync_map_items_failed', { userId, message: mapError.message });
             return res.status(400).json({
                 success: false,
                 error: 'Invalid cart items format',
@@ -980,8 +1186,26 @@ router.post('/:userId', async (req, res) => {
                     appliedAt: recalculationResult.appliedDiscount.appliedAt || new Date().toISOString()
                 };
             } else {
-                console.log(`⚠️ [CART SYNC] Existing discount ${existingAppliedDiscount.code} is no longer valid, removing`);
+                const revokedCode =
+                    recalculationResult.errorCode || ErrorCodes.DISCOUNT_INVALID;
+                devLog('[CART SYNC] removing invalid discount', {
+                    code: existingAppliedDiscount.code,
+                    reasonCode: revokedCode
+                });
                 cart.appliedDiscount = null;
+                const priorAdjust = Array.isArray(cart.cartAdjustments) ? cart.cartAdjustments : [];
+                cart.cartAdjustments = [
+                    ...priorAdjust,
+                    {
+                        type: DISCOUNT_ADJUSTMENT_REMOVED,
+                        code: revokedCode,
+                        discountCode: existingAppliedDiscount.code,
+                        reason:
+                            recalculationResult.error ||
+                            recalculationResult.userMessage ||
+                            discountService.discountUserMessage(revokedCode)
+                    }
+                ];
             }
         } else {
             cart.appliedDiscount = null;
@@ -1010,17 +1234,21 @@ router.post('/:userId', async (req, res) => {
         
         if (saveResult.success) {
             enrichCartItemsForDisplay(cart, rateFromSEK);
-            console.log(`✅ [CART SYNC] Cart synced for userId: ${userId}, items: ${cart.items.length}, total: ${totals.total}`);
+            devLog('[CART SYNC] ok', { userId, items: cart.items.length, total: totals.total });
+            const cartVersion = attachCartVersion(cart, req);
             res.json({
                 success: true,
                 message: 'Cart synced successfully',
                 currency: totals.currency,
                 currencySymbol: totals.currencySymbol,
                 cart,
-                totals
+                totals,
+                cartVersion,
+                adjusted: Array.isArray(cart.cartAdjustments) && cart.cartAdjustments.length > 0,
+                adjustments: cart.cartAdjustments || []
             });
         } else {
-            console.error(`❌ [CART SYNC] Database save failed for userId: ${userId}:`, saveResult);
+            logger.error('cart_sync_save_failed', { userId, error: saveResult.error });
             res.status(500).json({
                 success: false,
                 error: 'Failed to save cart to database',
@@ -1028,8 +1256,8 @@ router.post('/:userId', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error(`❌ [CART SYNC] Exception for userId ${req.params.userId}:`, error);
-        console.error(`❌ [CART SYNC] Error stack:`, error.stack);
+        logger.error('cart_sync_exception', { userId: req.params.userId, message: error.message });
+        devWarn(error.stack);
         res.status(500).json({
             success: false,
             error: 'Failed to sync cart',
@@ -1044,6 +1272,7 @@ router.post('/:userId/apply-discount', async (req, res) => {
     try {
         const { userId } = req.params;
         const { discountCode } = req.body;
+        const incomingCartVersion = getIncomingCartVersion(req);
         
         if (!discountCode) {
             return res.status(400).json({
@@ -1079,6 +1308,20 @@ router.post('/:userId/apply-discount', async (req, res) => {
                 error: 'Cart not found'
             });
         }
+
+        if (incomingCartVersion) {
+            const currentV = computeCartVersion(
+                buildCartVersionSource({ cart, shippingAddress: null, shippingMethod: null, discountCode: null })
+            );
+            if (incomingCartVersion !== currentV) {
+                return await respondCartConflict(
+                    res,
+                    req,
+                    cart,
+                    'Client cartVersion did not match current backend cartVersion'
+                );
+            }
+        }
         
         // Store original cart BEFORE modifications
         const originalCart = { ...cart };
@@ -1108,9 +1351,25 @@ router.post('/:userId/apply-discount', async (req, res) => {
         );
         
         if (!calculationResult.success) {
+            const errCode =
+                calculationResult.errorCode || ErrorCodes.DISCOUNT_INVALID;
+            const cartVersionStale = computeCartVersion(
+                buildCartVersionSource({ cart, shippingAddress: null, shippingMethod: null, discountCode: null })
+            );
+            try {
+                res.setHeader('X-Cart-Version', cartVersionStale);
+            } catch {
+                /* ignore */
+            }
             return res.status(400).json({
                 success: false,
-                error: calculationResult.error || 'Invalid discount code'
+                code: errCode,
+                error: calculationResult.error || 'Invalid discount code',
+                userMessage:
+                    calculationResult.userMessage ||
+                    discountService.discountUserMessage(errCode),
+                requestId: req.requestId || req.headers['x-request-id'] || null,
+                cartVersion: cartVersionStale
             });
         }
         
@@ -1134,13 +1393,15 @@ router.post('/:userId/apply-discount', async (req, res) => {
         
         if (saveResult.success) {
             enrichCartItemsForDisplay(cart, rateFromSEK);
+            const cartVersion = attachCartVersion(cart, req);
             res.json({
                 success: true,
                 message: 'Discount applied successfully',
                 cart,
                 totals,
                 currency: totals.currency,
-                currencySymbol: totals.currencySymbol
+                currencySymbol: totals.currencySymbol,
+                cartVersion
             });
         } else {
             res.status(500).json({
@@ -1149,7 +1410,7 @@ router.post('/:userId/apply-discount', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Apply discount error:', error);
+        logger.error('cart_apply_discount_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to apply discount'
@@ -1161,6 +1422,7 @@ router.post('/:userId/apply-discount', async (req, res) => {
 router.post('/:userId/remove-discount', async (req, res) => {
     try {
         const { userId } = req.params;
+        const incomingCartVersion = getIncomingCartVersion(req);
         
         // Get existing cart
         const cartResult = await db.executeOperation({
@@ -1189,6 +1451,20 @@ router.post('/:userId/remove-discount', async (req, res) => {
                 error: 'Cart not found'
             });
         }
+
+        if (incomingCartVersion) {
+            const currentV = computeCartVersion(
+                buildCartVersionSource({ cart, shippingAddress: null, shippingMethod: null, discountCode: null })
+            );
+            if (incomingCartVersion !== currentV) {
+                return await respondCartConflict(
+                    res,
+                    req,
+                    cart,
+                    'Client cartVersion did not match current backend cartVersion'
+                );
+            }
+        }
         
         // Store original cart BEFORE modifications
         const originalCart = { ...cart };
@@ -1205,13 +1481,15 @@ router.post('/:userId/remove-discount', async (req, res) => {
         
         if (saveResult.success) {
             enrichCartItemsForDisplay(cart, rateFromSEK);
+            const cartVersion = attachCartVersion(cart, req);
             res.json({
                 success: true,
                 message: 'Discount removed successfully',
                 cart,
                 totals,
                 currency: totals.currency,
-                currencySymbol: totals.currencySymbol
+                currencySymbol: totals.currencySymbol,
+                cartVersion
             });
         } else {
             res.status(500).json({
@@ -1220,7 +1498,7 @@ router.post('/:userId/remove-discount', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Remove discount error:', error);
+        logger.error('cart_remove_discount_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to remove discount'

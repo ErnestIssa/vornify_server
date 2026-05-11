@@ -1,3 +1,6 @@
+const { devLog } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
+
 /**
  * Middleware to require super_admin role
  * Must be used after authenticateAdmin middleware
@@ -16,7 +19,7 @@ function requireSuperAdmin(req, res, next) {
 
         // Check if admin has super_admin role
         if (req.admin.role !== 'super_admin') {
-            console.log(`❌ [REQUIRE SUPER ADMIN] Access denied for ${req.admin.email || req.admin.username}. Role: ${req.admin.role}`);
+            logger.warn('super_admin_required_denied', { role: req.admin.role });
             return res.status(403).json({
                 success: false,
                 error: 'Only super_admin can access this resource',
@@ -24,12 +27,11 @@ function requireSuperAdmin(req, res, next) {
             });
         }
 
-        // Admin is super_admin, continue
-        console.log(`✅ [REQUIRE SUPER ADMIN] Access granted for ${req.admin.email || req.admin.username}`);
+        devLog('super_admin_gate ok');
         next();
 
     } catch (error) {
-        console.error('❌ [REQUIRE SUPER ADMIN] Error:', error);
+        logger.error('require_super_admin_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error during authorization check',

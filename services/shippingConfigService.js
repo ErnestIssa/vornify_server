@@ -5,6 +5,7 @@
 
 const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
+const { buildShippingVersionSource, computeShippingVersion } = require('../core/guards/shippingVersion');
 
 const DATABASE_NAME = 'peakmode';
 const COLLECTIONS = {
@@ -214,6 +215,53 @@ async function getShippingCostFromDb(countryCode, methodId, municipality) {
     return typeof cost === 'number' && !isNaN(cost) ? cost : 0;
 }
 
+/**
+ * Validate selected shipping method for a given address and return a versioned quote.
+ * Throws no errors; returns { ok: boolean, errorCode?, userMessage?, quote? }.
+ */
+async function validateAndQuoteShipping(countryCode, methodId, municipality, currency = 'SEK') {
+    const country = (countryCode || '').toUpperCase().trim();
+    const method = await getMethodById(methodId);
+    if (!method) {
+        return { ok: false, errorCode: 'SHIPPING_METHOD_INVALID', userMessage: 'Selected shipping method is no longer available. Please choose another.' };
+    }
+    const zone = await getZoneByCountry(country);
+    if (!zone) {
+        return { ok: false, errorCode: 'SHIPPING_UNAVAILABLE', userMessage: `Shipping is not available to ${country}. Please change your address.` };
+    }
+    // Ensure method has a configured price row for this zone (unless free delivery applies)
+    const freeDelivery = await isFreeDelivery(country, municipality);
+    const zoneIdStr = zone._id?.toString() || zone.id || zone.name;
+    const methodIdStr = method.id || method._id?.toString() || String(methodId);
+    const cost = freeDelivery ? 0 : await getPriceForZoneAndMethod(zone._id?.toString() || zone.id, methodIdStr);
+    if (!freeDelivery && (cost == null || typeof cost !== 'number' || isNaN(cost))) {
+        return { ok: false, errorCode: 'SHIPPING_METHOD_INVALID', userMessage: 'Selected shipping method is not available for your address. Please choose another.' };
+    }
+    const normalizedCost = typeof cost === 'number' && !isNaN(cost) ? Math.round(cost * 100) / 100 : 0;
+    const shippingVersion = computeShippingVersion(buildShippingVersionSource({
+        country,
+        municipality,
+        zoneId: zoneIdStr,
+        methodId: methodIdStr,
+        cost: normalizedCost,
+        freeDelivery,
+        currency
+    }));
+    return {
+        ok: true,
+        quote: {
+            country,
+            municipality: municipality || '',
+            zoneId: zoneIdStr,
+            methodId: methodIdStr,
+            cost: normalizedCost,
+            currency: currency || 'SEK',
+            freeDelivery,
+            shippingVersion
+        }
+    };
+}
+
 module.exports = {
     DATABASE_NAME,
     COLLECTIONS,
@@ -226,5 +274,6 @@ module.exports = {
     isFreeDelivery,
     hasZoneConfig,
     getDeliveryOptionsFromDb,
-    getShippingCostFromDb
+    getShippingCostFromDb,
+    validateAndQuoteShipping
 };

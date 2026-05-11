@@ -19,6 +19,8 @@ const {
     normalizeEmail,
     extractCustomerNames
 } = require('../utils/trackingCodeGenerator');
+const { devLog, devWarn } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
 
 const db = getDBInstance();
 
@@ -117,7 +119,7 @@ async function createOrUpdateCustomer(order) {
         updateCustomerAnalytics(customerEmail);
         
     } catch (error) {
-        console.error('Error creating/updating customer:', error);
+        logger.error('orders_customer_upsert_error', { message: error.message });
         throw error;
     }
 }
@@ -222,7 +224,7 @@ async function updateCustomerAnalytics(customerEmail) {
                 )
             ]);
     } catch (error) {
-            console.error('Error updating customer analytics (background):', error.message);
+            logger.warn('orders_customer_analytics_background_failed', { message: error.message });
             // Don't throw - this is background processing
     }
     });
@@ -257,7 +259,7 @@ async function generateUniqueOrderId() {
         // VornifyDB returns single object when query is provided, or error if not found
         exists = result.success && result.data;
         } catch (error) {
-            console.error(`Error checking order ID ${orderId} (attempt ${attempts}):`, error.message);
+            logger.warn('orders_id_generation_check_failed', { orderId, attempt: attempts, message: error.message });
             // If timeout or error, assume ID doesn't exist and use it
             exists = false;
         }
@@ -266,7 +268,7 @@ async function generateUniqueOrderId() {
     if (attempts >= maxRetries) {
         // Fallback: use timestamp-based ID if we can't generate unique one
         orderId = 'PM' + Date.now() + Math.floor(Math.random() * 1000);
-        console.warn(`Generated fallback order ID after ${maxRetries} attempts: ${orderId}`);
+        logger.warn('orders_fallback_order_id', { attempts: maxRetries, orderId });
     }
     
     return orderId;
@@ -293,11 +295,11 @@ function generateTimelineDescription(status, provider, trackingNum) {
 // Create order with unique Order ID
 router.post('/create', async (req, res) => {
     const startTime = Date.now();
-    console.log('📦 [ORDER CREATE] Request received at', new Date().toISOString());
+    devLog('[ORDER CREATE] Request received at', new Date().toISOString());
     
     try {
         const orderData = req.body;
-        console.log('📦 [ORDER CREATE] Order data received:', {
+        devLog('[ORDER CREATE] Order data received', {
             customerEmail: orderData.customer?.email || orderData.customerEmail,
             itemsCount: orderData.items?.length || 0,
             total: orderData.total || orderData.totals?.total
@@ -329,7 +331,7 @@ router.post('/create', async (req, res) => {
                 const { warehouse } = await warehouseSelectionService.selectWarehouse(orderItems, destCountry, { preferSingleShipment: true });
                 if (warehouse && warehouse._id) orderData.warehouseId = warehouse._id.toString();
             } catch (e) {
-                console.warn('[ORDER CREATE] Warehouse selection skipped:', e.message);
+                logger.warn('order_create_warehouse_selection_skipped', { message: e.message });
             }
         }
 
@@ -368,20 +370,20 @@ router.post('/create', async (req, res) => {
         const orderTotals = { ...calculatedTotals, shipping: calculatedTotals.shippingGross };
         
         // Generate unique Order ID with timeout protection
-        console.log('📦 [ORDER CREATE] Generating unique order ID...');
+        devLog('[ORDER CREATE] Generating unique order ID…');
         const orderId = await Promise.race([
             generateUniqueOrderId(),
             new Promise((_, reject) => 
                 setTimeout(() => reject(new Error('Order ID generation timeout')), 10000)
             )
         ]);
-        console.log('📦 [ORDER CREATE] Order ID generated:', orderId);
+        devLog('[ORDER CREATE] Order ID generated:', orderId);
         
         // Generate customer-friendly tracking code
-        console.log('📦 [ORDER CREATE] Generating tracking code...');
+        devLog('[ORDER CREATE] Generating tracking code…');
         const { firstName, lastName } = extractCustomerNames(orderData);
         const trackingCode = await generateUniqueTrackingCode(firstName, lastName);
-        console.log('📦 [ORDER CREATE] Tracking code generated:', trackingCode);
+        devLog('[ORDER CREATE] Tracking code generated:', trackingCode);
         
         // Check if this is a retry payment (failed checkout retry)
         const isRetry = orderData.isRetry === true;
@@ -516,7 +518,7 @@ router.post('/create', async (req, res) => {
         
         // IMPORTANT: Do NOT create a real order until payment succeeds.
         // Store this as a pending checkout (order draft) to be promoted by the Stripe webhook.
-        console.log('📦 [ORDER CREATE] Saving pending checkout (order draft) to database...');
+        devLog('[ORDER CREATE] Saving pending checkout (order draft) to database…');
         const result = await Promise.race([
             db.executeOperation({
             database_name: 'peakmode',
@@ -539,14 +541,14 @@ router.post('/create', async (req, res) => {
         ]);
         
         const dbTime = Date.now() - startTime;
-        console.log(`📦 [ORDER CREATE] Database operation completed in ${dbTime}ms`);
+        devLog(`[ORDER CREATE] Database operation completed in ${dbTime}ms`);
         
         if (result.success) {
-            console.log('📦 [ORDER CREATE] Pending checkout created successfully:', orderId);
+            devLog('[ORDER CREATE] Pending checkout created successfully:', orderId);
             
             // Send response immediately - don't wait for background operations
             const responseTime = Date.now() - startTime;
-            console.log(`📦 [ORDER CREATE] Sending response in ${responseTime}ms`);
+            devLog(`[ORDER CREATE] Sending response in ${responseTime}ms`);
             
             // Note: Real order + emails will be created/sent by the Stripe webhook after payment succeeds
             res.json({
@@ -564,7 +566,7 @@ router.post('/create', async (req, res) => {
                 try {
                     // Update payment intent with actual order ID if it was created with temporary ID
                     if (order.paymentIntentId) {
-                        console.log('📦 [ORDER CREATE] Background: Syncing PaymentIntent metadata with checkout order id...');
+                        devLog('[ORDER CREATE] Background: Syncing PaymentIntent metadata with checkout order id…');
                         try {
                             const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
                             const existingIntent = await stripe.paymentIntents.retrieve(order.paymentIntentId);
@@ -582,24 +584,27 @@ router.post('/create', async (req, res) => {
                                         updatedAt: new Date().toISOString()
                                     }
                                 });
-                                console.log(`📦 [ORDER CREATE] Background: Payment intent ${order.paymentIntentId} metadata orderId → ${orderId}`);
+                                devLog('[ORDER CREATE] Background: PaymentIntent metadata orderId synced', order.paymentIntentId, orderId);
                             }
                         } catch (paymentIntentError) {
-                            console.error('📦 [ORDER CREATE] Background: Failed to update payment intent:', paymentIntentError.message);
+                            logger.warn('order_create_payment_intent_sync_failed', {
+                                paymentIntentId: order.paymentIntentId,
+                                message: paymentIntentError.message
+                            });
                         }
                     }
 
                     // IMPORTANT: Do not create/update customer and do not email until payment succeeds.
-                    console.log('📦 [ORDER CREATE] Background: Pending checkout saved. Waiting for Stripe webhook to create the real order + send emails.');
+                    devLog('[ORDER CREATE] Background: Pending checkout saved; webhook will finalize order.');
                     
                     const totalTime = Date.now() - startTime;
-                    console.log(`📦 [ORDER CREATE] Background operations completed in ${totalTime}ms total`);
+                    devLog(`[ORDER CREATE] Background operations completed in ${totalTime}ms total`);
                 } catch (bgError) {
-                    console.error('📦 [ORDER CREATE] Background: Unexpected error in background operations:', bgError.message);
+                    logger.warn('order_create_background_error', { message: bgError.message });
                 }
             });
         } else {
-            console.error('📦 [ORDER CREATE] Database operation failed:', result);
+            logger.error('order_create_database_failed', { message: result.error || result.message || 'unknown' });
             res.status(400).json({
                 success: false,
                 error: result.error || 'Failed to create pending checkout in database',
@@ -608,8 +613,8 @@ router.post('/create', async (req, res) => {
         }
     } catch (error) {
         const errorTime = Date.now() - startTime;
-        console.error(`📦 [ORDER CREATE] Error after ${errorTime}ms:`, error.message);
-        console.error('📦 [ORDER CREATE] Error stack:', error.stack);
+        logger.error('order_create_error', { message: error.message, ms: errorTime });
+        devLog('[ORDER CREATE] Error stack:', error.stack);
         
         // Ensure response is sent even on error
         if (!res.headersSent) {
@@ -796,10 +801,10 @@ router.post('/update-status', async (req, res) => {
                             }
                         });
                         
-                        console.log(`Tracking entry created for order ${orderId}: ${trackingResult.data.trackingNumber}`);
+                        devLog('Tracking entry created', { orderId, trackingNumber: trackingResult.data.trackingNumber });
                     }
                 } catch (trackingError) {
-                    console.error('Failed to create tracking entry:', trackingError);
+                    logger.warn('order_tracking_entry_create_failed', { orderId, message: trackingError.message });
                     // Don't fail the status update if tracking creation fails
                 }
             }
@@ -814,21 +819,21 @@ router.post('/update-status', async (req, res) => {
                             order.customer.email,
                             updatedOrder
                         );
-                        console.log(`Order processing email sent to ${order.customer.email}`);
+                        devLog('Order processing email sent', { orderId });
                         break;
                     case 'shipped':
                         await emailService.sendShippingNotificationEmail(
                             order.customer.email,
                             updatedOrder
                         );
-                        console.log(`Shipping notification email sent to ${order.customer.email}`);
+                        devLog('Shipping notification email sent', { orderId });
                         break;
                     case 'delivered':
                         await emailService.sendDeliveryConfirmationEmail(
                             order.customer.email,
                             updatedOrder
                         );
-                        console.log(`Delivery confirmation email sent to ${order.customer.email}`);
+                        devLog('Delivery confirmation email sent', { orderId });
                         
                         // Schedule review request email (2-3 days later)
                         setTimeout(async () => {
@@ -837,15 +842,15 @@ router.post('/update-status', async (req, res) => {
                                     order.customer.email,
                                     updatedOrder
                                 );
-                                console.log(`Review request email sent to ${order.customer.email}`);
+                                devLog('Review request email sent', { orderId });
                             } catch (reviewError) {
-                                console.error('Failed to send review request email:', reviewError);
+                                logger.warn('order_review_request_email_failed', { orderId, message: reviewError.message });
                             }
                         }, 2 * 24 * 60 * 60 * 1000); // 2 days in milliseconds
                         break;
                 }
             } catch (emailError) {
-                console.error('Failed to send status update email:', emailError);
+                logger.warn('order_status_update_email_failed', { orderId, message: emailError.message });
                 // Don't fail the status update if email fails
             }
 
@@ -868,7 +873,7 @@ router.post('/update-status', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Order status update error:', error);
+        logger.error('order_status_update_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to update order status'
@@ -964,7 +969,7 @@ router.get('/verify-email', async (req, res) => {
             canSubmitMoreReviews
         });
     } catch (error) {
-        console.error('Verify-email error:', error);
+        logger.error('orders_verify_email_error', { message: error.message });
         return res.status(500).json({
             success: false,
             hasPurchase: false,
@@ -995,7 +1000,7 @@ router.get('/verify-email', async (req, res) => {
  */
 router.get('/track', async (req, res) => {
     try {
-        console.log('🔍 [ORDER TRACK] Request received:', {
+        devLog('[ORDER TRACK] Request received', {
             query: req.query,
             timestamp: new Date().toISOString()
         });
@@ -1004,7 +1009,7 @@ router.get('/track', async (req, res) => {
 
         // Validate email is provided
         if (!email) {
-            console.log('❌ [ORDER TRACK] Missing email parameter');
+            devWarn('[ORDER TRACK] Missing email parameter');
             return res.status(400).json({
                 error: 'Invalid parameters',
                 message: 'Email is required'
@@ -1013,7 +1018,7 @@ router.get('/track', async (req, res) => {
 
         // Validate at least one identifier is provided
         if (!orderId && !trackingCode) {
-            console.log('❌ [ORDER TRACK] Missing identifier:', { orderId: !!orderId, trackingCode: !!trackingCode });
+            devWarn('[ORDER TRACK] Missing identifier', { orderId: !!orderId, trackingCode: !!trackingCode });
             return res.status(400).json({
                 error: 'Invalid parameters',
                 message: 'Either orderId or trackingCode is required'
@@ -1024,14 +1029,14 @@ router.get('/track', async (req, res) => {
         const normalizedEmail = normalizeEmail(email);
         const identifier = trackingCode ? String(trackingCode).toUpperCase().trim() : String(orderId).trim();
 
-        console.log('🔍 [ORDER TRACK] Processing:', {
+        devLog('[ORDER TRACK] Processing', {
             identifier: identifier,
             identifierType: trackingCode ? 'trackingCode' : 'orderId',
             email: normalizedEmail
         });
 
         // Find order by trackingCode or orderId
-        console.log('🔍 [ORDER TRACK] Querying database for order:', identifier);
+        devLog('[ORDER TRACK] Querying database for order:', identifier);
         let orderResult;
         try {
             // Build query based on identifier type
@@ -1045,16 +1050,14 @@ router.get('/track', async (req, res) => {
                 command: '--read',
                 data: query
             });
-            console.log('🔍 [ORDER TRACK] Database query result:', {
+            devLog('[ORDER TRACK] Database query result', {
                 success: orderResult?.success,
                 hasData: !!orderResult?.data,
                 identifierType: trackingCode ? 'trackingCode' : 'orderId'
             });
         } catch (dbError) {
-            console.error('❌ [ORDER TRACK] Database query error:', {
-                message: dbError.message,
-                stack: dbError.stack
-            });
+            logger.error('order_track_db_query_failed', { message: dbError.message });
+            devLog('[ORDER TRACK] DB error stack:', dbError.stack);
             return res.status(500).json({
                 error: 'Database error',
                 message: 'Failed to query order from database'
@@ -1062,7 +1065,7 @@ router.get('/track', async (req, res) => {
         }
 
         if (!orderResult || !orderResult.success || !orderResult.data) {
-            console.log('❌ [ORDER TRACK] Order not found:', identifier);
+            devWarn('[ORDER TRACK] Order not found:', identifier);
             return res.status(404).json({
                 error: 'Order not found',
                 message: 'This order is not available for tracking. If you have not been notified, please contact support.',
@@ -1074,7 +1077,7 @@ router.get('/track', async (req, res) => {
         const order = Array.isArray(orderResult.data) ? orderResult.data[0] : orderResult.data;
         
         if (!order) {
-            console.log('❌ [ORDER TRACK] Order not found:', identifier);
+            devWarn('[ORDER TRACK] Order not found:', identifier);
             return res.status(404).json({
                 error: 'Order not found',
                 message: 'This order is not available for tracking. If you have not been notified, please contact support.',
@@ -1083,7 +1086,7 @@ router.get('/track', async (req, res) => {
             });
         }
 
-        console.log('✅ [ORDER TRACK] Order found:', {
+        devLog('[ORDER TRACK] Order found', {
             orderId: order.orderId,
             trackingCode: order.trackingCode,
             status: order.status,
@@ -1093,7 +1096,7 @@ router.get('/track', async (req, res) => {
 
         // Order cancelled: return structured response so client can show dedicated "cancelled" page with support info
         if (isCancelled(order.status)) {
-            console.log('❌ [ORDER TRACK] Order is cancelled:', identifier);
+            devWarn('[ORDER TRACK] Order is cancelled:', identifier);
             return res.status(200).json({
                 orderUnavailable: true,
                 reason: 'cancelled',
@@ -1116,7 +1119,8 @@ router.get('/track', async (req, res) => {
         const emailMatches = orderEmails.includes(normalizedEmail);
         
         if (!emailMatches) {
-            console.log('❌ [ORDER TRACK] Email mismatch:', {
+            logger.warn('order_track_email_mismatch', { identifierType: trackingCode ? 'trackingCode' : 'orderId' });
+            devLog('[ORDER TRACK] Email mismatch (dev detail)', {
                 provided: normalizedEmail,
                 orderEmails: orderEmails,
                 checkedFields: ['email', 'customerEmail', 'customer.email', 'customerInfo.email']
@@ -1130,7 +1134,7 @@ router.get('/track', async (req, res) => {
 
         // Order soft-deleted: return structured response so client can show dedicated "deleted" view with support info
         if (isOrderDeleted(order)) {
-            console.log('❌ [ORDER TRACK] Order is deleted:', identifier);
+            devWarn('[ORDER TRACK] Order is deleted:', identifier);
             return res.status(200).json({
                 orderUnavailable: true,
                 reason: 'deleted',
@@ -1140,14 +1144,14 @@ router.get('/track', async (req, res) => {
             });
         }
 
-        console.log('✅ [ORDER TRACK] Order found and email verified:', identifier);
+        devLog('[ORDER TRACK] Order found and email verified:', identifier);
 
         const currentStatus = order.status || 'pending';
         let statusText;
         try {
             statusText = getStatusText(currentStatus);
         } catch (statusError) {
-            console.error('❌ [ORDER TRACK] Error getting status text:', statusError);
+            logger.warn('order_track_status_text_failed', { message: statusError.message });
             statusText = currentStatus; // Fallback to status value
         }
 
@@ -1181,12 +1185,12 @@ router.get('/track', async (req, res) => {
                                 : String(timestamp);
                         }
                     } catch (tsError) {
-                        console.warn('⚠️ [ORDER TRACK] Error processing timestamp for status:', status, tsError.message);
+                        devWarn('[ORDER TRACK] Error processing timestamp for status:', status, tsError.message);
                     }
                 });
             }
         } catch (tsError) {
-            console.warn('⚠️ [ORDER TRACK] Error processing statusTimestamps:', tsError.message);
+            devWarn('[ORDER TRACK] Error processing statusTimestamps:', tsError.message);
         }
 
         // Get current status timestamp
@@ -1218,7 +1222,7 @@ router.get('/track', async (req, res) => {
                         image: normalizeImageUrl(item?.image || item?.media?.[0] || '')
                     };
                 } catch (itemError) {
-                    console.warn('⚠️ [ORDER TRACK] Error processing item:', itemError.message);
+                    devWarn('[ORDER TRACK] Error processing item:', itemError.message);
                     return {
                         name: 'Product',
                         quantity: 1,
@@ -1266,7 +1270,7 @@ router.get('/track', async (req, res) => {
             response.statusTimestamps = {};
         }
 
-        console.log('✅ [ORDER TRACK] Returning order data:', {
+        devLog('[ORDER TRACK] Returning order data', {
             orderId: response.orderId,
             status: response.status,
             itemsCount: response.items.length
@@ -1275,14 +1279,14 @@ router.get('/track', async (req, res) => {
         res.json(response);
 
     } catch (error) {
-        console.error('❌ [ORDER TRACK] Unhandled error:', {
+        logger.error('order_track_unhandled_error', {
             message: error.message,
-            stack: error.stack,
             name: error.name,
             orderId: req.query?.orderId,
-            email: req.query?.email
+            trackingCode: req.query?.trackingCode ? '[present]' : undefined
         });
-        
+        devLog('[ORDER TRACK] Unhandled stack:', error.stack);
+
         // Ensure response hasn't been sent
         if (!res.headersSent) {
             res.status(500).json({
@@ -1290,7 +1294,7 @@ router.get('/track', async (req, res) => {
                 message: error.message || 'An unexpected error occurred while processing your request'
             });
         } else {
-            console.error('❌ [ORDER TRACK] Response already sent, cannot send error response');
+            logger.error('order_track_response_already_sent', {});
         }
     }
 });
@@ -1354,7 +1358,7 @@ router.get('/all', async (req, res) => {
         
         res.json(result);
     } catch (error) {
-        console.error('Get orders error:', error);
+        logger.error('orders_get_all_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve orders'
@@ -1446,7 +1450,7 @@ router.get('/list', authenticateAdmin, async (req, res) => {
         });
         return res.json({ success: true, data, total, limit: Number(limit) || 50, offset: Number(offset) || 0 });
     } catch (error) {
-        console.error('Orders list (admin) error:', error);
+        logger.error('orders_admin_list_error', { message: error.message });
         return res.status(500).json({ success: false, error: error.message || 'Failed to retrieve orders' });
     }
 });
@@ -1498,7 +1502,7 @@ router.post('/bulk-action', authenticateAdmin, async (req, res) => {
         }
         return res.json({ success: true, ...results });
     } catch (error) {
-        console.error('Bulk action error:', error);
+        logger.error('orders_bulk_action_error', { message: error.message });
         return res.status(500).json({ success: false, error: error.message || 'Bulk action failed' });
     }
 });
@@ -1534,7 +1538,7 @@ router.get('/customer/:email', async (req, res) => {
         
         res.json(result);
     } catch (error) {
-        console.error('Get customer orders error:', error);
+        logger.error('orders_customer_list_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve customer orders'
@@ -1607,7 +1611,7 @@ router.put('/:orderId', async (req, res) => {
             res.status(400).json(updateResult);
         }
     } catch (error) {
-        console.error('Update order error:', error);
+        logger.error('orders_update_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to update order'
@@ -1727,7 +1731,7 @@ router.post('/:orderId/status', async (req, res) => {
                                 updatedOrder
                             );
                             emailSent = true;
-                            console.log(`Order processing email sent to ${order.customer.email}`);
+                            devLog('Order processing email sent', { orderId });
                             break;
                         case 'shipped':
                             await emailService.sendShippingNotificationEmail(
@@ -1735,7 +1739,7 @@ router.post('/:orderId/status', async (req, res) => {
                                 updatedOrder
                             );
                             emailSent = true;
-                            console.log(`Shipping notification email sent to ${order.customer.email}`);
+                            devLog('Shipping notification email sent', { orderId });
                             break;
                         case 'delivered':
                             await emailService.sendDeliveryConfirmationEmail(
@@ -1743,11 +1747,11 @@ router.post('/:orderId/status', async (req, res) => {
                                 updatedOrder
                             );
                             emailSent = true;
-                            console.log(`Delivery confirmation email sent to ${order.customer.email}`);
+                            devLog('Delivery confirmation email sent', { orderId });
                             break;
                     }
                 } catch (emailError) {
-                    console.error('Failed to send status update email:', emailError);
+                    logger.warn('order_patch_status_email_failed', { orderId, message: emailError.message });
                 }
             }
             
@@ -1761,7 +1765,7 @@ router.post('/:orderId/status', async (req, res) => {
             res.status(400).json(updateResult);
         }
     } catch (error) {
-        console.error('Update order status error:', error);
+        logger.error('order_patch_status_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to update order status'
@@ -1775,7 +1779,7 @@ router.post('/:orderId/notify', async (req, res) => {
         const { orderId } = req.params;
         const { status, notifyType = 'status_update' } = req.body;
 
-        console.log('📧 [ORDER NOTIFY] Request received:', {
+        devLog('[ORDER NOTIFY] Request received', {
             orderId,
             status,
             notifyType,
@@ -1800,7 +1804,7 @@ router.post('/:orderId/notify', async (req, res) => {
         });
 
         if (!findResult.success || !findResult.data) {
-            console.log('❌ [ORDER NOTIFY] Order not found:', orderId);
+            devWarn('[ORDER NOTIFY] Order not found:', orderId);
             return res.status(404).json({
                 success: false,
                 error: 'Order not found',
@@ -1820,7 +1824,7 @@ router.post('/:orderId/notify', async (req, res) => {
         // Get customer email
         const customerEmail = order.customer?.email || order.customerEmail || order.email;
         if (!customerEmail) {
-            console.log('❌ [ORDER NOTIFY] Order does not have email address:', orderId);
+            devWarn('[ORDER NOTIFY] Order does not have email address:', orderId);
             return res.status(400).json({
                 success: false,
                 error: 'Order does not have an email address',
@@ -1828,21 +1832,13 @@ router.post('/:orderId/notify', async (req, res) => {
             });
         }
 
-        console.log('📧 [ORDER NOTIFY] Sending email notification:', {
-            orderId,
-            email: customerEmail,
-            status
-        });
+        devLog('[ORDER NOTIFY] Sending email notification', { orderId, status });
 
         // Send email notification
         const emailResult = await emailService.sendOrderStatusUpdateEmail(order, status);
 
         if (emailResult.success) {
-            console.log('✅ [ORDER NOTIFY] Email sent successfully:', {
-                orderId,
-                email: customerEmail,
-                status
-            });
+            devLog('[ORDER NOTIFY] Email sent successfully', { orderId, status });
             return res.json({
                 success: true,
                 message: 'Email notification sent successfully',
@@ -1850,10 +1846,9 @@ router.post('/:orderId/notify', async (req, res) => {
                 emailTo: customerEmail
             });
         } else {
-            console.error('❌ [ORDER NOTIFY] Email send failed:', {
+            logger.error('order_notify_email_failed', {
                 orderId,
-                email: customerEmail,
-                error: emailResult.error || emailResult.details
+                message: emailResult.error || emailResult.details || 'unknown'
             });
             return res.status(500).json({
                 success: false,
@@ -1864,9 +1859,8 @@ router.post('/:orderId/notify', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('❌ [ORDER NOTIFY] Unhandled error:', {
+        logger.error('order_notify_unhandled_error', {
             message: error.message,
-            stack: error.stack,
             orderId: req.params.orderId
         });
         
@@ -1896,7 +1890,7 @@ router.get('/:orderId/shipments', authenticateAdmin, async (req, res) => {
         const data = (result.success && Array.isArray(result.data)) ? result.data : [];
         return res.json({ success: true, data });
     } catch (e) {
-        console.error('Get order shipments error:', e);
+        logger.error('orders_shipments_get_error', { message: e.message });
         return res.status(500).json({ success: false, error: e.message || 'Failed to get shipments' });
     }
 });
@@ -1925,7 +1919,7 @@ router.post('/:orderId/shipments', authenticateAdmin, async (req, res) => {
         const insertResult = await coll.insertOne(doc);
         return res.status(201).json({ success: true, data: { _id: insertResult.insertedId, ...doc } });
     } catch (e) {
-        console.error('Create shipment error:', e);
+        logger.error('orders_shipment_create_error', { message: e.message });
         return res.status(500).json({ success: false, error: e.message || 'Failed to create shipment' });
     }
 });
@@ -1953,7 +1947,7 @@ router.put('/:orderId/shipments/:shipmentId', authenticateAdmin, async (req, res
         if (!result.success) return res.status(result.error && result.error.includes('No document matched') ? 404 : 500).json({ success: false, error: result.error || 'Update failed' });
         return res.json({ success: true });
     } catch (e) {
-        console.error('Update shipment error:', e);
+        logger.error('orders_shipment_update_error', { message: e.message });
         return res.status(500).json({ success: false, error: e.message || 'Failed to update shipment' });
     }
 });
@@ -1984,7 +1978,7 @@ router.get('/:orderId/receipt', authenticateAdmin, async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`);
         return res.send(buffer);
     } catch (e) {
-        console.error('GET receipt error:', e);
+        logger.error('orders_receipt_get_error', { message: e.message });
         return res.status(500).json({ success: false, error: e.message || 'Failed to generate receipt' });
     }
 });
@@ -2033,7 +2027,7 @@ router.post('/:orderId/receipt/email', authenticateAdmin, async (req, res) => {
         });
         return res.json({ success: true, message: 'Receipt sent', messageId: result.messageId });
     } catch (e) {
-        console.error('POST receipt/email error:', e);
+        logger.error('orders_receipt_email_error', { message: e.message });
         return res.status(500).json({ success: false, error: e.message || 'Failed to send receipt' });
     }
 });
@@ -2073,7 +2067,7 @@ router.post('/:orderId/generate-label', authenticateAdmin, async (req, res) => {
             generated: true
         });
     } catch (e) {
-        console.error('Generate label (SHIPIT) error:', e);
+        logger.error('orders_shipit_label_error', { message: e.message });
         return res.status(500).json({ success: false, error: e.message || 'Failed' });
     }
 });
@@ -2143,7 +2137,7 @@ router.get('/:orderId', authenticateAdmin, async (req, res) => {
 
         res.json({ success: true, data: order });
     } catch (error) {
-        console.error('Get order error:', error);
+        logger.error('orders_get_one_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve order'
@@ -2203,7 +2197,7 @@ router.delete('/:orderId', async (req, res) => {
             res.status(400).json(updateResult);
         }
     } catch (error) {
-        console.error('Delete order error:', error);
+        logger.error('orders_delete_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to delete order'

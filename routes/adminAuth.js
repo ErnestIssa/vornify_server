@@ -9,6 +9,8 @@ const authenticateAdmin = require('../middleware/authenticateAdmin');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 const logAdminActivity = require('../utils/auditLogger');
 const emailService = require('../services/emailService');
+const { devLog, devWarn } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -75,8 +77,9 @@ const loginRateLimit = rateLimit({
 });
 
 if (!JWT_SECRET) {
-    console.warn('⚠️  [ADMIN AUTH] JWT_SECRET not set. Admin authentication will fail.');
-    console.warn('⚠️  [ADMIN AUTH] Please set JWT_SECRET or ADMIN_JWT_SECRET environment variable.');
+    logger.warn('admin_auth_jwt_secret_missing', {
+        message: 'Set JWT_SECRET or ADMIN_JWT_SECRET; admin auth will fail.'
+    });
 }
 
 /**
@@ -93,14 +96,14 @@ router.post('/login', loginRateLimit, async (req, res) => {
         const emailOrUsername = email || username;
         const normalizedEmail = String(emailOrUsername || '').toLowerCase().trim();
 
-        console.log('🔐 [ADMIN AUTH LOGIN] Request received:', {
+        devLog('[ADMIN AUTH LOGIN] Request received', {
             email: normalizedEmail,
             passwordLength: password ? password.length : 0,
             timestamp: new Date().toISOString()
         });
 
         if (!normalizedEmail || !password) {
-            console.log('❌ [ADMIN AUTH LOGIN] Missing email or password');
+            devWarn('[ADMIN AUTH LOGIN] Missing email or password');
             return res.status(400).json({
                 success: false,
                 message: 'Email and password are required',
@@ -110,7 +113,8 @@ router.post('/login', loginRateLimit, async (req, res) => {
 
         // Email domain validation: Only @peakmode.se emails allowed
         if (!normalizedEmail.endsWith('@peakmode.se')) {
-            console.log('❌ [ADMIN AUTH LOGIN] Invalid email domain:', normalizedEmail);
+            logger.warn('admin_login_invalid_domain_attempt', {});
+            devLog('[ADMIN AUTH LOGIN] Invalid email domain:', normalizedEmail);
             return res.status(401).json({
                 success: false,
                 message: 'Invalid email or password',
@@ -119,7 +123,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
         }
 
         if (!JWT_SECRET) {
-            console.error('❌ [ADMIN AUTH LOGIN] JWT_SECRET not configured');
+            logger.error('admin_login_jwt_missing', {});
             return res.status(500).json({
                 success: false,
                 message: 'Server configuration error: JWT_SECRET not set',
@@ -128,7 +132,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
         }
 
         // Find admin in database by email (primary) or username (backward compatibility)
-        console.log('🔍 [ADMIN AUTH LOGIN] Searching admin by email/username:', normalizedEmail);
+        devLog('[ADMIN AUTH LOGIN] Searching admin by email/username:', normalizedEmail);
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'admins',
@@ -140,7 +144,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
         const admin = Array.isArray(adminData) ? adminData[0] : adminData;
 
         if (!adminResult.success || !admin) {
-            console.log('❌ [ADMIN AUTH LOGIN] Admin not found for:', normalizedEmail);
+            devWarn('[ADMIN AUTH LOGIN] Admin not found for:', normalizedEmail);
             // Return generic error to prevent email enumeration
             return res.status(401).json({
                 success: false,
@@ -149,7 +153,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
             });
         }
 
-        console.log('✅ [ADMIN AUTH LOGIN] Admin found:', {
+        devLog('[ADMIN AUTH LOGIN] Admin found', {
             id: admin._id || admin.id,
             email: admin.email,
             name: admin.name,
@@ -164,7 +168,11 @@ router.post('/login', loginRateLimit, async (req, res) => {
         if (admin.lockedUntil && new Date(admin.lockedUntil) > now) {
             const lockExpiresAt = new Date(admin.lockedUntil);
             const minutesRemaining = Math.ceil((lockExpiresAt - now) / (1000 * 60));
-            console.log('❌ [ADMIN AUTH LOGIN] 403 ACCOUNT_LOCKED until:', lockExpiresAt.toISOString(), 'Origin:', req.get('origin'));
+            logger.warn('admin_login_account_locked', {
+                until: lockExpiresAt.toISOString(),
+                origin: req.get('origin') || undefined
+            });
+            devLog('[ADMIN AUTH LOGIN] 403 ACCOUNT_LOCKED until:', lockExpiresAt.toISOString());
             return res.status(403).json({
                 success: false,
                 message: `Account is locked. Please try again in ${minutesRemaining} minute(s).`,
@@ -174,7 +182,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
 
         // If lock expired, clear it
         if (admin.lockedUntil && new Date(admin.lockedUntil) <= now) {
-            console.log('✅ [ADMIN AUTH LOGIN] Lock expired, clearing lock status');
+            devLog('[ADMIN AUTH LOGIN] Lock expired, clearing lock status');
             const updateFilter = (admin._id && ObjectId.isValid(admin._id))
                 ? { _id: new ObjectId(admin._id) }
                 : { email: normalizedEmail };
@@ -194,7 +202,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
         }
 
         if (!admin.password || typeof admin.password !== 'string') {
-            console.log('❌ [ADMIN AUTH LOGIN] Admin has no password field');
+            devWarn('[ADMIN AUTH LOGIN] Admin has no password field');
             // Treat as invalid credentials (do not leak account state)
             return res.status(401).json({
                 success: false,
@@ -213,7 +221,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
             // Legacy plaintext password - upgrade to bcrypt
             if (admin.password === password) {
                 passwordMatch = true;
-                console.log('✅ [ADMIN AUTH LOGIN] Plaintext password matches, upgrading to bcrypt...');
+                devLog('[ADMIN AUTH LOGIN] Plaintext password matches, upgrading to bcrypt…');
                 try {
                     const upgradedHash = await bcrypt.hash(password, 10);
                     const filter = (admin._id && ObjectId.isValid(admin._id))
@@ -233,13 +241,13 @@ router.post('/login', loginRateLimit, async (req, res) => {
                         }
                     });
                 } catch (upgradeErr) {
-                    console.error('⚠️ [ADMIN AUTH LOGIN] Password upgrade failed:', upgradeErr.message);
+                    logger.warn('admin_login_password_upgrade_failed', { message: upgradeErr.message });
                 }
             }
         }
 
         if (!passwordMatch) {
-            console.log('❌ [ADMIN AUTH LOGIN] Password verification failed');
+            devWarn('[ADMIN AUTH LOGIN] Password verification failed');
             
             // Increment failed login attempts
             const currentAttempts = (admin.failedLoginAttempts || 0) + 1;
@@ -255,7 +263,8 @@ router.post('/login', loginRateLimit, async (req, res) => {
             // Lock account if max attempts reached
             if (currentAttempts >= MAX_FAILED_ATTEMPTS) {
                 updateData.lockedUntil = new Date(now.getTime() + LOCK_DURATION_MS);
-                console.log('🔒 [ADMIN AUTH LOGIN] Account locked due to too many failed attempts');
+                logger.warn('admin_login_account_locked_max_attempts', { adminId: String(admin._id || admin.id || '') });
+                devLog('[ADMIN AUTH LOGIN] Account locked due to too many failed attempts');
             }
 
             await db.executeOperation({
@@ -274,7 +283,8 @@ router.post('/login', loginRateLimit, async (req, res) => {
 
         // Check if admin status is active
         if (admin.status && admin.status !== 'active') {
-            console.log('❌ [ADMIN AUTH LOGIN] 403 ADMIN_DISABLED status:', admin.status, 'Origin:', req.get('origin'));
+            logger.warn('admin_login_disabled', { status: admin.status, origin: req.get('origin') || undefined });
+            devLog('[ADMIN AUTH LOGIN] 403 ADMIN_DISABLED status:', admin.status);
             return res.status(403).json({
                 success: false,
                 message: 'Admin account is not active',
@@ -284,7 +294,8 @@ router.post('/login', loginRateLimit, async (req, res) => {
 
         // Also check legacy 'active' field for backward compatibility
         if (admin.active === false) {
-            console.log('❌ [ADMIN AUTH LOGIN] 403 ADMIN_DISABLED (legacy active=false) Origin:', req.get('origin'));
+            logger.warn('admin_login_disabled_legacy', { origin: req.get('origin') || undefined });
+            devLog('[ADMIN AUTH LOGIN] 403 ADMIN_DISABLED (legacy active=false)');
             return res.status(403).json({
                 success: false,
                 message: 'Admin account is disabled',
@@ -346,7 +357,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
             }
         });
 
-        console.log('✅ [ADMIN AUTH LOGIN] Login successful, tokens generated');
+        devLog('[ADMIN AUTH LOGIN] Login successful, tokens generated');
         
         // Log successful login
         await logAdminActivity({
@@ -388,11 +399,8 @@ router.post('/login', loginRateLimit, async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [ADMIN AUTH LOGIN] Error:', {
-            message: error.message,
-            stack: error.stack,
-            name: error.name
-        });
+        logger.error('admin_login_error', { message: error.message, name: error.name });
+        devLog('[ADMIN AUTH LOGIN] Stack:', error.stack);
         res.status(500).json({
             success: false,
             message: 'Internal server error during login',
@@ -492,7 +500,7 @@ router.post('/verify', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [ADMIN AUTH] Verify error:', error);
+        logger.error('admin_auth_verify_error', { message: error.message });
         res.status(500).json({
             success: false,
             valid: false,
@@ -538,7 +546,7 @@ router.post('/logout', async (req, res) => {
         } catch (jwtError) {
             // Token is invalid or expired, but we'll still return success
             // (client should clear tokens anyway)
-            console.log('⚠️ [LOGOUT] Invalid or expired token provided, but logout still successful');
+            devWarn('[LOGOUT] Invalid or expired token provided, but logout still successful');
             return res.json({
                 success: true,
                 message: 'Logout successful. Please remove tokens from client storage.'
@@ -592,7 +600,7 @@ router.post('/logout', async (req, res) => {
                 }
             });
 
-            console.log(`✅ [LOGOUT] Refresh token revoked for admin ${decoded.email || decoded.username}`);
+            devLog('[LOGOUT] Refresh token revoked for admin:', decoded.email || decoded.username);
         }
 
         // Log logout if we have admin info
@@ -622,7 +630,7 @@ router.post('/logout', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [ADMIN AUTH] Logout error:', error);
+        logger.error('admin_auth_logout_error', { message: error.message });
         // Even if there's an error, return success (client should clear tokens)
         res.json({
             success: true,
@@ -716,7 +724,7 @@ router.post('/init', async (req, res) => {
         });
 
         if (createResult.success) {
-            console.log('✅ [ADMIN AUTH] Initial admin account created');
+            devLog('[ADMIN AUTH] Initial admin account created');
             res.json({
                 success: true,
                 message: 'Initial admin account created successfully',
@@ -739,7 +747,7 @@ router.post('/init', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('❌ [ADMIN AUTH] Init error:', error);
+        logger.error('admin_auth_init_error', { message: error.message });
         res.status(500).json({
             success: false,
             message: 'Internal server error during admin initialization',
@@ -755,7 +763,7 @@ router.post('/init', async (req, res) => {
  */
 router.get('/diagnostic', async (req, res) => {
     try {
-        console.log('🔍 [ADMIN AUTH DIAGNOSTIC] Request received');
+        devLog('[ADMIN AUTH DIAGNOSTIC] Request received');
 
         // Get all admins (without passwords for security)
         const allAdminsResult = await db.executeOperation({
@@ -801,7 +809,7 @@ router.get('/diagnostic', async (req, res) => {
             lastLoginAt: a.lastLoginAt
         }));
 
-        console.log('🔍 [ADMIN AUTH DIAGNOSTIC] Results:', {
+        devLog('[ADMIN AUTH DIAGNOSTIC] Results:', {
             adminCount,
             admins: adminsList.map(a => ({ id: a.id, username: a.username, email: a.email })),
             passwordInfo
@@ -816,7 +824,7 @@ router.get('/diagnostic', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [ADMIN AUTH DIAGNOSTIC] Error:', error);
+        logger.error('admin_auth_diagnostic_error', { message: error.message });
         res.status(500).json({
             success: false,
             message: error.message || 'Internal server error',
@@ -938,7 +946,7 @@ router.post('/reset-password', async (req, res) => {
                     year: new Date().getFullYear()
                 });
             } catch (emailErr) {
-                console.error('❌ [RESET PASSWORD] Success email send error:', emailErr.message);
+                logger.warn('admin_reset_password_success_email_failed', { message: emailErr.message });
             }
             await logAdminActivity({
                 adminId, adminEmail: admin.email, action: 'password_reset',
@@ -1024,7 +1032,7 @@ router.post('/reset-password', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('❌ [ADMIN AUTH RESET] Error:', error);
+        logger.error('admin_auth_reset_password_error', { message: error.message });
         res.status(500).json({
             success: false,
             message: 'Internal server error',
@@ -1044,7 +1052,7 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
     try {
         const { name, email } = req.body;
 
-        console.log('📧 [ADMIN INVITE] Request received:', {
+        devLog('[ADMIN INVITE] Request received', {
             name,
             email,
             requester: req.admin.email || req.admin.username
@@ -1182,7 +1190,7 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
                 });
             }
         } catch (emailErr) {
-            console.error('❌ [ADMIN INVITE] Email send error (invite still created):', emailErr.message);
+            logger.warn('admin_invite_email_send_failed', { message: emailErr.message });
         }
 
         // Log invite sent
@@ -1196,7 +1204,7 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
             success: true
         });
 
-        console.log('✅ [ADMIN INVITE] Invite created successfully:', {
+        devLog('[ADMIN INVITE] Invite created successfully', {
             email: normalizedEmail,
             expiresAt: expiresAt.toISOString()
         });
@@ -1211,7 +1219,7 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
         });
 
     } catch (error) {
-        console.error('❌ [ADMIN INVITE] Error:', error);
+        logger.error('admin_invite_error', { message: error.message });
         res.status(500).json({
             success: false,
             message: 'Internal server error during invite creation',
@@ -1231,7 +1239,7 @@ router.post('/accept-invite', async (req, res) => {
     try {
         const { token, password, confirmPassword } = req.body;
 
-        console.log('📧 [ACCEPT INVITE] Request received:', {
+        devLog('[ACCEPT INVITE] Request received', {
             tokenLength: token ? token.length : 0,
             hasPassword: !!password,
             timestamp: new Date().toISOString()
@@ -1282,7 +1290,7 @@ router.post('/accept-invite', async (req, res) => {
         }
 
         if (!JWT_SECRET) {
-            console.error('❌ [ACCEPT INVITE] JWT_SECRET not configured');
+            logger.error('accept_invite_jwt_missing', {});
             return res.status(500).json({
                 success: false,
                 message: 'Server configuration error: JWT_SECRET not set',
@@ -1302,7 +1310,7 @@ router.post('/accept-invite', async (req, res) => {
         const admin = Array.isArray(adminData) ? adminData[0] : adminData;
 
         if (!adminResult.success || !admin) {
-            console.log('❌ [ACCEPT INVITE] Admin not found for token');
+            devWarn('[ACCEPT INVITE] Admin not found for token');
             return res.status(400).json({
                 success: false,
                 message: 'Invalid or expired invite token',
@@ -1310,7 +1318,7 @@ router.post('/accept-invite', async (req, res) => {
             });
         }
 
-        console.log('✅ [ACCEPT INVITE] Admin found:', {
+        devLog('[ACCEPT INVITE] Admin found', {
             id: admin._id || admin.id,
             email: admin.email,
             inviteExpiresAt: admin.inviteExpiresAt
@@ -1318,7 +1326,7 @@ router.post('/accept-invite', async (req, res) => {
 
         // Email domain validation: Only @peakmode.se emails allowed
         if (!admin.email || !admin.email.endsWith('@peakmode.se')) {
-            console.log('❌ [ACCEPT INVITE] Invalid email domain:', admin.email);
+            devWarn('[ACCEPT INVITE] Invalid email domain:', admin.email);
             return res.status(400).json({
                 success: false,
                 message: 'Invalid email domain. Only @peakmode.se emails are allowed.',
@@ -1344,7 +1352,7 @@ router.post('/accept-invite', async (req, res) => {
         );
 
         if (activeAdmins.length >= 2) {
-            console.log('❌ [ACCEPT INVITE] Max admin limit reached');
+            devWarn('[ACCEPT INVITE] Max admin limit reached');
             return res.status(400).json({
                 success: false,
                 message: 'Maximum admin limit reached (2 admins)',
@@ -1354,7 +1362,7 @@ router.post('/accept-invite', async (req, res) => {
 
         // Check if token is expired
         if (!admin.inviteExpiresAt) {
-            console.log('❌ [ACCEPT INVITE] No expiry date found');
+            devWarn('[ACCEPT INVITE] No expiry date found');
             return res.status(400).json({
                 success: false,
                 message: 'Invalid or expired invite token',
@@ -1366,7 +1374,7 @@ router.post('/accept-invite', async (req, res) => {
         const now = new Date();
 
         if (expiresAt <= now) {
-            console.log('❌ [ACCEPT INVITE] Token expired:', {
+            devWarn('[ACCEPT INVITE] Token expired', {
                 expiresAt: expiresAt.toISOString(),
                 now: now.toISOString()
             });
@@ -1435,7 +1443,9 @@ router.post('/accept-invite', async (req, res) => {
         });
 
         if (!updateResult.success) {
-            console.error('❌ [ACCEPT INVITE] Failed to update admin:', updateResult);
+            logger.error('accept_invite_update_failed', {
+                message: updateResult.error || updateResult.message || 'unknown'
+            });
             return res.status(500).json({
                 success: false,
                 message: 'Failed to accept invite',
@@ -1465,7 +1475,7 @@ router.post('/accept-invite', async (req, res) => {
                 await emailService.sendAdminActivatedEmail(admin.invitedByEmail, activationData);
             }
         } catch (emailErr) {
-            console.error('❌ [ACCEPT INVITE] Activation email send error (account still activated):', emailErr.message);
+            logger.warn('accept_invite_activation_email_failed', { message: emailErr.message });
         }
 
         // Log invite accepted
@@ -1479,7 +1489,7 @@ router.post('/accept-invite', async (req, res) => {
             success: true
         });
 
-        console.log('✅ [ACCEPT INVITE] Invite accepted successfully:', {
+        devLog('[ACCEPT INVITE] Invite accepted successfully', {
             email: admin.email,
             role: admin.role
         });
@@ -1511,7 +1521,7 @@ router.post('/accept-invite', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [ACCEPT INVITE] Error:', error);
+        logger.error('accept_invite_error', { message: error.message });
         res.status(500).json({
             success: false,
             message: 'Internal server error during invite acceptance',
@@ -1533,7 +1543,7 @@ router.post('/refresh', async (req, res) => {
         // Read refresh token from cookie (preferred) or body (backward compatibility)
         const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
 
-        console.log('🔄 [REFRESH TOKEN] Request received');
+        devLog('[REFRESH TOKEN] Request received');
 
         if (!refreshToken || !refreshToken.trim()) {
             // No session (e.g. first load, or cookie not sent cross-origin). Use 401 so frontend shows login.
@@ -1545,7 +1555,7 @@ router.post('/refresh', async (req, res) => {
         }
 
         if (!JWT_SECRET) {
-            console.error('❌ [REFRESH TOKEN] JWT_SECRET not configured');
+            logger.error('refresh_token_jwt_missing', {});
             return res.status(500).json({
                 success: false,
                 message: 'Server configuration error: JWT_SECRET not set',
@@ -1706,7 +1716,7 @@ router.post('/refresh', async (req, res) => {
             }
         });
 
-        console.log('✅ [REFRESH TOKEN] Tokens refreshed successfully:', {
+        devLog('[REFRESH TOKEN] Tokens refreshed successfully', {
             adminId: adminId,
             email: admin.email
         });
@@ -1731,7 +1741,7 @@ router.post('/refresh', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [REFRESH TOKEN] Error:', error);
+        logger.error('refresh_token_error', { message: error.message });
         res.status(500).json({
             success: false,
             message: 'Internal server error during token refresh',
@@ -1752,7 +1762,7 @@ router.post('/forgot-password', async (req, res) => {
         const { email } = req.body;
         const normalizedEmail = String(email || '').toLowerCase().trim();
 
-        console.log('🔐 [FORGOT PASSWORD] Request received:', {
+        devLog('[FORGOT PASSWORD] Request received', {
             email: normalizedEmail,
             timestamp: new Date().toISOString()
         });
@@ -1787,7 +1797,7 @@ router.post('/forgot-password', async (req, res) => {
 
         // Return success even if admin not found (prevent email enumeration)
         if (!adminResult.success || !admin) {
-            console.log('⚠️ [FORGOT PASSWORD] Admin not found (returning generic success)');
+            devLog('[FORGOT PASSWORD] Admin not found (returning generic success)');
             return res.json({
                 success: true,
                 message: 'If an account exists with this email, a password reset link has been sent.'
@@ -1842,7 +1852,7 @@ router.post('/forgot-password', async (req, res) => {
                 year
             });
         } catch (emailErr) {
-            console.error('❌ [FORGOT PASSWORD] Email send error:', emailErr.message);
+            logger.warn('forgot_password_email_failed', { message: emailErr.message });
             // Still return generic success to avoid enumeration
         }
 
@@ -1857,12 +1867,11 @@ router.post('/forgot-password', async (req, res) => {
             success: true
         });
 
-        console.log('✅ [FORGOT PASSWORD] Reset token generated and email sent:', {
+        devLog('[FORGOT PASSWORD] Reset token generated and email queued', {
             email: normalizedEmail,
             expiresAt: resetExpires.toISOString()
         });
-        // Verification: open this URL in a browser to confirm reset page loads (reset_link is single full URL, token URL-encoded)
-        console.log('[FORGOT PASSWORD] reset_link sent in email:', resetLink);
+        devLog('[FORGOT PASSWORD] reset_link (dev only):', resetLink);
 
         res.json({
             success: true,
@@ -1870,7 +1879,7 @@ router.post('/forgot-password', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [FORGOT PASSWORD] Error:', error);
+        logger.error('forgot_password_error', { message: error.message });
         // Return generic success even on error (prevent information leakage)
         res.json({
             success: true,

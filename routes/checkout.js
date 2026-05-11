@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
+const { devLog, devWarn } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
 
 const db = getDBInstance();
 
@@ -21,8 +23,7 @@ const db = getDBInstance();
  * }
  */
 router.post('/email-capture', async (req, res) => {
-    // CRITICAL: Log that endpoint was hit
-    console.log('🔔 [CHECKOUT] Email capture endpoint HIT:', {
+    devLog('[CHECKOUT] Email capture endpoint hit', {
         timestamp: new Date().toISOString(),
         hasEmail: !!req.body.email,
         hasCartItems: !!req.body.cartItems,
@@ -54,7 +55,7 @@ router.post('/email-capture', async (req, res) => {
         const normalizedEmail = email.trim().toLowerCase();
         const now = new Date().toISOString();
         
-        console.log('🔍 [CHECKOUT] Checking for existing checkout:', {
+        devLog('[CHECKOUT] Checking for existing checkout', {
             email: normalizedEmail,
             database: 'peakmode',
             collection: 'abandoned_checkouts'
@@ -68,7 +69,7 @@ router.post('/email-capture', async (req, res) => {
             data: { email: normalizedEmail, status: 'pending' }
         });
 
-        console.log('🔍 [CHECKOUT] Existing checkout check result:', {
+        devLog('[CHECKOUT] Existing checkout check result', {
             success: existingCheckoutResult.success,
             hasData: !!existingCheckoutResult.data,
             dataType: existingCheckoutResult.data ? (Array.isArray(existingCheckoutResult.data) ? 'array' : 'object') : 'null'
@@ -118,8 +119,7 @@ router.post('/email-capture', async (req, res) => {
                     updateData.shippingMethod = existingCheckout.shippingMethod;
                 }
 
-                // Log before update for debugging
-                console.log('💾 [CHECKOUT] Attempting to update abandoned checkout:', {
+                devLog('[CHECKOUT] Attempting to update abandoned checkout', {
                     checkoutId: checkoutId,
                     email: normalizedEmail,
                     hasCartItems: !!cartItems && cartItems.length > 0,
@@ -137,8 +137,7 @@ router.post('/email-capture', async (req, res) => {
                     }
                 });
 
-                // Log result for debugging
-                console.log('💾 [CHECKOUT] Database update result:', {
+                devLog('[CHECKOUT] Database update result', {
                     success: saveResult.success,
                     status: saveResult.status,
                     message: saveResult.message,
@@ -147,7 +146,7 @@ router.post('/email-capture', async (req, res) => {
                 });
             } else {
                 // Existing checkout data found but invalid, will create new one
-                console.log('⚠️ [CHECKOUT] Existing checkout data found but no valid checkout ID, creating new checkout instead');
+                devLog('[CHECKOUT] Existing checkout data found but no valid checkout ID, creating new checkout instead');
                 existingCheckout = null; // Clear invalid checkout
             }
         }
@@ -182,8 +181,7 @@ router.post('/email-capture', async (req, res) => {
                 abandonedCheckout.shippingMethod = shippingMethod;
             }
             
-            // Log before save for debugging
-            console.log('💾 [CHECKOUT] Attempting to save abandoned checkout:', {
+            devLog('[CHECKOUT] Attempting to save abandoned checkout', {
                 checkoutId: checkoutId,
                 email: normalizedEmail,
                 hasCartItems: !!cartItems && cartItems.length > 0,
@@ -198,8 +196,7 @@ router.post('/email-capture', async (req, res) => {
                 data: abandonedCheckout
             });
 
-            // Log result for debugging
-            console.log('💾 [CHECKOUT] Database save result:', {
+            devLog('[CHECKOUT] Database save result', {
                 success: saveResult.success,
                 status: saveResult.status,
                 message: saveResult.message,
@@ -212,7 +209,7 @@ router.post('/email-capture', async (req, res) => {
         const isSuccess = saveResult.success === true || saveResult.status === true || saveResult.success !== false;
         
         if (isSuccess) {
-            console.log(`✅ [CHECKOUT] Email captured for abandoned checkout:`, {
+            devLog('[CHECKOUT] Email captured for abandoned checkout', {
                 checkoutId: checkoutId,
                 email: normalizedEmail,
                 total: total,
@@ -252,7 +249,7 @@ router.post('/email-capture', async (req, res) => {
                     });
                 } catch (cartError) {
                     // Don't fail if cart update fails
-                    console.warn('⚠️ [CHECKOUT] Failed to update cart with email:', cartError.message);
+                    logger.warn('checkout_cart_email_update_failed', { message: cartError.message });
                 }
             }
 
@@ -267,16 +264,13 @@ router.post('/email-capture', async (req, res) => {
                 }
             });
         } else {
-            console.error('❌ [CHECKOUT] Failed to save abandoned checkout:', {
-                success: saveResult.success,
-                status: saveResult.status,
-                message: saveResult.message,
-                error: saveResult.error,
-                fullResult: JSON.stringify(saveResult, null, 2),
+            logger.error('checkout_abandoned_save_failed', {
+                checkoutId,
                 database: 'peakmode',
                 collection: 'abandoned_checkouts',
-                checkoutId: checkoutId,
-                email: normalizedEmail
+                message: saveResult.message || saveResult.error || undefined,
+                success: saveResult.success,
+                status: saveResult.status
             });
             res.status(500).json({
                 success: false,
@@ -288,7 +282,7 @@ router.post('/email-capture', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('❌ [CHECKOUT] Email capture error:', error);
+        logger.error('checkout_email_capture_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to capture email',
@@ -323,7 +317,7 @@ router.get('/recover/:checkoutId', async (req, res) => {
             });
         }
 
-        console.log(`🔍 [CHECKOUT] Recovering checkout: ${checkoutId}`);
+        devLog(`[CHECKOUT] Recovering checkout: ${checkoutId}`);
 
         // Find abandoned checkout
         const checkoutResult = await db.executeOperation({
@@ -334,7 +328,7 @@ router.get('/recover/:checkoutId', async (req, res) => {
         });
 
         if (!checkoutResult.success || !checkoutResult.data) {
-            console.warn(`⚠️ [CHECKOUT] Checkout not found: ${checkoutId}`);
+            devWarn(`[CHECKOUT] Checkout not found: ${checkoutId}`);
             return res.status(404).json({
                 success: false,
                 error: 'Checkout not found',
@@ -370,8 +364,7 @@ router.get('/recover/:checkoutId', async (req, res) => {
             }
         });
 
-        console.log(`✅ [CHECKOUT] Checkout recovered: ${checkoutId}`, {
-            email: checkout.email,
+        devLog(`[CHECKOUT] Checkout recovered: ${checkoutId}`, {
             itemsCount: checkout.cart?.length || 0,
             total: checkout.total
         });
@@ -396,7 +389,7 @@ router.get('/recover/:checkoutId', async (req, res) => {
             shippingMethod: checkout.shippingMethod || null
         });
     } catch (error) {
-        console.error('❌ [CHECKOUT] Recover checkout error:', error);
+        logger.error('checkout_recover_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to recover checkout',
@@ -454,7 +447,7 @@ router.put('/activity/:checkoutId', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('❌ [CHECKOUT] Update activity error:', error);
+        logger.error('checkout_activity_update_error', { message: error.message });
         // Don't fail - activity updates are best effort
         res.json({
             success: false,
@@ -470,7 +463,7 @@ router.put('/activity/:checkoutId', async (req, res) => {
  */
 router.get('/diagnostic', async (req, res) => {
     try {
-        console.log('🔍 [CHECKOUT DIAGNOSTIC] Running diagnostic check...');
+        devLog('[CHECKOUT DIAGNOSTIC] Running diagnostic check…');
         
         // Test 1: Check database connection
         const testRead = await db.executeOperation({
@@ -546,12 +539,12 @@ router.get('/diagnostic', async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('❌ [CHECKOUT DIAGNOSTIC] Error:', error);
+        logger.error('checkout_diagnostic_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Diagnostic failed',
             details: error.message,
-            stack: error.stack
+            ...(process.env.NODE_ENV === 'development' ? { stack: error.stack } : {})
         });
     }
 });

@@ -4,6 +4,8 @@ const cookieParser = require('cookie-parser');
 const path = require('path');
 const { buildStripePaymentCsp } = require('./config/contentSecurityPolicy');
 const fs = require('fs');
+const { requestIdMiddleware } = require('./middleware/requestId');
+const { errorResponder } = require('./middleware/errorResponder');
 const dbRoutes = require('./routes/db');
 const paymentRoutes = require('./routes/payment');
 const storageRoutes = require('./routes/storage');
@@ -41,11 +43,12 @@ const errorHandler = require('./middleware/errorHandler');
 const abandonedCartService = require('./services/abandonedCartService');
 const abandonedCheckoutService = require('./services/abandonedCheckoutService');
 const paymentFailureService = require('./services/paymentFailureService');
+const { isDevelopment, devLog } = require('./core/logging/devConsole');
 require('dotenv').config();
 
-// Cloudinary configuration check (temporary sanity check)
+// Cloudinary sanity check — development only
 const cloudinary = require('./config/cloudinary');
-console.log('Cloudinary configured:', cloudinary.config().cloud_name);
+devLog('Cloudinary configured:', cloudinary.config().cloud_name);
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -110,6 +113,9 @@ process.on('SIGINT', () => {
 
 // Cookie parser (required for httpOnly cookies)
 app.use(cookieParser());
+
+// Request correlation id for debugging + safe retries
+app.use(requestIdMiddleware);
 
 // Security Headers Middleware (Defense in Depth)
 // CSP applies to EVERY response from this app. Browsers enforce CSP on HTML documents;
@@ -225,26 +231,21 @@ app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 // Stripe requires this exact path with no redirects and Content-Type: text/plain
 // Both domains point to the same server, so this single route serves both
 app.get('/.well-known/apple-developer-merchantid-domain-association', (req, res) => {
-    console.log('🔍 [APPLE PAY] Route hit: /.well-known/apple-developer-merchantid-domain-association');
-    console.log('🔍 [APPLE PAY] Request from:', req.headers.host);
-    console.log('🔍 [APPLE PAY] Request URL:', req.url);
-    console.log('🔍 [APPLE PAY] Request method:', req.method);
-    console.log('🔍 [APPLE PAY] Request path:', req.path);
-    
+    if (isDevelopment()) {
+        devLog('🔍 [APPLE PAY] Route hit', { host: req.headers.host, path: req.path });
+    }
+
     try {
         // Try to read from .well-known folder first
         const filePath = path.join(__dirname, '.well-known', 'apple-developer-merchantid-domain-association');
-        console.log('🔍 [APPLE PAY] Checking file at:', filePath);
-        console.log('🔍 [APPLE PAY] __dirname:', __dirname);
-        
+
         if (fs.existsSync(filePath)) {
             // File exists - serve it
             const fileContent = fs.readFileSync(filePath, 'utf8');
             res.setHeader('Content-Type', 'text/plain');
             res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
             res.send(fileContent);
-            console.log('✅ [APPLE PAY] Domain verification file served from .well-known folder');
-            console.log('✅ [APPLE PAY] File content length:', fileContent.length);
+            devLog('✅ [APPLE PAY] Served from .well-known folder');
             return; // Important: return to prevent further processing
         } else if (process.env.APPLE_PAY_DOMAIN_VERIFICATION) {
             // Fallback: serve from environment variable if file doesn't exist
@@ -252,23 +253,15 @@ app.get('/.well-known/apple-developer-merchantid-domain-association', (req, res)
             res.setHeader('Content-Type', 'text/plain');
             res.setHeader('Cache-Control', 'public, max-age=3600');
             res.send(envContent);
-            console.log('✅ [APPLE PAY] Domain verification file served from environment variable');
-            console.log('✅ [APPLE PAY] Content length:', envContent.length);
+            devLog('✅ [APPLE PAY] Served from APPLE_PAY_DOMAIN_VERIFICATION env');
             return; // Important: return to prevent further processing
         } else {
-            // File not found and no environment variable
-            console.error('❌ [APPLE PAY] Domain verification file not found');
-            console.error('❌ [APPLE PAY] Expected location:', filePath);
-            console.error('❌ [APPLE PAY] File exists:', fs.existsSync(filePath));
-            console.error('❌ [APPLE PAY] Env var exists:', !!process.env.APPLE_PAY_DOMAIN_VERIFICATION);
-            console.error('❌ [APPLE PAY] Please download the file from Stripe Dashboard and place it at:', filePath);
-            console.error('❌ [APPLE PAY] OR set APPLE_PAY_DOMAIN_VERIFICATION environment variable');
+            console.error('[APPLE_PAY] Domain verification file missing (.well-known path and env unset)');
             res.status(404).setHeader('Content-Type', 'text/plain').send('Apple Pay domain verification file not found. Please configure the file at .well-known/apple-developer-merchantid-domain-association or set APPLE_PAY_DOMAIN_VERIFICATION environment variable');
             return; // Important: return to prevent further processing
         }
     } catch (error) {
-        console.error('❌ [APPLE PAY] Error serving domain verification file:', error);
-        console.error('❌ [APPLE PAY] Error stack:', error.stack);
+        console.error('[APPLE_PAY] Error serving verification file:', error.message);
         res.status(500).setHeader('Content-Type', 'text/plain').send('Error serving Apple Pay domain verification file');
         return; // Important: return to prevent further processing
     }
@@ -279,7 +272,7 @@ app.use('/api/orders/create', (req, res, next) => {
     // Set a 25 second timeout for order creation
     req.setTimeout(25000, () => {
         if (!res.headersSent) {
-            console.error('⏱️ [TIMEOUT] Order creation request timed out after 25 seconds');
+            console.error('[TIMEOUT] Order creation exceeded 25s');
             res.status(504).json({
                 success: false,
                 error: 'Request timeout - order creation took too long',
@@ -435,6 +428,7 @@ app.get('/storage/docs', (req, res) => {
 });
 
 // Error handling middleware
+app.use(errorResponder);
 app.use(errorHandler);
 
 // Handle 404 - but exclude Apple Pay verification route (it has its own handler)
@@ -459,7 +453,7 @@ if (process.env.NODE_ENV !== 'test') {
         
         // Start abandoned cart processing (runs every 10 minutes)
         if (process.env.ENABLE_ABANDONED_CART !== 'false') {
-            console.log('🛒 [ABANDONED CART] Service enabled - checking every 10 minutes');
+            devLog('🛒 [ABANDONED CART] Service enabled - checking every 10 minutes');
             
             // Run immediately on startup (after 1 minute delay to let server stabilize)
             trackTimeout(setTimeout(() => {
@@ -475,13 +469,12 @@ if (process.env.NODE_ENV !== 'test') {
                 });
             }, 5 * 60 * 1000)); // 5 minutes (check twice per 10-minute window)
         } else {
-            console.log('🛒 [ABANDONED CART] Service disabled (ENABLE_ABANDONED_CART=false)');
+            devLog('🛒 [ABANDONED CART] Service disabled (ENABLE_ABANDONED_CART=false)');
         }
         
         // Process pending payment failure emails (runs every minute)
         if (process.env.ENABLE_PAYMENT_FAILURE_EMAIL !== 'false') {
-            console.log('💳 [PAYMENT FAILURE] Service enabled - checking every 1 minute');
-            console.log('💳 [PAYMENT FAILURE] Email delay: 3 minutes after payment failure');
+            devLog('💳 [PAYMENT FAILURE] Service enabled - checking every 1 minute (emails deferred 3 min)');
             
             // Run immediately on startup (after 1 minute delay to let server stabilize)
             trackTimeout(setTimeout(() => {
@@ -497,14 +490,12 @@ if (process.env.NODE_ENV !== 'test') {
                 });
             }, 60 * 1000)); // 1 minute
         } else {
-            console.log('💳 [PAYMENT FAILURE] Service disabled (ENABLE_PAYMENT_FAILURE_EMAIL=false)');
+            devLog('💳 [PAYMENT FAILURE] Service disabled (ENABLE_PAYMENT_FAILURE_EMAIL=false)');
         }
 
         // Start abandoned checkout processing (runs every 5 minutes to catch 10-minute windows)
         if (process.env.ENABLE_ABANDONED_CHECKOUT !== 'false') {
-            console.log('🛒 [ABANDONED CHECKOUT] Service enabled - checking every 5 minutes');
-            console.log('🛒 [ABANDONED CHECKOUT] First email: 10 minutes after abandonment');
-            console.log('🛒 [ABANDONED CHECKOUT] Second email: 20 minutes after abandonment (10 minutes after first)');
+            devLog('🛒 [ABANDONED CHECKOUT] Service enabled - checking every 5 minutes');
             
             // Run immediately on startup (after 2 minute delay to let server stabilize)
             trackTimeout(setTimeout(() => {
@@ -520,14 +511,13 @@ if (process.env.NODE_ENV !== 'test') {
                 });
             }, 5 * 60 * 1000)); // 5 minutes (checks twice per 10-minute window)
         } else {
-            console.log('🛒 [ABANDONED CHECKOUT] Service disabled (ENABLE_ABANDONED_CHECKOUT=false)');
+            devLog('🛒 [ABANDONED CHECKOUT] Service disabled (ENABLE_ABANDONED_CHECKOUT=false)');
         }
 
         // Start discount reminder processing (runs once per day)
         if (process.env.ENABLE_DISCOUNT_REMINDER !== 'false') {
             const discountReminderService = require('./services/discountReminderService');
-            console.log('📧 [DISCOUNT REMINDER] Service enabled - checking once per day');
-            console.log('📧 [DISCOUNT REMINDER] Sends reminder 7 days after code creation (if unused)');
+            devLog('📧 [DISCOUNT REMINDER] Service enabled - daily check');
             
             // Run immediately on startup (after 3 minute delay to let server stabilize)
             trackTimeout(setTimeout(() => {
@@ -543,7 +533,7 @@ if (process.env.NODE_ENV !== 'test') {
                 });
             }, 24 * 60 * 60 * 1000)); // 24 hours (once per day)
         } else {
-            console.log('📧 [DISCOUNT REMINDER] Service disabled (ENABLE_DISCOUNT_REMINDER=false)');
+            devLog('📧 [DISCOUNT REMINDER] Service disabled (ENABLE_DISCOUNT_REMINDER=false)');
         }
         
         // DISABLED: Weekly product views reset was destroying trending system
@@ -554,8 +544,16 @@ if (process.env.NODE_ENV !== 'test') {
         // dynamically by counting only views within last 7 days (true rolling window).
         // 
         // For now, the reset is disabled to prevent data destruction.
-        console.log('📊 [WEEKLY VIEWS RESET] Service DISABLED - weekly reset was destroying trending data');
-        console.log('📊 [WEEKLY VIEWS RESET] PROPER FIX NEEDED: Implement true 7-day rolling window with timestamps');
+        devLog('📊 [WEEKLY VIEWS RESET] Disabled (was destroying trending data; needs rolling-window fix)');
+
+        if (!isDevelopment()) {
+            const jobsOn = [];
+            if (process.env.ENABLE_ABANDONED_CART !== 'false') jobsOn.push('abandonedCart');
+            if (process.env.ENABLE_PAYMENT_FAILURE_EMAIL !== 'false') jobsOn.push('paymentFailureEmail');
+            if (process.env.ENABLE_ABANDONED_CHECKOUT !== 'false') jobsOn.push('abandonedCheckout');
+            if (process.env.ENABLE_DISCOUNT_REMINDER !== 'false') jobsOn.push('discountReminder');
+            if (jobsOn.length) console.log(`Background jobs active: ${jobsOn.join(', ')}`);
+        }
     });
 }
 

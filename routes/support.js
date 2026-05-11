@@ -5,12 +5,14 @@ const emailService = require('../services/emailService');
 const { ObjectId } = require('mongodb');
 
 const db = getDBInstance();
+const { devLog } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
 
-// Debug middleware to log all requests to support routes
+// Development-only request tracing (avoid production log spam)
 router.use((req, res, next) => {
-    console.log(`🔍 [SUPPORT ROUTES] ${req.method} ${req.path} - Original URL: ${req.originalUrl}`);
-    console.log(`   Params:`, req.params);
-    console.log(`   Query:`, req.query);
+    if (process.env.NODE_ENV === 'development') {
+        devLog(`[SUPPORT] ${req.method} ${req.path}`, { originalUrl: req.originalUrl });
+    }
     next();
 });
 
@@ -306,7 +308,7 @@ const createFilterVariants = (identifier) => {
         try {
             filters.unshift({ _id: new ObjectId(identifier) });
         } catch (error) {
-            console.warn(`⚠️ Unable to convert identifier ${identifier} to ObjectId:`, error.message);
+            logger.warn('support_invalid_objectid', { identifier: String(identifier), message: error.message });
         }
     }
 
@@ -507,7 +509,7 @@ const fetchAllConversations = async () => {
                 if (result.error && /not found/i.test(result.error)) {
                     continue;
                 }
-                console.warn(`⚠️ Failed to read ${collectionName}:`, result.error);
+                logger.warn('support_read_failed', { collectionName, error: result.error });
                 continue;
             }
 
@@ -519,7 +521,7 @@ const fetchAllConversations = async () => {
                 }
             });
         } catch (error) {
-            console.error(`⚠️ Error fetching ${collectionName}:`, error);
+            logger.warn('support_fetch_collection_error', { collectionName, message: error.message });
         }
     }
 
@@ -527,12 +529,12 @@ const fetchAllConversations = async () => {
 };
 
 const findConversationRecordById = async (identifier) => {
-    console.log(`🔍 [findConversationRecordById] Looking for message: ${identifier}`);
+    devLog('findConversationRecordById', { identifier });
     
     for (const collectionName of CONTACT_COLLECTIONS) {
         try {
             const filters = createFilterVariants(identifier);
-            console.log(`   Checking collection: ${collectionName} with ${filters.length} filter variants`);
+            devLog('support findConversation checking collection', { collectionName, filterCount: filters.length });
 
             for (const filter of filters) {
                 // readRecords expects the query directly, not wrapped in a 'filter' property
@@ -544,13 +546,13 @@ const findConversationRecordById = async (identifier) => {
                 });
 
                 if (result.success && result.data) {
-                    console.log(`   ✅ Found record in ${collectionName} with filter:`, Object.keys(filter)[0]);
+                    devLog('support findConversation match', { collectionName, filterKey: Object.keys(filter)[0] });
                     const conversation = mapRecordToConversation(result.data, collectionName);
                     if (!conversation) {
-                        console.log(`   ⚠️ Failed to map conversation from record`);
+                        devLog('support findConversation map failed', { collectionName });
                         continue;
                     }
-                    console.log(`   ✅ Successfully mapped conversation - Status: ${conversation.status}, Source: ${conversation.source}`);
+                    devLog('support findConversation mapped', { status: conversation.status, source: conversation.source });
                     return {
                         collection: collectionName,
                         filter,
@@ -558,15 +560,15 @@ const findConversationRecordById = async (identifier) => {
                         conversation
                     };
                 } else {
-                    console.log(`   ❌ No match with filter:`, Object.keys(filter)[0]);
+                    devLog('support findConversation no match', { filterKey: Object.keys(filter)[0] });
                 }
             }
         } catch (error) {
-            console.error(`⚠️ Error fetching ${collectionName} record ${identifier}:`, error);
+            logger.warn('support_fetch_record_error', { collectionName, identifier: String(identifier), message: error.message });
         }
     }
 
-    console.log(`❌ [findConversationRecordById] Message ${identifier} not found in any collection`);
+    devLog('findConversationRecordById not found', { identifier });
     return null;
 };
 
@@ -776,7 +778,7 @@ router.post('/contact', async (req, res) => {
             conversation._id = String(insertedId);
         }
 
-        console.log(`✅ Support message received from ${normalizedEmail}, ticket: ${conversation.ticketId}`);
+        devLog('support_contact_received', { ticketId: conversation.ticketId });
 
         // Track email sending status
         let emailSent = false;
@@ -791,21 +793,20 @@ router.post('/contact', async (req, res) => {
             
             if (confirmationResult.success) {
                 emailSent = true;
-                console.log(`✅ Support confirmation email sent to ${normalizedEmail}`);
+                devLog('support_confirmation_email_sent');
             } else {
                 emailError = confirmationResult.error || confirmationResult.details || 'Unknown error';
-                console.error('⚠️ Failed to send support confirmation email:', emailError);
+                logger.warn('support_confirmation_email_failed', { message: emailError.message });
                 
                 // Check if template ID is a placeholder
                 const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 'd-support_confirmation_template_id';
                 if (!templateId || templateId === 'd-support_confirmation_template_id') {
-                    console.warn('⚠️ [EMAIL] SendGrid template ID appears to be a placeholder. Please set SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID environment variable with a valid SendGrid template GUID.');
-                    console.warn('⚠️ [EMAIL] Current template ID value:', templateId || '(not set)');
+                    logger.warn('support_confirmation_sendgrid_template_placeholder');
                 }
             }
         } catch (emailErr) {
             emailError = emailErr.message || 'Email sending failed';
-            console.error('❌ Failed to send support confirmation email:', emailErr);
+            logger.error('support_confirmation_email_error', { message: emailErr.message });
         }
 
         try {
@@ -818,10 +819,10 @@ router.post('/contact', async (req, res) => {
             });
 
             if (!forwardResult.success) {
-                console.error('⚠️ Failed to forward support message to inbox:', forwardResult.details || forwardResult.error);
+                logger.warn('support_inbox_forward_failed', { details: forwardResult.details || forwardResult.error });
             }
         } catch (error) {
-            console.error('⚠️ Error forwarding support message to inbox:', error);
+            logger.warn('support_inbox_forward_error', { message: error.message });
         }
 
         res.json({
@@ -834,7 +835,7 @@ router.post('/contact', async (req, res) => {
             conversation: buildSummaryFromConversation(conversation)
         });
     } catch (error) {
-        console.error('Support message submission error:', error);
+        logger.error('support_message_submit_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -879,7 +880,7 @@ router.get('/messages', async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('Get support messages error:', error);
+        logger.error('support_messages_list_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -893,7 +894,7 @@ router.get('/messages', async (req, res) => {
  * NOTE: This route must come BEFORE /messages/:id to avoid route conflicts
  */
 const replyHandler = async (req, res) => {
-    console.log(`📨 Reply handler called - Method: ${req.method}, Path: ${req.path}, ID: ${req.params.id}`);
+    devLog('support_reply_handler', { method: req.method, path: req.path, id: req.params.id });
     try {
         const { id } = req.params;
         const { message, attachments = [], cc = [], bcc = [], internalNote } = req.body || {};
@@ -981,10 +982,10 @@ const replyHandler = async (req, res) => {
                 });
 
                 if (!emailResult.success) {
-                    console.error('⚠️ Failed to send support reply email:', emailResult.details || emailResult.error);
+                    logger.warn('support_reply_email_failed', { details: emailResult.details || emailResult.error });
                 }
             } catch (emailError) {
-                console.error('⚠️ Error sending support reply email:', emailError);
+                logger.warn('support_reply_email_exception', { message: emailError.message });
             }
         }
 
@@ -993,7 +994,7 @@ const replyHandler = async (req, res) => {
             data: stripInternalFields(updatedConversation, { includeThread: true })
         });
     } catch (error) {
-        console.error('Reply support message error:', error);
+        logger.error('support_reply_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1006,7 +1007,7 @@ const replyHandler = async (req, res) => {
  * Compose and send a new email from support@peakmode.se (not a reply)
  */
 router.post('/messages/compose', async (req, res) => {
-    console.log('📧 [COMPOSE EMAIL] Request received');
+    devLog('support_compose_email_request');
     try {
         const { recipients, subject, message, attachments = [], cc = [], bcc = [] } = req.body;
 
@@ -1047,12 +1048,9 @@ router.post('/messages/compose', async (req, res) => {
         // Normalize attachments
         const normalizedAttachments = normalizeAttachments(attachments);
 
-        console.log('📧 [COMPOSE EMAIL] Sending email:', {
+        devLog('support_compose_email_sending', {
             recipients: recipients.length,
-            subject: subject.substring(0, 50),
-            hasAttachments: normalizedAttachments.length > 0,
-            cc: (cc || []).length,
-            bcc: (bcc || []).length
+            hasAttachments: normalizedAttachments.length > 0
         });
 
         // Send email via email service
@@ -1066,7 +1064,7 @@ router.post('/messages/compose', async (req, res) => {
         });
 
         if (!emailResult.success) {
-            console.error('❌ [COMPOSE EMAIL] Failed to send email:', emailResult.error);
+            logger.error('support_compose_email_failed', { error: emailResult.error });
             return res.status(500).json({
                 success: false,
                 error: emailResult.error || 'Failed to send email',
@@ -1074,10 +1072,7 @@ router.post('/messages/compose', async (req, res) => {
             });
         }
 
-        console.log('✅ [COMPOSE EMAIL] Email sent successfully:', {
-            messageId: emailResult.messageId,
-            recipients: recipients.length
-        });
+        devLog('support_compose_email_sent', { messageId: emailResult.messageId });
 
         res.json({
             success: true,
@@ -1085,7 +1080,7 @@ router.post('/messages/compose', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [COMPOSE EMAIL] Error:', error);
+        logger.error('support_compose_email_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error',
@@ -1112,7 +1107,7 @@ router.options('/messages/:id', (req, res) => {
     res.status(200).end();
 });
 router.patch('/messages/:id', async (req, res) => {
-    console.log(`🔄 PATCH /messages/:id hit - ID: ${req.params.id}, Updates:`, Object.keys(req.body || {}));
+    devLog('support_message_patch', { id: req.params.id, keys: Object.keys(req.body || {}) });
     try {
         const { id } = req.params;
         const updates = req.body || {};
@@ -1153,7 +1148,7 @@ router.patch('/messages/:id', async (req, res) => {
             data: stripInternalFields(result.conversation, { includeThread: true })
         });
     } catch (error) {
-        console.error('Update support message error:', error);
+        logger.error('support_message_patch_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1182,7 +1177,7 @@ router.get('/messages/:id', async (req, res) => {
             data: stripInternalFields(recordInfo.conversation, { includeThread: true })
         });
     } catch (error) {
-        console.error('Get support message error:', error);
+        logger.error('support_message_get_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1195,7 +1190,7 @@ router.get('/messages/:id', async (req, res) => {
  * Permanently delete a support message
  */
 router.delete('/messages/:id', async (req, res) => {
-    console.log(`🗑️ DELETE /messages/:id hit - ID: ${req.params.id}`);
+    devLog('support_message_delete', { id: req.params.id });
     try {
         const { id } = req.params;
         const recordInfo = await findConversationRecordById(id);
@@ -1207,7 +1202,7 @@ router.delete('/messages/:id', async (req, res) => {
             });
         }
 
-        console.log(`   Deleting message from collection: ${recordInfo.collection}`);
+        devLog('support_message_delete_collection', { collection: recordInfo.collection });
 
         // Delete the message from the database
         const deleteResult = await db.executeOperation({
@@ -1218,7 +1213,7 @@ router.delete('/messages/:id', async (req, res) => {
         });
 
         if (!deleteResult.success) {
-            console.error('   ❌ Failed to delete message:', deleteResult.error);
+            logger.error('support_message_delete_failed', { error: deleteResult.error });
             return res.status(500).json({
                 success: false,
                 error: 'Failed to delete support message',
@@ -1229,7 +1224,7 @@ router.delete('/messages/:id', async (req, res) => {
         const deletedCount = deleteResult.data?.deletedCount || 
                            (deleteResult.data?.acknowledged ? 1 : 0);
 
-        console.log(`   ✅ Message deleted successfully (count: ${deletedCount})`);
+        devLog('support_message_deleted', { deletedCount });
 
         res.json({
             success: true,
@@ -1240,7 +1235,7 @@ router.delete('/messages/:id', async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('Delete support message error:', error);
+        logger.error('support_message_delete_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1269,7 +1264,7 @@ router.post('/messages/:id/archive', async (req, res) => {
             data: stripInternalFields(result.conversation, { includeThread: true })
         });
     } catch (error) {
-        console.error('Archive support message error:', error);
+        logger.error('support_message_archive_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1298,7 +1293,7 @@ router.post('/messages/:id/resolve', async (req, res) => {
             data: stripInternalFields(result.conversation, { includeThread: true })
         });
     } catch (error) {
-        console.error('Resolve support message error:', error);
+        logger.error('support_message_resolve_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1334,7 +1329,7 @@ router.post('/messages/:id/assign', async (req, res) => {
             data: stripInternalFields(result.conversation, { includeThread: true })
         });
     } catch (error) {
-        console.error('Assign support message error:', error);
+        logger.error('support_message_assign_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error'
@@ -1349,7 +1344,7 @@ router.get('/test', (req, res) => {
 
 // Debug: Catch-all to see what routes are being hit
 router.use('/messages*', (req, res, next) => {
-    console.log(`🔍 [DEBUG] Unmatched /messages route: ${req.method} ${req.path} - Original: ${req.originalUrl}`);
+    devLog('support_messages_unmatched', { method: req.method, path: req.path, originalUrl: req.originalUrl });
     next();
 });
 
@@ -1369,8 +1364,9 @@ const registeredRoutes = [
     'GET /api/support/test'
 ];
 
-console.log('✅ Support routes module loaded. Registered routes:');
-registeredRoutes.forEach(route => console.log(`   ${route}`));
+if (process.env.NODE_ENV === 'development') {
+    devLog('Support routes loaded:', registeredRoutes);
+}
 
 module.exports = router;
 

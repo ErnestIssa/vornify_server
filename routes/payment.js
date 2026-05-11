@@ -10,23 +10,33 @@ const {
     classifyPaymentFailure
 } = storefrontCheckoutUrls;
 
-// Validate Stripe configuration at startup
+// /core reliability primitives (gradual adoption)
+const { AppError } = require('../core/errors/AppError');
+const { ErrorCodes } = require('../core/errors/codes');
+const { requireFields } = require('../core/validators/requireFields');
+const { withRetry } = require('../core/retry/retry');
+const { ensureIdempotencyKey } = require('../core/guards/idempotency');
+const { buildCartVersionSource, computeCartVersion } = require('../core/guards/cartVersion');
+const { logger } = require('../core/logging/logger');
+const { devLog, devWarn } = require('../core/logging/devConsole');
+
+// Validate Stripe configuration at startup (no secret material in logs)
 if (!process.env.STRIPE_SECRET_KEY) {
-    console.error('❌ STRIPE_SECRET_KEY is missing from environment variables');
+    console.error('STRIPE_SECRET_KEY is missing from environment variables');
 } else {
-    console.log('✅ STRIPE_SECRET_KEY loaded (length: ' + process.env.STRIPE_SECRET_KEY.length + ')');
+    devLog('STRIPE_SECRET_KEY loaded');
 }
 
 if (!process.env.STRIPE_PUBLIC_KEY) {
-    console.warn('⚠️ STRIPE_PUBLIC_KEY is missing from environment variables');
+    console.warn('STRIPE_PUBLIC_KEY is missing from environment variables');
 } else {
-    console.log('✅ STRIPE_PUBLIC_KEY loaded (prefix: ' + process.env.STRIPE_PUBLIC_KEY.substring(0, 7) + '...)');
+    devLog('STRIPE_PUBLIC_KEY loaded');
 }
 
 if (!process.env.STRIPE_WEBHOOK_SECRET) {
-    console.warn('⚠️ STRIPE_WEBHOOK_SECRET is missing - webhook signature verification will be disabled');
+    console.warn('STRIPE_WEBHOOK_SECRET is missing — webhook signature verification disabled');
 } else {
-    console.log('✅ STRIPE_WEBHOOK_SECRET loaded');
+    devLog('STRIPE_WEBHOOK_SECRET loaded');
 }
 
 // Initialize Stripe
@@ -38,9 +48,9 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 let paymentService;
 try {
     paymentService = new VornifyPay();
-    console.log('✅ VornifyPay service initialized');
+    devLog('VornifyPay service initialized');
 } catch (error) {
-    console.error('❌ Failed to initialize VornifyPay:', error.message);
+    console.error('Failed to initialize VornifyPay:', error.message);
 }
 
 const db = getDBInstance();
@@ -141,6 +151,172 @@ function computeCanonicalOrderTotals(order, overrides = {}) {
     return checkoutTotalsService.calculateTotals(items, shippingGross, discountAmount, 'SEK', vatRate, { country });
 }
 
+function groupOrderItemsForDeduction(items) {
+    const out = new Map();
+    const arr = Array.isArray(items) ? items : [];
+    for (const it of arr) {
+        const productId = String(it.id || it.productId || '').trim();
+        if (!productId) continue;
+        const qty = typeof it.quantity === 'number' && !isNaN(it.quantity) ? it.quantity : Number(it.quantity);
+        const q = Number.isFinite(qty) ? Math.max(0, Math.floor(qty)) : 0;
+        if (q <= 0) continue;
+        const variantId = it.variantId != null ? String(it.variantId) : null;
+        const colorId = it.colorId != null ? String(it.colorId) : null;
+        const sizeId = it.sizeId != null ? String(it.sizeId) : null;
+        const key = `${productId}::${variantId || ''}::${colorId || ''}::${sizeId || ''}`;
+        const prev = out.get(key) || { productId, variantId, colorId, sizeId, quantity: 0 };
+        prev.quantity += q;
+        out.set(key, prev);
+    }
+    return Array.from(out.values());
+}
+
+async function deductInventoryForOrder(order) {
+    const items = groupOrderItemsForDeduction(order?.items || []);
+    if (items.length === 0) return { success: true, skipped: true };
+
+    for (const it of items) {
+        const productId = it.productId;
+        const qty = it.quantity;
+        const hasVariantId = !!it.variantId;
+        const filter = { id: String(productId) };
+        const arrayFilters = [];
+
+        if (hasVariantId) {
+            filter['inventory.variants'] = { $elemMatch: { id: it.variantId, quantity: { $gte: qty }, available: { $ne: false } } };
+            arrayFilters.push({ 'v.id': it.variantId });
+        } else if (it.colorId && it.sizeId) {
+            filter['inventory.variants'] = { $elemMatch: { colorId: it.colorId, sizeId: it.sizeId, quantity: { $gte: qty }, available: { $ne: false } } };
+            arrayFilters.push({ 'v.colorId': it.colorId, 'v.sizeId': it.sizeId });
+        } else {
+            return { success: false, error: 'missing_variant_identity', item: it };
+        }
+
+        const update = {
+            $inc: {
+                'inventory.variants.$[v].quantity': -qty,
+                'inventory.totalQuantity': -qty
+            },
+            $set: {
+                'inventory.lastUpdated': new Date().toISOString()
+            }
+        };
+
+        const op = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--update-operator',
+            data: {
+                filter,
+                update,
+                options: { arrayFilters }
+            }
+        });
+
+        if (!op.success) {
+            return { success: false, error: op.error || op.message || 'inventory_update_failed', item: it };
+        }
+    }
+    return { success: true };
+}
+
+function sumCartProductGross(cartItems) {
+    return (cartItems || []).reduce((sum, item) => {
+        const p = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+        const q = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+        return sum + p * q;
+    }, 0);
+}
+
+/**
+ * Compute canonical checkout totals for a userId from the current cart + selected shipping/discount.
+ * This is used for create-intent, update-intent, and the new prepare-confirmation endpoint.
+ */
+async function computeCheckoutTotalsForUser({ req, userId, shippingAddress, shippingMethod, discountCode }) {
+    const checkoutTotalsService = require('../services/checkoutTotalsService');
+    const discountService = require('../services/discountService');
+    const vatService = require('../services/vatService');
+    const shippingConfigService = require('../services/shippingConfigService');
+
+    // Load current cart from database (single source of truth)
+    const cartResult = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'carts',
+        command: '--read',
+        data: { userId }
+    });
+
+    const cart = (cartResult.success && cartResult.data)
+        ? (Array.isArray(cartResult.data) ? cartResult.data[0] : cartResult.data)
+        : null;
+
+    if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
+        throw new AppError({
+            code: ErrorCodes.CHECKOUT_EMPTY,
+            httpStatus: 400,
+            severity: 'warn',
+            message: 'Cart not found or empty',
+            userMessage: 'Your cart is empty. Please add items before completing your order.'
+        });
+    }
+
+    const countryForZone = normalizeCountryCode(
+        (shippingAddress && (shippingAddress.country || shippingAddress.countryCode))
+            ? String(shippingAddress.country || shippingAddress.countryCode)
+            : ''
+    );
+
+    const countryForVat = countryForZone || vatService.getCountryFromRequest(req);
+    const vatRate = vatService.getVatRate(countryForVat);
+
+    // Shipping validation + versioned quote from DB (do not silently treat invalid as 0)
+    const methodId = shippingMethod?.id || shippingMethod?.shippingMethodId || (shippingMethod?._id && shippingMethod._id.toString()) || null;
+    const municipality = (shippingAddress && (shippingAddress.municipality || shippingAddress.city) ? String(shippingAddress.municipality || shippingAddress.city) : '').trim();
+    const quoteResult = await shippingConfigService.validateAndQuoteShipping(countryForZone, methodId, municipality, 'SEK');
+    if (!quoteResult.ok) {
+        throw new AppError({
+            code: quoteResult.errorCode === 'SHIPPING_UNAVAILABLE' ? ErrorCodes.SHIPPING_UNAVAILABLE : ErrorCodes.SHIPPING_METHOD_INVALID,
+            httpStatus: 400,
+            severity: 'warn',
+            message: 'Shipping method invalid for address',
+            userMessage: quoteResult.userMessage || 'Selected shipping method is not available. Please choose another.',
+            details: { countryForZone, methodId, municipality }
+        });
+    }
+    const shippingCost = quoteResult.quote.cost;
+    const shippingVersion = quoteResult.quote.shippingVersion;
+
+    const effectiveDiscountCode = discountService.pickEffectiveDiscountCode(discountCode, cart);
+    const productGrossForDiscount = sumCartProductGross(cart.items);
+    const discountResolution = await discountService.validateAndComputeDiscountAmount(
+        productGrossForDiscount,
+        shippingCost,
+        effectiveDiscountCode
+    );
+    if (!discountResolution.ok) {
+        throw new AppError({
+            code: discountResolution.errorCode,
+            httpStatus: 400,
+            severity: 'warn',
+            message: discountResolution.error,
+            userMessage: discountResolution.userMessage,
+            details: { discountCode: effectiveDiscountCode }
+        });
+    }
+    const discountAmount = discountResolution.discountAmount;
+
+    const totals = checkoutTotalsService.calculateTotals(
+        cart.items,
+        shippingCost,
+        discountAmount,
+        'SEK',
+        vatRate,
+        { country: countryForVat }
+    );
+
+    return { cart, totals, countryForVat, shippingQuote: quoteResult.quote, shippingVersion };
+}
+
 /**
  * GET /api/payments/check-payment-methods
  * Check if Apple Pay and Google Pay are available for the user's device/browser
@@ -201,7 +377,7 @@ router.get('/check-payment-methods', async (req, res) => {
             message: 'Payment methods are enabled. Frontend should check device/browser compatibility using Stripe.js'
         });
     } catch (error) {
-        console.error('Check payment methods error:', error);
+        logger.error('check_payment_methods_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to check payment methods',
@@ -248,7 +424,7 @@ router.get('/config', async (req, res) => {
                 }))
             };
         } catch (applePayError) {
-            console.warn('Could not retrieve Apple Pay domains:', applePayError.message);
+            logger.warn('apple_pay_domains_list_failed', { message: applePayError.message });
             config.applePay = {
                 enabled: true,
                 note: 'Apple Pay is enabled. Domain verification status should be checked in Stripe Dashboard.'
@@ -257,7 +433,7 @@ router.get('/config', async (req, res) => {
 
         res.json(config);
     } catch (error) {
-        console.error('Config endpoint error:', error);
+        logger.error('payments_config_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Failed to retrieve configuration'
@@ -271,7 +447,7 @@ const verifyWebhookSignature = (req, res, next) => {
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
     if (!webhookSecret) {
-        console.warn('⚠️ STRIPE_WEBHOOK_SECRET not configured. Webhook verification disabled.');
+        console.warn('STRIPE_WEBHOOK_SECRET not configured — webhook verification disabled');
         return next();
     }
 
@@ -292,7 +468,7 @@ const verifyWebhookSignature = (req, res, next) => {
         req.stripeEvent = event;
         next();
     } catch (err) {
-        console.error('Webhook signature verification failed:', err.message);
+        console.error('Stripe webhook signature verification failed:', err.message);
         return res.status(400).json({
             success: false,
             error: `Webhook signature verification failed: ${err.message}`
@@ -305,7 +481,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), verifyWebhook
     try {
         const event = req.stripeEvent;
 
-        console.log(`Received Stripe webhook: ${event.type} (ID: ${event.id})`);
+        devLog('Stripe webhook received', { type: event.type, id: event.id });
 
         // Handle different event types
         switch (event.type) {
@@ -326,13 +502,13 @@ router.post('/webhook', express.raw({ type: 'application/json' }), verifyWebhook
                 break;
 
             default:
-                console.log(`Unhandled event type: ${event.type}`);
+                devLog('Stripe webhook unhandled event type', { type: event.type });
         }
 
         // Always return 200 to acknowledge receipt
         res.json({ received: true });
     } catch (error) {
-        console.error('Webhook handler error:', error);
+        logger.error('stripe_webhook_handler_failed', { message: error.message });
         // Still return 200 to prevent Stripe from retrying
         res.status(200).json({ received: true, error: error.message });
     }
@@ -362,8 +538,13 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             const pending = await findPendingCheckoutForPaymentIntent(paymentIntent, hintOrderId);
 
             if (!pending || !pending.orderDraft) {
-                console.error(`⚠️ [PAYMENT WEBHOOK] Payment intent ${paymentIntent.id} succeeded but no order or pending checkout found (metadata orderId=${resolvedOrderId || 'none'}, hint=${hintOrderId || 'none'})`);
-                console.error(`⚠️ [PAYMENT WEBHOOK] Amount: ${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}`);
+                logger.error('payment_webhook_succeeded_without_order', {
+                    paymentIntentId: paymentIntent.id,
+                    metadataOrderId: resolvedOrderId || null,
+                    hintOrderId: hintOrderId || null,
+                    amountCents: paymentIntent.amount,
+                    currency: paymentIntent.currency
+                });
                 return;
             }
 
@@ -397,7 +578,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             });
 
             if (!createOrderResult.success) {
-                console.error(`❌ [PAYMENT WEBHOOK] Failed to promote pending checkout to order for ${resolvedOrderId}:`, createOrderResult.error || createOrderResult);
+                logger.error('payment_webhook_promote_order_failed', {
+                    orderId: resolvedOrderId,
+                    error: createOrderResult.error || String(createOrderResult)
+                });
                 return;
             }
 
@@ -418,7 +602,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                     }
                 });
             } catch (e) {
-                console.warn('⚠️ [PAYMENT WEBHOOK] Could not mark pending checkout completed:', e.message);
+                logger.warn('payment_webhook_pending_checkout_close_failed', { message: e.message, orderId: resolvedOrderId });
             }
 
             order = promotedOrder;
@@ -438,13 +622,66 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                     }
                 });
             } catch (metaErr) {
-                console.warn('⚠️ [PAYMENT WEBHOOK] Could not sync PaymentIntent metadata orderId:', metaErr.message);
+                logger.warn('payment_webhook_metadata_sync_failed', { message: metaErr.message });
             }
         }
 
         const orderId = resolvedOrderId;
 
         const normalizedEmail = (order.customer?.email || order.customerEmail || '').toLowerCase().trim();
+
+        // Inventory deduction (best-effort but atomic per variant). Prevent oversells by deducting stock now.
+        // If deduction fails (insufficient stock), issue an immediate refund and mark the order for review.
+        const alreadyDeducted = order.inventoryDeductedAt || order.stockDeductedAt || order.inventoryDeducted === true;
+        if (!alreadyDeducted) {
+            try {
+                const deductionResult = await deductInventoryForOrder(order);
+                if (!deductionResult.success) {
+                    logger.error('inventory_deduct_failed', { orderId: resolvedOrderId, result: deductionResult });
+                    // Refund payment (payment already succeeded)
+                    try {
+                        await stripe.refunds.create({
+                            payment_intent: paymentIntent.id
+                        });
+                        logger.warn('inventory_deduct_refund_issued', { paymentIntentId: paymentIntent.id, orderId: resolvedOrderId });
+                    } catch (refundErr) {
+                        logger.error('inventory_deduct_refund_failed', { message: refundErr.message, paymentIntentId: paymentIntent.id });
+                    }
+                    // Mark order as refunded/failed_stock
+                    await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--update',
+                        data: {
+                            filter: { orderId: resolvedOrderId },
+                            update: {
+                                paymentStatus: 'refunded',
+                                status: 'canceled',
+                                inventoryDeductedAt: new Date().toISOString(),
+                                inventoryDeductionStatus: 'failed',
+                                inventoryDeductionError: deductionResult.error || 'insufficient_stock',
+                                updatedAt: new Date().toISOString(),
+                                timeline: [
+                                    ...(order.timeline || []),
+                                    {
+                                        status: 'Stock Deduction Failed',
+                                        date: new Date().toISOString(),
+                                        description: 'Payment was refunded because stock was unavailable at fulfillment time.',
+                                        timestamp: new Date().toISOString()
+                                    }
+                                ]
+                            }
+                        }
+                    });
+                    return;
+                }
+                // Record deduction success on order (idempotency for duplicate webhooks)
+                order.inventoryDeductedAt = new Date().toISOString();
+                order.inventoryDeductionStatus = 'succeeded';
+            } catch (dedErr) {
+                logger.error('inventory_deduct_exception', { message: dedErr.message, orderId: resolvedOrderId });
+            }
+        }
 
         // Update order with payment status
         const updateData = {
@@ -461,6 +698,11 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                 }
             ]
         };
+
+        if (order.inventoryDeductedAt) {
+            updateData.inventoryDeductedAt = order.inventoryDeductedAt;
+            updateData.inventoryDeductionStatus = order.inventoryDeductionStatus || 'succeeded';
+        }
 
         // Canonical totals (backend source of truth). Prefer the exact snapshot stored in PaymentIntent metadata
         // to avoid using stale draft values for shipping/discount that can differ from what the customer paid.
@@ -485,7 +727,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             if (!isNaN(parsedShipping)) updateData.shippingCost = parsedShipping;
             if (!isNaN(parsedDiscount)) updateData.discountAmount = parsedDiscount;
         } catch (totErr) {
-            console.warn(`⚠️ [PAYMENT WEBHOOK] Failed to compute canonical totals for ${orderId}:`, totErr.message);
+            logger.warn('payment_webhook_canonical_totals_failed', { orderId, message: totErr.message });
         }
 
         // Add Stripe customer ID if available
@@ -504,7 +746,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                 const last4 = charge?.payment_method_details?.card?.last4;
                 if (last4) updateData.paymentCardLast4 = last4;
             } catch (chargeErr) {
-                console.warn(`⚠️ [PAYMENT WEBHOOK] Could not load card last4 for receipt: ${chargeErr.message}`);
+                logger.warn('payment_webhook_card_last4_failed', { orderId, message: chargeErr.message });
             }
         }
 
@@ -536,11 +778,11 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             const paidNow = order.paymentStatus === 'succeeded' || updateData.paymentStatus === 'succeeded';
 
             if (!custEmail) {
-                console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} has no customer email, cannot send emails`);
+                logger.warn('payment_webhook_no_customer_email', { orderId });
                 return;
             }
             if (!paidNow) {
-                console.warn(`⚠️ [PAYMENT WEBHOOK] Order ${orderId} payment status is not 'succeeded' (${order.paymentStatus}). Skipping emails.`);
+                logger.warn('payment_webhook_skip_email_wrong_status', { orderId, paymentStatus: order.paymentStatus });
                 return;
             }
 
@@ -553,7 +795,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
             let confirmationJustSent = false;
             if (!order.emailSent) {
                 try {
-                    console.log(`📧 [PAYMENT WEBHOOK] Payment confirmed for order ${orderId}. Sending confirmation email to ${custEmail}`);
+                    devLog('payment_webhook_send_confirmation', { orderId });
                     const emailResult = await emailService.sendOrderConfirmationEmail(
                         custEmail,
                         customerName,
@@ -571,27 +813,23 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                             }
                         });
                         confirmationJustSent = true;
-                        console.log(`✅ [PAYMENT WEBHOOK] Order confirmation email sent to ${custEmail}`, {
-                            messageId: emailResult.messageId,
-                            timestamp: emailResult.timestamp,
-                            currency: order.currency || 'SEK'
-                        });
+                        devLog('payment_webhook_confirmation_sent', { orderId });
                     } else {
-                        console.error('❌ [PAYMENT WEBHOOK] Failed to send order confirmation email:', {
-                            email: custEmail,
+                        logger.error('order_confirmation_email_failed', {
+                            orderId,
                             error: emailResult?.error,
                             details: emailResult?.details
                         });
                     }
                 } catch (emailError) {
-                    console.error('❌ [PAYMENT WEBHOOK] Exception sending order confirmation email:', {
-                        email: custEmail,
-                        error: emailError.message,
-                        stack: emailError.stack
+                    logger.error('order_confirmation_email_exception', {
+                        orderId,
+                        message: emailError.message
                     });
+                    devWarn(emailError.stack);
                 }
             } else {
-                console.log(`📧 [PAYMENT WEBHOOK] Order ${orderId} confirmation email already sent`);
+                devLog('payment_webhook_confirmation_already_sent', { orderId });
             }
 
             const confirmationOk = !!order.emailSent || confirmationJustSent;
@@ -611,7 +849,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                         }
                     });
                 } catch (e) {
-                    console.warn(`⚠️ [PAYMENT WEBHOOK] Could not record receipt attempt metadata for ${orderId}:`, e.message);
+                    logger.warn('payment_webhook_receipt_metadata_failed', { orderId, message: e.message });
                 }
 
                 try {
@@ -649,9 +887,9 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                                 }
                             }
                         });
-                        console.log(`✅ [PAYMENT WEBHOOK] Receipt PDF emailed to ${custEmail}`);
+                        devLog('payment_webhook_receipt_pdf_sent', { orderId });
                     } else {
-                        console.error('❌ [PAYMENT WEBHOOK] Receipt email failed:', receiptResult.error);
+                        logger.error('receipt_email_failed', { orderId, error: receiptResult.error });
                         try {
                             await db.executeOperation({
                                 database_name: 'peakmode',
@@ -670,7 +908,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                         }
                     }
                 } catch (receiptErr) {
-                    console.error('❌ [PAYMENT WEBHOOK] Receipt PDF generation or email failed:', receiptErr.message, receiptErr.stack);
+                    logger.error('receipt_pdf_failed', { orderId, message: receiptErr.message });
+                    devWarn(receiptErr.stack);
                     try {
                         await db.executeOperation({
                             database_name: 'peakmode',
@@ -712,16 +951,20 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                                     }
                                 }
                             });
-                            console.log(`✅ [PAYMENT WEBHOOK] Receipt fallback email (no PDF) sent to ${custEmail}`);
+                            devLog('payment_webhook_receipt_fallback_sent', { orderId });
                         } else {
-                            console.error('❌ [PAYMENT WEBHOOK] Receipt fallback email failed:', fallbackResult.error, fallbackResult.details);
+                            logger.error('receipt_fallback_failed', {
+                                orderId,
+                                error: fallbackResult.error,
+                                details: fallbackResult.details
+                            });
                         }
                     } catch (fallbackErr) {
-                        console.error('❌ [PAYMENT WEBHOOK] Receipt fallback exception:', fallbackErr.message);
+                        logger.error('receipt_fallback_exception', { orderId, message: fallbackErr.message });
                     }
                 }
             } else if (order.receiptEmailSent) {
-                console.log(`📧 [PAYMENT WEBHOOK] Order ${orderId} receipt email already sent`);
+                devLog('payment_webhook_receipt_already_sent', { orderId });
             }
         });
 
@@ -758,12 +1001,12 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                             }
                         });
                         
-                        console.log(`✅ [PAYMENT WEBHOOK] Marked abandoned checkout ${checkout.id} as completed for order ${orderId}`);
+                        devLog('payment_webhook_abandoned_checkout_completed', { checkoutId: checkout.id, orderId });
                     }
                 }
             } catch (checkoutError) {
                 // Don't fail if checkout update fails - this is not critical
-                console.warn('⚠️ [PAYMENT WEBHOOK] Failed to mark checkout as completed:', checkoutError.message);
+                logger.warn('payment_webhook_abandoned_checkout_update_failed', { message: checkoutError.message, orderId });
             }
         }
 
@@ -774,11 +1017,11 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                 const paymentFailureService = require('../services/paymentFailureService');
                 const marked = await paymentFailureService.markFailedCheckoutCompleted(order.retryToken);
                 if (marked) {
-                    console.log(`✅ [PAYMENT WEBHOOK] Marked failed checkout as completed for retry token ${order.retryToken}`);
+                    devLog('payment_webhook_failed_checkout_cleared', { orderId, retryToken: order.retryToken });
                 }
             } catch (error) {
                 // Don't fail if failed checkout update fails - this is not critical
-                console.warn('⚠️ [PAYMENT WEBHOOK] Failed to mark failed checkout as completed:', error.message);
+                logger.warn('payment_webhook_failed_checkout_clear_failed', { message: error.message, orderId });
             }
         }
 
@@ -793,19 +1036,26 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                 );
                 
                 if (markResult.success) {
-                    console.log(`✅ [PAYMENT WEBHOOK] Discount code ${order.appliedDiscount.code} marked as used for order ${orderId}`);
+                    devLog('payment_webhook_discount_marked_used', { orderId, code: order.appliedDiscount.code });
                 } else {
-                    console.error(`⚠️ [PAYMENT WEBHOOK] Failed to mark discount code ${order.appliedDiscount.code} as used:`, markResult.error);
+                    logger.warn('discount_mark_used_failed', {
+                        orderId,
+                        code: order.appliedDiscount.code,
+                        error: markResult.error,
+                        errorCode: markResult.errorCode,
+                        conflict: markResult.conflict === true
+                    });
                 }
             } catch (error) {
                 // Don't fail payment processing if discount marking fails - log error but continue
-                console.error(`⚠️ [PAYMENT WEBHOOK] Exception marking discount code as used:`, error.message);
+                logger.warn('discount_mark_used_exception', { orderId, message: error.message });
             }
         }
 
-        console.log(`✅ [PAYMENT WEBHOOK] Order ${orderId} payment confirmed via webhook`);
+        devLog('payment_webhook_order_confirmed', { orderId });
     } catch (error) {
-        console.error('Error handling payment_intent.succeeded:', error);
+        logger.error('payment_intent_succeeded_handler_failed', { message: error.message });
+        devWarn(error.stack);
         throw error;
     }
 }
@@ -815,7 +1065,7 @@ async function handlePaymentIntentFailed(paymentIntent) {
     try {
         const orderId = paymentIntent.metadata.orderId;
         if (!orderId) {
-            console.warn('Payment intent failed but no orderId in metadata');
+            logger.warn('payment_intent_failed_no_order_id_metadata', { paymentIntentId: paymentIntent.id });
             return;
         }
 
@@ -828,7 +1078,7 @@ async function handlePaymentIntentFailed(paymentIntent) {
         });
 
         if (!findResult.success || !findResult.data) {
-            console.warn(`⚠️ [PAYMENT FAILURE] Order ${orderId} not found when handling payment failure`);
+            logger.warn('payment_failure_webhook_order_missing', { orderId });
             return;
         }
 
@@ -859,7 +1109,7 @@ async function handlePaymentIntentFailed(paymentIntent) {
             }
         });
 
-        console.log(`❌ [PAYMENT FAILURE] Order ${orderId} payment failed via webhook`);
+        devLog('payment_failure_webhook', { orderId });
 
         // Save failed checkout to failed_checkouts collection
         // Background job will send email after 3 minutes
@@ -867,15 +1117,13 @@ async function handlePaymentIntentFailed(paymentIntent) {
         const saveResult = await paymentFailureService.saveFailedCheckout(paymentIntent, order);
 
         if (saveResult?.success) {
-            console.log(`✅ [PAYMENT FAILURE] Failed checkout saved, email will be sent in 3 minutes`, {
-                retryToken: saveResult.retryToken,
-                failedCheckoutId: saveResult.failedCheckoutId
-            });
+            devLog('failed_checkout_saved', { orderId, failedCheckoutId: saveResult.failedCheckoutId });
         } else {
-            console.error(`❌ [PAYMENT FAILURE] Failed to save failed checkout:`, saveResult?.error);
+            logger.error('failed_checkout_save_error', { orderId, error: saveResult?.error });
         }
     } catch (error) {
-        console.error('Error handling payment_intent.payment_failed:', error);
+        logger.error('payment_intent_payment_failed_handler_error', { message: error.message });
+        devWarn(error.stack);
         throw error;
     }
 }
@@ -899,9 +1147,10 @@ async function handlePaymentIntentCanceled(paymentIntent) {
             }
         });
 
-        console.log(`⚠️ Order ${orderId} payment canceled via webhook`);
+        devLog('payment_intent_canceled_webhook', { orderId });
     } catch (error) {
-        console.error('Error handling payment_intent.canceled:', error);
+        logger.error('payment_intent_canceled_handler_error', { message: error.message });
+        devWarn(error.stack);
         throw error;
     }
 }
@@ -921,7 +1170,7 @@ async function handleChargeRefunded(charge) {
         });
 
         if (!findResult.success || !findResult.data) {
-            console.warn(`Order not found for refunded payment intent ${paymentIntentId}`);
+            logger.warn('refund_webhook_order_not_found', { paymentIntentId });
             return;
         }
 
@@ -949,9 +1198,10 @@ async function handleChargeRefunded(charge) {
             }
         });
 
-        console.log(`💰 Order ${order.orderId} refunded via webhook`);
+        devLog('charge_refunded_webhook', { orderId: order.orderId });
     } catch (error) {
-        console.error('Error handling charge.refunded:', error);
+        logger.error('charge_refunded_handler_error', { message: error.message });
+        devWarn(error.stack);
         throw error;
     }
 }
@@ -993,10 +1243,174 @@ router.get('/checkout-navigation', (req, res) => {
             ...checkoutNavigationExtras({ shouldRedirectToFailurePage: Boolean(failureHint), failureHint })
         });
     } catch (error) {
-        console.error('[PAYMENTS] checkout-navigation error:', error);
+        logger.error('checkout_navigation_error', { message: error.message });
         return res.status(500).json({
             success: false,
             error: error.message || 'Failed to build checkout navigation'
+        });
+    }
+});
+
+/**
+ * POST /api/payments/prepare-confirmation
+ * Last-gate endpoint right before redirecting to Klarna / confirming PaymentElement.
+ *
+ * Ensures the PaymentIntent amount/metadata matches the latest backend cart totals.
+ * If the provided intent cannot be updated, creates a new one.
+ *
+ * Body:
+ * - userId (required)
+ * - paymentIntentId (optional; when present we try to update)
+ * - shippingAddress, shippingMethod/shippingMethodId (required to compute totals)
+ * - discountCode (optional)
+ * - orderId (optional; may be TEMP)
+ */
+router.post('/prepare-confirmation', async (req, res) => {
+    const idempotencyKey = ensureIdempotencyKey(req);
+    try {
+        const body = req.body || {};
+        requireFields(body, ['userId'], { userMessage: 'Something went wrong. Please refresh and try again.' });
+
+        const userId = body.userId;
+        const paymentIntentId = body.paymentIntentId || null;
+        const orderIdIncoming = body.orderId || null;
+        const shippingAddress = body.shippingAddress || body.customer;
+        const shippingMethod = body.shippingMethod || (body.shippingMethodId ? { id: body.shippingMethodId, type: body.shippingMethodType } : null);
+        const discountCode = body.discountCode || null;
+
+        const hasShippingAddress = shippingAddress && (shippingAddress.country || shippingAddress.countryCode);
+        const hasShippingMethod = shippingMethod && (shippingMethod.id || body.shippingMethodId);
+        if (!hasShippingAddress || !hasShippingMethod) {
+            throw new AppError({
+                code: ErrorCodes.VALIDATION_FAILED,
+                httpStatus: 400,
+                severity: 'warn',
+                message: 'Shipping address and method required before confirmation',
+                userMessage: 'Please enter your delivery address and select a shipping method before paying.',
+                details: { hasShippingAddress: !!hasShippingAddress, hasShippingMethod: !!hasShippingMethod }
+            });
+        }
+
+        const { totals, shippingQuote, shippingVersion } = await withRetry(
+            () => computeCheckoutTotalsForUser({ req, userId, shippingAddress, shippingMethod, discountCode }),
+            { retries: 2 }
+        );
+        const { cart } = await computeCheckoutTotalsForUser({ req, userId, shippingAddress, shippingMethod, discountCode });
+        const cartVersion = computeCartVersion(
+            buildCartVersionSource({ cart, shippingAddress, shippingMethod, discountCode })
+        );
+
+        const validatedAmount = totals.total;
+        if (validatedAmount <= 0) {
+            throw new AppError({
+                code: ErrorCodes.VALIDATION_FAILED,
+                httpStatus: 400,
+                severity: 'warn',
+                message: 'Invalid amount calculated from cart',
+                userMessage: 'We could not calculate the order total. Please review your cart and try again.',
+                details: { validatedAmount }
+            });
+        }
+
+        const currencyLower = 'sek';
+        const amountInCents = Math.round(validatedAmount * 100);
+
+        const baseMetadata = {
+            // keep an order identifier for thank-you canonical totals (TEMP ok)
+            orderId: orderIdIncoming || `TEMP-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            isTemporary: (!orderIdIncoming || String(orderIdIncoming).startsWith('TEMP-')).toString(),
+            shippingGross: String(totals.shippingGross || 0),
+            discountAmount: String(totals.discountAmount || 0),
+            vatRate: String(totals.vatRate || 0.25),
+            country: String(totals.country || ''),
+            total: String(totals.total || validatedAmount || 0),
+            preparedAt: new Date().toISOString()
+        };
+
+        let intent = null;
+        let action = 'created';
+
+        if (paymentIntentId) {
+            intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+            const updateable = intent.status === 'requires_payment_method' || intent.status === 'requires_confirmation';
+            if (updateable) {
+                action = 'updated';
+                intent = await stripe.paymentIntents.update(
+                    paymentIntentId,
+                    {
+                        amount: amountInCents,
+                        currency: currencyLower,
+                        metadata: { ...intent.metadata, ...baseMetadata },
+                        ...getPaymentIntentSecurityOptions()
+                    },
+                    { idempotencyKey }
+                );
+            } else {
+                logger.warn('prepare_confirmation_intent_not_updateable', {
+                    requestId: req.requestId,
+                    paymentIntentId,
+                    status: intent.status
+                });
+                intent = null;
+            }
+        }
+
+        if (!intent) {
+            // Create a fresh intent (client must use returned clientSecret)
+            intent = await stripe.paymentIntents.create(
+                {
+                    amount: amountInCents,
+                    currency: currencyLower,
+                    metadata: baseMetadata,
+                    ...getPaymentIntentSecurityOptions()
+                },
+                { idempotencyKey }
+            );
+            action = 'created';
+        }
+
+        if (!intent.client_secret) {
+            throw new AppError({
+                code: ErrorCodes.STRIPE_ERROR,
+                httpStatus: 500,
+                severity: 'error',
+                message: 'Stripe PaymentIntent missing client_secret',
+                userMessage: 'We could not prepare the payment. Please try again.',
+                details: { paymentIntentId: intent.id, status: intent.status }
+            });
+        }
+
+        return res.json({
+            success: true,
+            action,
+            userId,
+            paymentIntentId: intent.id,
+            clientSecret: intent.client_secret,
+            amount: validatedAmount,
+            currency: currencyLower,
+            totals,
+            cartVersion,
+            shippingVersion,
+            shippingQuote,
+            // Frontend should always use this before confirmPayment/redirect for provider parity
+            mustUseBeforeConfirm: true,
+            ...checkoutNavigationExtras({ paymentIntent: intent })
+        });
+    } catch (err) {
+        // Keep response shape compatible with existing clients but provide /core-like details
+        const msg = err?.message || 'prepare-confirmation failed';
+        logger.error('prepare_confirmation_failed', {
+            requestId: req.requestId,
+            idempotencyKey,
+            message: msg
+        });
+        const httpStatus = err?.httpStatus && Number.isFinite(err.httpStatus) ? err.httpStatus : 500;
+        return res.status(httpStatus).json({
+            success: false,
+            error: msg,
+            code: err?.code || 'prepare_confirmation_failed',
+            userMessage: err?.userMessage || 'We could not prepare your payment. Please try again.',
+            ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true })
         });
     }
 });
@@ -1021,7 +1435,7 @@ router.post('/create-intent', async (req, res) => {
             platform: isMobile ? 'mobile' : 'desktop'
         };
         
-        console.log(`📱 [PAYMENT] Request from ${deviceInfo.platform} device`);
+        devLog('create-intent request', { platform: deviceInfo.platform });
 
         if (!userId) {
             return res.status(400).json({
@@ -1100,21 +1514,23 @@ router.post('/create-intent', async (req, res) => {
             shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
         }
 
-        // Discount from cart.appliedDiscount (already validated) or validate discountCode
-        let discountAmount = 0;
-        if (cart.appliedDiscount && typeof cart.appliedDiscount.amount === 'number' && !isNaN(cart.appliedDiscount.amount)) {
-            discountAmount = cart.appliedDiscount.amount;
-        } else if (discountCode) {
-            const productGross = (cart.items || []).reduce((sum, item) => {
-                const p = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
-                const q = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
-                return sum + p * q;
-            }, 0);
-            const calc = await discountService.calculateOrderTotals(productGross, shippingCost, 0, discountCode);
-            if (calc.success && calc.appliedDiscount && typeof calc.appliedDiscount.amount === 'number') {
-                discountAmount = calc.appliedDiscount.amount;
-            }
+        const effectiveDiscountCode = discountService.pickEffectiveDiscountCode(discountCode, cart);
+        const discountResolution = await discountService.validateAndComputeDiscountAmount(
+            sumCartProductGross(cart.items),
+            shippingCost,
+            effectiveDiscountCode
+        );
+        if (!discountResolution.ok) {
+            return res.status(400).json({
+                success: false,
+                code: discountResolution.errorCode,
+                error: discountResolution.error,
+                userMessage: discountResolution.userMessage,
+                requestId: req.requestId || req.headers['x-request-id'] || null,
+                details: { discountCode: effectiveDiscountCode }
+            });
         }
+        const discountAmount = discountResolution.discountAmount;
 
         const totals = checkoutTotalsService.calculateTotals(
             cart.items,
@@ -1136,7 +1552,7 @@ router.post('/create-intent', async (req, res) => {
             });
         }
         
-        console.log('💳 [PAYMENT INTENT] Amount from backend cart totals:', validatedAmount, currency);
+        devLog('create-intent validated amount', { amount: validatedAmount, currency });
 
         // orderId is now optional - can be temporary or added later
         // If not provided, generate a temporary ID
@@ -1206,16 +1622,22 @@ router.post('/create-intent', async (req, res) => {
 
                 paymentIntentParams.customer = customerId;
             } catch (customerError) {
-                console.error('Error creating/retrieving customer:', customerError);
+                logger.warn('stripe_customer_attach_failed', {
+                    message: customerError.message,
+                    code: customerError.code
+                });
                 // Continue without customer - not critical
             }
         }
 
-        // Create payment intent with logging (amount is always backend-calculated from cart; frontend must not send amount)
-        console.log(`💳 [PAYMENT] Creating payment intent for order ${tempOrderId}, amount: ${validatedAmount} ${currency} (${amountInCents} cents)`);
-        console.log(`📱 [PAYMENT] Device: ${deviceInfo.platform}${isMobile ? ` (${userAgent.match(/Mobile|Android|iPhone|iPad/i)?.[0] || 'Mobile'})` : ''}`);
-        
-        // Log the EXACT parameters being sent to Stripe (for debugging)
+        // Create payment intent (amount is always backend-calculated from cart)
+        devLog('Creating payment intent', {
+            orderId: tempOrderId,
+            amount: validatedAmount,
+            currency,
+            cents: amountInCents,
+            platform: deviceInfo.platform
+        });
         const logParams = {
             amount: amountInCents,
             currency: currencyLower,
@@ -1225,11 +1647,11 @@ router.post('/create-intent', async (req, res) => {
             has_metadata: !!paymentIntentParams.metadata,
             device: deviceInfo.platform
         };
-        console.log(`💳 [PAYMENT] Payment intent params (EXACT):`, JSON.stringify(logParams, null, 2));
+        devLog('Payment intent params', logParams);
         
         // CRITICAL: Verify automatic_payment_methods is set correctly
         if (!paymentIntentParams.automatic_payment_methods || !paymentIntentParams.automatic_payment_methods.enabled) {
-            console.error('❌ [PAYMENT] CRITICAL ERROR: automatic_payment_methods is not enabled!');
+            logger.error('payment_intent_config_automatic_methods_disabled');
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent configuration error: automatic_payment_methods must be enabled',
@@ -1240,7 +1662,7 @@ router.post('/create-intent', async (req, res) => {
         
         // CRITICAL: Verify payment_method_types is NOT set (conflicts with automatic_payment_methods)
         if (paymentIntentParams.payment_method_types) {
-            console.error('❌ [PAYMENT] CRITICAL ERROR: payment_method_types is set! This conflicts with automatic_payment_methods!');
+            logger.error('payment_intent_config_method_types_conflict');
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent configuration error: Cannot use both payment_method_types and automatic_payment_methods',
@@ -1253,7 +1675,7 @@ router.post('/create-intent', async (req, res) => {
         
         // CRITICAL: Validate payment intent was created correctly
         if (!paymentIntent.client_secret) {
-            console.error('❌ [PAYMENT] Payment intent created but client_secret is missing!');
+            logger.error('payment_intent_missing_client_secret');
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent created but client secret is missing',
@@ -1264,7 +1686,10 @@ router.post('/create-intent', async (req, res) => {
         
         // CRITICAL: Validate status is requires_payment_method (required for PaymentElement)
         if (paymentIntent.status !== 'requires_payment_method') {
-            console.error(`❌ [PAYMENT] CRITICAL: Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method'`);
+            logger.error('payment_intent_bad_status', {
+                status: paymentIntent.status,
+                expected: 'requires_payment_method'
+            });
             return res.status(500).json({
                 success: false,
                 error: `Payment intent status is ${paymentIntent.status}, expected 'requires_payment_method' for PaymentElement`,
@@ -1277,7 +1702,7 @@ router.post('/create-intent', async (req, res) => {
         
         // CRITICAL: Validate automatic_payment_methods is enabled (required for PaymentElement)
         if (!paymentIntent.automatic_payment_methods?.enabled) {
-            console.error('❌ [PAYMENT] CRITICAL: Payment intent created but automatic_payment_methods is not enabled!');
+            logger.error('payment_intent_automatic_methods_not_enabled');
             return res.status(500).json({
                 success: false,
                 error: 'Payment intent created but automatic_payment_methods is not enabled. PaymentElement requires this.',
@@ -1289,45 +1714,20 @@ router.post('/create-intent', async (req, res) => {
         
         // CRITICAL: Verify payment_method_types is NOT present (conflicts with automatic_payment_methods)
         if (paymentIntent.payment_method_types && paymentIntent.payment_method_types.length > 0) {
-            console.warn(`⚠️ [PAYMENT] Warning: Payment intent has payment_method_types: ${paymentIntent.payment_method_types.join(', ')}`);
-            console.warn(`⚠️ [PAYMENT] This might conflict with automatic_payment_methods for PaymentElement`);
+            logger.warn('payment_intent_has_payment_method_types', {
+                types: paymentIntent.payment_method_types
+            });
         }
         
-        console.log(`✅ [PAYMENT] Payment intent created: ${paymentIntent.id}`);
-        console.log(`✅ [PAYMENT] Status: ${paymentIntent.status} ✅ (correct for PaymentElement)`);
-        console.log(`✅ [PAYMENT] Client secret: ${paymentIntent.client_secret ? 'Present ✅' : 'Missing ❌'}`);
-        console.log(`✅ [PAYMENT] Automatic payment methods: ${paymentIntent.automatic_payment_methods?.enabled ? 'Enabled ✅' : 'Disabled ❌'}`);
-        console.log(`✅ [PAYMENT] Automatic payment methods allow_redirects: ${paymentIntent.automatic_payment_methods?.allow_redirects || 'Not set'}`);
-        console.log(`✅ [PAYMENT] Payment method types (auto-determined by Stripe): ${paymentIntent.payment_method_types?.join(', ') || 'None (auto-determined)'}`);
-        console.log(`✅ [PAYMENT] Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
-        console.log(`🔐 [PAYMENT] 3D Secure configuration: ${paymentIntent.payment_method_options?.card?.request_three_d_secure || 'Not set'} (expect 'any' for strong SCA)`);
-        console.log(`📱 [PAYMENT] Mobile support: ${isMobile ? 'Mobile device detected - Apple Pay/Google Pay should be available' : 'Desktop device'}`);
-        
-        // Log the complete payment intent object for debugging (redact sensitive data)
-        console.log(`🔍 [PAYMENT] Payment intent details (VERIFICATION):`, JSON.stringify({
+        devLog('payment_intent.created', {
             id: paymentIntent.id,
             status: paymentIntent.status,
-            amount: paymentIntent.amount,
+            amountCents: paymentIntent.amount,
             currency: paymentIntent.currency,
-            automatic_payment_methods: {
-                enabled: paymentIntent.automatic_payment_methods?.enabled,
-                allow_redirects: paymentIntent.automatic_payment_methods?.allow_redirects
-            },
-            payment_method_types: paymentIntent.payment_method_types || [],
-            payment_method_options: paymentIntent.payment_method_options,
-            client_secret_present: !!paymentIntent.client_secret,
-            client_secret_prefix: paymentIntent.client_secret ? paymentIntent.client_secret.substring(0, 25) + '...' : 'Missing',
-            // Verification flags
-            verification: {
-                has_client_secret: !!paymentIntent.client_secret,
-                status_correct: paymentIntent.status === 'requires_payment_method',
-                automatic_payment_methods_enabled: paymentIntent.automatic_payment_methods?.enabled === true,
-                three_d_secure_configured: paymentIntent.payment_method_options?.card?.request_three_d_secure === 'any',
-                ready_for_payment_element: paymentIntent.status === 'requires_payment_method' && 
-                                          paymentIntent.automatic_payment_methods?.enabled === true &&
-                                          !!paymentIntent.client_secret
-            }
-        }, null, 2));
+            threeDS: paymentIntent.payment_method_options?.card?.request_three_d_secure || null,
+            automatic_payment_methods: paymentIntent.automatic_payment_methods,
+            payment_method_types: paymentIntent.payment_method_types
+        });
 
         // Update order with payment intent ID (only if order exists, not for temporary IDs)
         if (!isTemporaryOrderId) {
@@ -1346,7 +1746,10 @@ router.post('/create-intent', async (req, res) => {
                     }
                 });
             } catch (dbError) {
-                console.error('Error updating order with payment intent:', dbError);
+                logger.warn('order_payment_intent_link_failed', {
+                    message: dbError.message,
+                    orderId: tempOrderId
+                });
                 // Continue even if order update fails - order might not exist yet
             }
         }
@@ -1415,15 +1818,14 @@ router.post('/create-intent', async (req, res) => {
         const userAgent = req.headers['user-agent'] || '';
         const isMobile = /Mobile|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
         
-        console.error('❌ [PAYMENT] Create payment intent error:', error);
-        console.error(`📱 [PAYMENT] Error on ${isMobile ? 'mobile' : 'desktop'} device`);
-        console.error(`📱 [PAYMENT] User agent: ${userAgent.substring(0, 100)}`);
-        console.error(`📱 [PAYMENT] Error details:`, {
+        logger.error('create_payment_intent_failed', {
             message: error.message,
             code: error.code,
             type: error.type,
-            statusCode: error.statusCode
+            statusCode: error.statusCode,
+            mobile: isMobile
         });
+        devLog('create_payment_intent_failed.ua', userAgent.substring(0, 100));
         
         // Prefer a client-friendly message; never expose stack or internal details to the client
         const userMessage = (error.code === 'card_declined' || error.decline_code)
@@ -1466,13 +1868,9 @@ router.post('/create-intent', async (req, res) => {
  * }
  */
 router.post('/payment-failed', async (req, res) => {
-    // CRITICAL: Log that endpoint was hit
-    console.log('🔔 [PAYMENT FAILURE] Payment failed endpoint HIT:', {
-        timestamp: new Date().toISOString(),
+    devLog('payment-failed endpoint', {
         hasOrderId: !!req.body.orderId,
-        hasPaymentIntentId: !!req.body.paymentIntentId,
-        orderId: req.body.orderId || 'missing',
-        paymentIntentId: req.body.paymentIntentId ? req.body.paymentIntentId.substring(0, 20) + '...' : 'missing'
+        hasPaymentIntentId: !!req.body.paymentIntentId
     });
 
     try {
@@ -1485,10 +1883,8 @@ router.post('/payment-failed', async (req, res) => {
             });
         }
         
-        console.log(`❌ [PAYMENT FAILURE] Payment failed for order ${orderId} (from frontend)`, {
-            paymentIntentId: paymentIntentId,
-            error: error
-        });
+        logger.warn('payment_failed_client_report', { orderId, hasPaymentIntentId: !!paymentIntentId });
+        devLog('payment_failed_client_detail', { error });
         
         // Get order to verify it exists and update status
         const findResult = await db.executeOperation({
@@ -1503,16 +1899,14 @@ router.post('/payment-failed', async (req, res) => {
         // Checkout often uses TEMP ids or creates the orders row only after payment — do not 404:
         // the client still needs 200 + checkoutNavigation to reach the payment-failed page.
         if (!order) {
-            console.warn(
-                `⚠️ [PAYMENT FAILURE] Order ${orderId} not in DB (draft / pre-submit) — acknowledging, optional PI snapshot`
-            );
+            logger.warn('payment_failure_no_order_row', { orderId });
 
             let paymentIntentObj = null;
             if (paymentIntentId) {
                 try {
                     paymentIntentObj = await stripe.paymentIntents.retrieve(paymentIntentId);
                 } catch (piErr) {
-                    console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve PaymentIntent for orphan failure:', piErr.message);
+                    logger.warn('payment_failure_orphan_pi_retrieve_failed', { message: piErr.message, orderId });
                 }
             }
 
@@ -1527,10 +1921,10 @@ router.post('/payment-failed', async (req, res) => {
                 try {
                     const saveResult = await paymentFailureService.saveFailedCheckout(paymentIntentObj, syntheticOrder);
                     if (!saveResult?.success) {
-                        console.warn('⚠️ [PAYMENT FAILURE] saveFailedCheckout (no order row):', saveResult?.error);
+                        logger.warn('payment_failure_save_orphan_failed', { orderId, error: saveResult?.error });
                     }
                 } catch (saveErr) {
-                    console.warn('⚠️ [PAYMENT FAILURE] saveFailedCheckout exception:', saveErr.message);
+                    logger.warn('payment_failure_save_orphan_exception', { orderId, message: saveErr.message });
                 }
             }
 
@@ -1583,7 +1977,7 @@ router.post('/payment-failed', async (req, res) => {
                     const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
                     paymentIntentObj = await stripe.paymentIntents.retrieve(paymentIntentId || order.paymentIntentId);
                 } catch (error) {
-                    console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve payment intent:', error.message);
+                    logger.warn('payment_failure_pi_retrieve_failed', { message: error.message, orderId });
                 }
             }
             
@@ -1592,18 +1986,15 @@ router.post('/payment-failed', async (req, res) => {
                 const saveResult = await paymentFailureService.saveFailedCheckout(paymentIntentObj, { ...order, paymentStatus: 'failed' });
                 
                 if (saveResult?.success) {
-                    console.log(`✅ [PAYMENT FAILURE] Failed checkout saved, email will be sent in 3 minutes`, {
-                        retryToken: saveResult.retryToken,
-                        failedCheckoutId: saveResult.failedCheckoutId
-                    });
+                    devLog('failed_checkout_saved_from_frontend_path', { orderId });
                 } else {
-                    console.error(`❌ [PAYMENT FAILURE] Failed to save failed checkout:`, saveResult?.error);
+                    logger.error('failed_checkout_save_error_from_frontend', { orderId, error: saveResult?.error });
                 }
             } else {
-                console.warn('⚠️ [PAYMENT FAILURE] No payment intent available to save failed checkout');
+                logger.warn('payment_failure_no_pi_to_persist', { orderId });
             }
         } else {
-            console.log(`✅ [PAYMENT FAILURE] Order ${orderId} payment already succeeded, skipping failure handling`);
+            devLog('payment_failure_ignored_already_succeeded', { orderId });
         }
         
         res.json({
@@ -1615,7 +2006,8 @@ router.post('/payment-failed', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('Error handling payment failure from frontend:', error);
+        logger.error('payment_failure_frontend_handler_error', { message: error.message });
+        devWarn(error.stack);
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to handle payment failure'
@@ -1707,20 +2099,23 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
             shippingCost = cart.totals.shippingGross ?? cart.totals.shipping ?? 0;
         }
 
-        let discountAmount = 0;
-        if (cart.appliedDiscount && typeof cart.appliedDiscount.amount === 'number' && !isNaN(cart.appliedDiscount.amount)) {
-            discountAmount = cart.appliedDiscount.amount;
-        } else if (discountCode) {
-            const productGross = (cart.items || []).reduce((sum, item) => {
-                const p = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
-                const q = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
-                return sum + p * q;
-            }, 0);
-            const calc = await discountService.calculateOrderTotals(productGross, shippingCost, 0, discountCode);
-            if (calc.success && calc.appliedDiscount && typeof calc.appliedDiscount.amount === 'number') {
-                discountAmount = calc.appliedDiscount.amount;
-            }
+        const effectiveDiscountCodeUpdate = discountService.pickEffectiveDiscountCode(discountCode, cart);
+        const discountResolutionUpdate = await discountService.validateAndComputeDiscountAmount(
+            sumCartProductGross(cart.items),
+            shippingCost,
+            effectiveDiscountCodeUpdate
+        );
+        if (!discountResolutionUpdate.ok) {
+            return res.status(400).json({
+                success: false,
+                code: discountResolutionUpdate.errorCode,
+                error: discountResolutionUpdate.error,
+                userMessage: discountResolutionUpdate.userMessage,
+                requestId: req.requestId || req.headers['x-request-id'] || null,
+                details: { discountCode: effectiveDiscountCodeUpdate }
+            });
         }
+        const discountAmount = discountResolutionUpdate.discountAmount;
 
         const totals = checkoutTotalsService.calculateTotals(cart.items, shippingCost, discountAmount, 'SEK', vatRate, { country: countryForVat });
         const validatedAmount = totals.total;
@@ -1733,7 +2128,7 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
             });
         }
 
-        console.log(`🔄 [PAYMENT] Updating payment intent ${paymentIntentId} with backend cart total: ${validatedAmount}`);
+        devLog('update_payment_intent_amount', { paymentIntentId, validatedAmount });
 
         const amountInCents = Math.round(validatedAmount * 100);
         const currencyLower = (existingIntent.currency || 'sek').toString().toLowerCase();
@@ -1756,7 +2151,8 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
 
         const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
 
-        console.log(`✅ [PAYMENT] Payment intent ${paymentIntentId} updated successfully:`, {
+        devLog('payment_intent_updated', {
+            paymentIntentId,
             oldAmount: existingIntent.amount / 100,
             newAmount: paymentIntent.amount / 100,
             currency: paymentIntent.currency,
@@ -1774,7 +2170,11 @@ router.put('/update-intent/:paymentIntentId', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [PAYMENT] Update payment intent error:', error);
+        logger.error('update_payment_intent_error', {
+            message: error.message,
+            code: error.code,
+            type: error.type
+        });
         
         res.status(500).json({
             success: false,
@@ -1818,7 +2218,7 @@ router.post('/update-intent', async (req, res) => {
             });
         }
 
-        console.log(`🔄 [PAYMENT] Updating payment intent ${paymentIntentId} with order ID ${orderId}`);
+        devLog('update_intent_metadata', { paymentIntentId, orderId });
 
         // Retrieve existing payment intent to preserve metadata
         const existingIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
@@ -1848,9 +2248,9 @@ router.post('/update-intent', async (req, res) => {
                     }
                 }
             });
-            console.log(`✅ [PAYMENT] Order ${orderId} updated with payment intent ${paymentIntentId}`);
+            devLog('order_linked_payment_intent', { orderId, paymentIntentId });
         } catch (dbError) {
-            console.error('Error updating order with payment intent:', dbError);
+            logger.warn('order_payment_intent_update_failed', { orderId, message: dbError.message });
             // Continue even if order update fails
         }
 
@@ -1861,7 +2261,7 @@ router.post('/update-intent', async (req, res) => {
             metadata: paymentIntent.metadata
         });
     } catch (error) {
-        console.error('Update payment intent error:', error);
+        logger.error('update_intent_route_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to update payment intent',
@@ -1896,14 +2296,14 @@ router.post('/confirm', async (req, res) => {
 
         // Payment already succeeded — still run finalize (creates order + emails if webhook ran before draft existed)
         if (paymentIntent.status === 'succeeded') {
-            console.log(`⚠️ [PAYMENT] Payment intent ${paymentIntentId} already succeeded — ensuring order + emails`);
+            devLog('confirm_already_succeeded', { paymentIntentId });
             // Fire-and-forget finalize to avoid blocking the success page render.
             // The webhook will also run finalize; this is just a safety net.
             setImmediate(async () => {
                 try {
                     await handlePaymentIntentSucceeded(paymentIntent, { hintOrderId: orderId || null });
                 } catch (finErr) {
-                    console.error('❌ [PAYMENT] finalize after succeeded failed:', finErr.message);
+                    logger.error('finalize_after_succeeded_failed', { message: finErr.message, paymentIntentId });
                 }
             });
             const refreshedPi = await stripe.paymentIntents.retrieve(paymentIntentId);
@@ -1951,7 +2351,7 @@ router.post('/confirm', async (req, res) => {
         }
 
         if (paymentIntent.status === 'processing') {
-            console.log(`⚠️ [PAYMENT] Payment intent ${paymentIntentId} is already processing`);
+            devLog('confirm_already_processing', { paymentIntentId });
             return res.json({
                 success: true,
                 paymentStatus: 'processing',
@@ -2067,7 +2467,7 @@ router.post('/confirm', async (req, res) => {
             ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
-        console.error('Confirm payment error:', error);
+        logger.error('confirm_payment_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to confirm payment',
@@ -2108,7 +2508,7 @@ router.post('/finalize-after-payment', async (req, res) => {
             message: 'Finalize attempted (order + emails if pending checkout was found)'
         });
     } catch (error) {
-        console.error('finalize-after-payment error:', error);
+        logger.error('finalize_after_payment_error', { message: error.message });
         return res.status(500).json({
             success: false,
             error: error.message || 'Finalize failed',
@@ -2165,7 +2565,7 @@ router.get('/status/:paymentIntentId', async (req, res) => {
             ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
-        console.error('Get payment status error:', error);
+        logger.error('get_payment_status_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to retrieve payment status',
@@ -2226,7 +2626,7 @@ router.post('/check-before-confirm', async (req, res) => {
             ...checkoutNavigationExtras({ paymentIntent })
         });
     } catch (error) {
-        console.error('Check before confirm error:', error);
+        logger.error('check_before_confirm_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to check payment intent',
@@ -2319,7 +2719,7 @@ router.post('/refund', async (req, res) => {
                     });
                 }
             } catch (dbError) {
-                console.error('Error updating order after refund:', dbError);
+                logger.warn('order_update_after_refund_failed', { message: dbError.message });
                 // Continue even if order update fails
             }
         }
@@ -2333,7 +2733,7 @@ router.post('/refund', async (req, res) => {
             orderId
         });
     } catch (error) {
-        console.error('Refund error:', error);
+        logger.error('refund_route_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to process refund',
@@ -2345,15 +2745,13 @@ router.post('/refund', async (req, res) => {
 // Legacy endpoint - keep for backward compatibility
 router.post('/', async (req, res) => {
     try {
-        // Log incoming request
-        console.log('Payment Request:', JSON.stringify(req.body, null, 2));
+        devLog('legacy payment request keys', req.body ? Object.keys(req.body) : []);
 
         // Process the payment using VornifyPay
         const result = await paymentService.processPayment(req.body);
         
-        // Log the result
-        console.log('Payment Response:', JSON.stringify(result, null, 2));
-        
+        devLog('legacy payment result', { status: result && result.status });
+
         // Send response
         if (result.status) {
             res.json(result);
@@ -2361,7 +2759,7 @@ router.post('/', async (req, res) => {
             res.status(400).json(result);
         }
     } catch (error) {
-        console.error('Payment route error:', error);
+        logger.error('legacy_payment_route_error', { message: error.message });
         res.status(500).json({
             status: false,
             error: 'Internal server error',
@@ -2432,7 +2830,7 @@ router.get('/apple-pay/verification-file', async (req, res) => {
             }
         }
     } catch (error) {
-        console.error('Error retrieving Apple Pay verification file:', error);
+        logger.error('apple_pay_verification_file_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to retrieve verification file information',

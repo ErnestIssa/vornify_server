@@ -1,5 +1,6 @@
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const cloudinary = require('../config/cloudinary');
+const { devLog, devWarn } = require('../core/logging/devConsole');
 
 /**
  * Sanitize a string for use as Cloudinary public_id (lowercase, hyphens, no spaces/special chars).
@@ -46,7 +47,7 @@ const reviewStorage = new CloudinaryStorage({
   cloudinary,
   params: (req, file) => {
     try {
-      console.log('[REVIEW UPLOAD] Cloudinary storage params called:', {
+      devLog('[REVIEW UPLOAD] Cloudinary storage params', {
         mimetype: file.mimetype,
         originalname: file.originalname,
         size: file.size,
@@ -65,8 +66,8 @@ const reviewStorage = new CloudinaryStorage({
         transformation: [{ width: 1920, crop: 'limit', quality: 'auto:good' }],
       };
     } catch (e) {
-      console.error('[REVIEW UPLOAD] Cloudinary storage params error:', e);
-      console.error('[REVIEW UPLOAD] Params error stack:', e && e.stack);
+      devWarn('[REVIEW UPLOAD] Cloudinary storage params error', e && e.message);
+      devWarn(e && e.stack);
       return {
         folder: 'peakmode/reviews',
         public_id: `review-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,

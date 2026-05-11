@@ -1,6 +1,35 @@
 const getDBInstance = require('../vornifydb/dbInstance');
+const { ErrorCodes } = require('../core/errors/codes');
 
 const db = getDBInstance();
+
+function discountUserMessage(code) {
+    switch (code) {
+        case ErrorCodes.DISCOUNT_EXPIRED:
+            return 'This discount code has expired.';
+        case ErrorCodes.DISCOUNT_ALREADY_USED:
+            return 'This discount code has already been used.';
+        case ErrorCodes.DISCOUNT_UNAVAILABLE:
+            return 'We could not verify this discount code. Please try again.';
+        case ErrorCodes.DISCOUNT_INVALID:
+        default:
+            return 'This discount code is not valid.';
+    }
+}
+
+/**
+ * Body discount overrides cart.appliedDiscount when provided (non-empty string).
+ */
+function pickEffectiveDiscountCode(discountCodeFromBody, cart) {
+    if (discountCodeFromBody != null && String(discountCodeFromBody).trim().length > 0) {
+        return String(discountCodeFromBody).trim();
+    }
+    const applied = cart && cart.appliedDiscount && cart.appliedDiscount.code;
+    if (applied != null && String(applied).trim().length > 0) {
+        return String(applied).trim();
+    }
+    return null;
+}
 
 /**
  * Discount Service
@@ -53,7 +82,9 @@ async function validateDiscountCode(discountCode) {
             return {
                 success: false,
                 valid: false,
-                error: 'Discount code is required'
+                errorCode: ErrorCodes.DISCOUNT_INVALID,
+                error: 'Discount code is required',
+                userMessage: discountUserMessage(ErrorCodes.DISCOUNT_INVALID)
             };
         }
 
@@ -67,22 +98,38 @@ async function validateDiscountCode(discountCode) {
             data: { discountCode: normalizedCode }
         });
 
-        if (!result.success || !result.data) {
+        if (!result.success) {
             return {
-                success: true,
+                success: false,
                 valid: false,
-                error: 'Invalid discount code'
+                errorCode: ErrorCodes.DISCOUNT_UNAVAILABLE,
+                error: 'Discount lookup failed',
+                userMessage: discountUserMessage(ErrorCodes.DISCOUNT_UNAVAILABLE)
             };
         }
 
-        const subscriber = Array.isArray(result.data) ? result.data[0] : result.data;
+        const subscriber = Array.isArray(result.data)
+            ? (result.data.length > 0 ? result.data[0] : null)
+            : result.data;
+
+        if (!subscriber) {
+            return {
+                success: true,
+                valid: false,
+                errorCode: ErrorCodes.DISCOUNT_INVALID,
+                error: 'Invalid discount code',
+                userMessage: discountUserMessage(ErrorCodes.DISCOUNT_INVALID)
+            };
+        }
 
         // Check if code is already used
         if (subscriber.discountCodeUsed === true) {
             return {
                 success: true,
                 valid: false,
-                error: 'This discount code has already been used'
+                errorCode: ErrorCodes.DISCOUNT_ALREADY_USED,
+                error: 'This discount code has already been used',
+                userMessage: discountUserMessage(ErrorCodes.DISCOUNT_ALREADY_USED)
             };
         }
 
@@ -94,7 +141,9 @@ async function validateDiscountCode(discountCode) {
                 return {
                     success: true,
                     valid: false,
-                    error: 'This discount code has expired'
+                    errorCode: ErrorCodes.DISCOUNT_EXPIRED,
+                    error: 'This discount code has expired',
+                    userMessage: discountUserMessage(ErrorCodes.DISCOUNT_EXPIRED)
                 };
             }
         }
@@ -117,8 +166,10 @@ async function validateDiscountCode(discountCode) {
         return {
             success: false,
             valid: false,
+            errorCode: ErrorCodes.DISCOUNT_UNAVAILABLE,
             error: 'Failed to validate discount code',
-            details: error.message
+            details: error.message,
+            userMessage: discountUserMessage(ErrorCodes.DISCOUNT_UNAVAILABLE)
         };
     }
 }
@@ -162,10 +213,15 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
                     appliedAt: new Date().toISOString()
                 };
             } else {
-                // Invalid discount code - return error
+                // Invalid discount code - return typed error for clients (/core parity)
+                const errorCode =
+                    validation.errorCode ||
+                    (validation.success === false ? ErrorCodes.DISCOUNT_UNAVAILABLE : ErrorCodes.DISCOUNT_INVALID);
                 return {
                     success: false,
+                    errorCode,
                     error: validation.error || 'Invalid discount code',
+                    userMessage: validation.userMessage || discountUserMessage(errorCode),
                     totals: null
                 };
             }
@@ -209,11 +265,47 @@ async function calculateOrderTotals(subtotal, shipping = 0, tax = 0, discountCod
         console.error('❌ [DISCOUNT SERVICE] Calculate order totals error:', error);
         return {
             success: false,
+            errorCode: ErrorCodes.DISCOUNT_UNAVAILABLE,
             error: 'Failed to calculate order totals',
             details: error.message,
+            userMessage: discountUserMessage(ErrorCodes.DISCOUNT_UNAVAILABLE),
             totals: null
         };
     }
+}
+
+/**
+ * Canonical discount amount for totals: always recomputed from subscriber record (never trust stale cart snapshots).
+ *
+ * @param {number} productGross
+ * @param {number} shippingCost
+ * @param {string|null} effectiveCode normalized or raw — passed to calculateOrderTotals
+ * @returns {Promise<{ ok: true, discountAmount: number, appliedDiscount: object|null }|{ ok: false, errorCode: string, error: string, userMessage: string }>}
+ */
+async function validateAndComputeDiscountAmount(productGross, shippingCost, effectiveCode) {
+    if (!effectiveCode) return { ok: true, discountAmount: 0, appliedDiscount: null };
+    const calc = await calculateOrderTotals(productGross, shippingCost || 0, 0, effectiveCode);
+    if (!calc.success) {
+        return {
+            ok: false,
+            errorCode: calc.errorCode || ErrorCodes.DISCOUNT_INVALID,
+            error: calc.error || 'Invalid discount code',
+            userMessage: calc.userMessage || discountUserMessage(calc.errorCode || ErrorCodes.DISCOUNT_INVALID)
+        };
+    }
+    if (!calc.appliedDiscount || typeof calc.appliedDiscount.amount !== 'number' || isNaN(calc.appliedDiscount.amount)) {
+        return {
+            ok: false,
+            errorCode: ErrorCodes.DISCOUNT_INVALID,
+            error: 'Invalid discount code',
+            userMessage: discountUserMessage(ErrorCodes.DISCOUNT_INVALID)
+        };
+    }
+    return {
+        ok: true,
+        discountAmount: calc.appliedDiscount.amount,
+        appliedDiscount: calc.appliedDiscount
+    };
 }
 
 /**
@@ -230,37 +322,62 @@ async function markDiscountCodeAsUsed(discountCode, orderId) {
         if (!discountCode) {
             return {
                 success: false,
+                errorCode: ErrorCodes.DISCOUNT_INVALID,
                 error: 'Discount code is required'
             };
         }
 
         const normalizedCode = discountCode.trim().toUpperCase();
+        const orderIdResolved = orderId || null;
 
-        // Update subscriber record to mark code as used
-        const updateResult = await db.executeOperation({
+        const usedPayload = {
+            discountCodeUsed: true,
+            discountCodeUsedAt: new Date().toISOString(),
+            discountCodeUsedInOrder: orderIdResolved,
+            updatedAt: new Date().toISOString()
+        };
+
+        // Consume single-use atomically — avoids double-use races between checkouts/webhook retries.
+        let updateResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'subscribers',
-            command: '--update',
+            command: '--update-operator',
             data: {
-                filter: { discountCode: normalizedCode },
-                update: {
-                    discountCodeUsed: true,
-                    discountCodeUsedAt: new Date().toISOString(),
-                    discountCodeUsedInOrder: orderId || null,
-                    updatedAt: new Date().toISOString()
-                }
+                filter: { discountCode: normalizedCode, discountCodeUsed: { $ne: true } },
+                update: { $set: usedPayload }
             }
         });
 
         if (!updateResult.success) {
-            console.error(`⚠️ [DISCOUNT SERVICE] Failed to mark discount code ${normalizedCode} as used`);
+            // Idempotent Stripe webhook retries / same order: already marked for this order
+            const readResult = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'subscribers',
+                command: '--read',
+                data: { discountCode: normalizedCode }
+            });
+            let sub = null;
+            if (readResult.success && readResult.data) {
+                sub = Array.isArray(readResult.data) ? readResult.data[0] : readResult.data;
+            }
+            const usedIn = sub && sub.discountCodeUsedInOrder != null ? String(sub.discountCodeUsedInOrder) : '';
+            if (sub && sub.discountCodeUsed === true && orderIdResolved && usedIn === String(orderIdResolved)) {
+                console.log(`✅ [DISCOUNT SERVICE] Discount code ${normalizedCode} already marked for order ${orderIdResolved}`);
+                return { success: true, message: 'Discount code marked as used', idempotent: true };
+            }
+            console.error(`⚠️ [DISCOUNT SERVICE] Cannot claim discount ${normalizedCode} — already consumed or missing`);
             return {
                 success: false,
-                error: 'Failed to mark discount code as used'
+                errorCode: ErrorCodes.DISCOUNT_ALREADY_USED,
+                error:
+                    sub && sub.discountCodeUsed === true
+                        ? 'This discount code has already been used'
+                        : 'Failed to mark discount code as used',
+                conflict: true
             };
         }
 
-        console.log(`✅ [DISCOUNT SERVICE] Discount code ${normalizedCode} marked as used for order ${orderId || 'N/A'}`);
+        console.log(`✅ [DISCOUNT SERVICE] Discount code ${normalizedCode} marked as used for order ${orderIdResolved || 'N/A'}`);
         return {
             success: true,
             message: 'Discount code marked as used'
@@ -270,6 +387,7 @@ async function markDiscountCodeAsUsed(discountCode, orderId) {
         console.error('❌ [DISCOUNT SERVICE] Mark discount code as used error:', error);
         return {
             success: false,
+            errorCode: ErrorCodes.DISCOUNT_UNAVAILABLE,
             error: 'Failed to mark discount code as used',
             details: error.message
         };
@@ -280,6 +398,9 @@ module.exports = {
     validateDiscountCode,
     calculateDiscountAmount,
     calculateOrderTotals,
+    validateAndComputeDiscountAmount,
+    pickEffectiveDiscountCode,
+    discountUserMessage,
     markDiscountCodeAsUsed
 };
 

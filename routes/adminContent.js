@@ -4,6 +4,7 @@ const authenticateAdmin = require('../middleware/authenticateAdmin');
 
 const router = express.Router();
 const db = getDBInstance();
+const { devLog } = require('../core/logging/devConsole');
 
 /**
  * GET /api/admin/content
@@ -13,8 +14,8 @@ const db = getDBInstance();
  */
 router.get('/content', async (req, res) => {
     try {
-        if (process.env.NODE_ENV === 'development' || req.query._ping) {
-            console.log('🔔 [CRON/PING] GET /api/admin/content hit');
+        if (process.env.NODE_ENV === 'development' && req.query._ping) {
+            devLog('[admin/content] ping');
         }
         // Fetch content from database
         const contentResult = await db.executeOperation({

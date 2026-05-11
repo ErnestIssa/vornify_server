@@ -1,6 +1,8 @@
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('./emailService');
 const crypto = require('crypto');
+const { devLog, devWarn } = require('../core/logging/devConsole');
+const { logger } = require('../core/logging/logger');
 
 const db = getDBInstance();
 
@@ -33,13 +35,11 @@ function generatePaymentRetryUrl(retryToken) {
  * @returns {Promise<object>} Result object with retryToken
  */
 async function saveFailedCheckout(paymentIntent, order) {
-    // CRITICAL: Log that function was called
-    console.log('🔔 [PAYMENT FAILURE] saveFailedCheckout function CALLED:', {
-        timestamp: new Date().toISOString(),
+    devLog('[PAYMENT FAILURE] saveFailedCheckout', {
         hasPaymentIntent: !!paymentIntent,
         hasOrder: !!order,
-        paymentIntentId: paymentIntent?.id || 'missing',
-        orderId: order?.orderId || 'missing',
+        paymentIntentId: paymentIntent?.id || null,
+        orderId: order?.orderId || null,
         hasCustomerEmail: !!(order?.customer?.email || order?.customerEmail)
     });
 
@@ -58,12 +58,12 @@ async function saveFailedCheckout(paymentIntent, order) {
                 const customer = await stripe.customers.retrieve(paymentIntent.customer);
                 customerEmail = customer.email || null;
             } catch (error) {
-                console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve customer email from Stripe:', error.message);
+                logger.warn('payment_failure_customer_email_lookup_failed', { message: error.message });
             }
         }
         
         if (!customerEmail) {
-            console.warn('⚠️ [PAYMENT FAILURE] No customer email found in order or payment intent, cannot save failed checkout', {
+            logger.warn('payment_failure_no_customer_email', {
                 hasOrderCustomer: !!order.customer,
                 hasOrderCustomerEmail: !!order.customerEmail,
                 hasReceiptEmail: !!paymentIntent.receipt_email,
@@ -113,13 +113,10 @@ async function saveFailedCheckout(paymentIntent, order) {
             failedCheckout.shippingMethod = order.shippingMethod;
         }
 
-        // Log before save for debugging
-        console.log('💾 [PAYMENT FAILURE] Attempting to save failed checkout:', {
+        devLog('[PAYMENT FAILURE] saving failed checkout', {
             id: failedCheckout.id,
-            email: failedCheckout.email,
             total: failedCheckout.total,
-            itemsCount: cartItems.length,
-            retryToken: retryToken
+            itemsCount: cartItems.length
         });
 
         // Save to failed_checkouts collection
@@ -130,26 +127,18 @@ async function saveFailedCheckout(paymentIntent, order) {
             data: failedCheckout
         });
 
-        // Log result for debugging
-        console.log('💾 [PAYMENT FAILURE] Database save result:', {
+        devLog('[PAYMENT FAILURE] save result', {
             success: saveResult.success,
             status: saveResult.status,
             message: saveResult.message,
-            error: saveResult.error,
-            data: saveResult.data ? 'present' : 'missing'
+            hasData: Boolean(saveResult.data)
         });
 
         // Check both success and status (VornifyDB may use either)
         const isSuccess = saveResult.success === true || saveResult.status === true || saveResult.success !== false;
 
         if (isSuccess) {
-            console.log(`✅ [PAYMENT FAILURE] Failed checkout saved:`, {
-                id: failedCheckout.id,
-                email: failedCheckout.email,
-                retryToken: retryToken,
-                total: total,
-                itemsCount: cartItems.length
-            });
+            devLog('[PAYMENT FAILURE] saved', { id: failedCheckout.id });
 
             return {
                 success: true,
@@ -157,12 +146,11 @@ async function saveFailedCheckout(paymentIntent, order) {
                 failedCheckoutId: failedCheckout.id
             };
         } else {
-            console.error('❌ [PAYMENT FAILURE] Failed to save failed checkout:', {
+            logger.error('payment_failure_save_failed_checkout_failed', {
                 success: saveResult.success,
                 status: saveResult.status,
                 message: saveResult.message,
-                error: saveResult.error,
-                fullResult: JSON.stringify(saveResult, null, 2)
+                error: saveResult.error
             });
             return {
                 success: false,
@@ -171,7 +159,8 @@ async function saveFailedCheckout(paymentIntent, order) {
             };
         }
     } catch (error) {
-        console.error('❌ [PAYMENT FAILURE] Error saving failed checkout:', error);
+        logger.error('payment_failure_save_failed_checkout_exception', { message: error.message });
+        devWarn(error.stack);
         return {
             success: false,
             error: error.message
@@ -199,7 +188,7 @@ async function getFailedCheckoutByToken(retryToken) {
 
         return null;
     } catch (error) {
-        console.error('❌ [PAYMENT FAILURE] Error getting failed checkout by token:', error);
+        logger.error('payment_failure_get_by_token_error', { message: error.message });
         return null;
     }
 }
@@ -227,7 +216,7 @@ async function markFailedCheckoutCompleted(retryToken) {
 
         return result.success;
     } catch (error) {
-        console.error('❌ [PAYMENT FAILURE] Error marking failed checkout as completed:', error);
+        logger.error('payment_failure_mark_completed_error', { message: error.message });
         return false;
     }
 }
@@ -239,7 +228,7 @@ async function markFailedCheckoutCompleted(retryToken) {
  */
 async function processPendingPaymentFailures() {
     try {
-        console.log('💳 [PAYMENT FAILURE] Checking for pending payment failures...');
+        devLog('[PAYMENT FAILURE] processing pending failures');
         
         const now = new Date();
 
@@ -255,7 +244,7 @@ async function processPendingPaymentFailures() {
         });
 
         if (!checkoutsResult.success) {
-            console.error('❌ [PAYMENT FAILURE] Failed to fetch failed checkouts:', checkoutsResult);
+            logger.error('payment_failure_fetch_failed_checkouts_failed', { error: checkoutsResult?.error || null });
             return {
                 success: false,
                 error: 'Failed to fetch failed checkouts'
@@ -292,7 +281,7 @@ async function processPendingPaymentFailures() {
         
         const eligibleCheckouts = [...firstEmailCheckouts, ...secondEmailCheckouts];
 
-        console.log(`💳 [PAYMENT FAILURE] Found ${checkoutsArray.length} failed checkouts, ${eligibleCheckouts.length} eligible for emails`);
+        devLog('[PAYMENT FAILURE] eligible', { total: checkoutsArray.length, eligible: eligibleCheckouts.length });
 
         const results = {
             total: eligibleCheckouts.length,
@@ -345,7 +334,7 @@ async function processPendingPaymentFailures() {
                     const paymentIntent = await stripe.paymentIntents.retrieve(checkout.paymentIntentId);
                     orderNumber = paymentIntent.metadata?.orderId || 'N/A';
                 } catch (error) {
-                    console.warn('⚠️ [PAYMENT FAILURE] Could not retrieve orderId from payment intent:', error.message);
+                    logger.warn('payment_failure_pi_orderid_lookup_failed', { message: error.message });
                 }
             }
 
@@ -382,16 +371,11 @@ async function processPendingPaymentFailures() {
                 });
 
                 results.sent++;
-                console.log(`✅ [PAYMENT FAILURE] Payment failure email (${emailType}) sent to ${customerEmail}`, {
-                    failedCheckoutId: checkout.id,
-                    retryToken: checkout.retryToken,
-                    orderNumber: orderNumber,
-                    messageId: emailResult.messageId,
-                    timestamp: emailResult.timestamp
-                });
+                devLog('[PAYMENT FAILURE] email sent', { type: emailType, failedCheckoutId: checkout.id });
             } else {
                 results.errors++;
-                console.error(`❌ [PAYMENT FAILURE] Failed to send email (${emailType}) to ${customerEmail}:`, {
+                logger.error('payment_failure_email_send_failed', {
+                    type: emailType,
                     failedCheckoutId: checkout.id,
                     error: emailResult.error
                 });
@@ -400,14 +384,15 @@ async function processPendingPaymentFailures() {
             results.processed++;
         }
 
-        console.log(`💳 [PAYMENT FAILURE] Processed ${results.processed} failed checkouts: ${results.sent} sent, ${results.skipped} skipped, ${results.errors} errors`);
+        devLog('[PAYMENT FAILURE] processed', results);
 
         return {
             success: true,
             ...results
         };
     } catch (error) {
-        console.error('❌ [PAYMENT FAILURE] Error processing pending payment failures:', error);
+        logger.error('payment_failure_process_pending_error', { message: error.message });
+        devWarn(error.stack);
         return {
             success: false,
             error: error.message

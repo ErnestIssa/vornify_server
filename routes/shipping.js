@@ -175,6 +175,27 @@ router.post('/options', async (req, res) => {
         );
 
         if (fromDb && dbOptions && dbOptions.length > 0) {
+            // Attach a stable shippingVersion per option for checkout gating (method/zone/cost/free).
+            try {
+                const { buildShippingVersionSource, computeShippingVersion } = require('../core/guards/shippingVersion');
+                const municipalityForVersion = municipality || '';
+                const zoneId = dbZone?._id?.toString() || dbZone?.id || dbZone?.name || null;
+                for (const opt of dbOptions) {
+                    const methodId = opt.id || null;
+                    const cost = typeof opt.cost === 'number' && !isNaN(opt.cost) ? opt.cost : 0;
+                    opt.shippingVersion = computeShippingVersion(buildShippingVersionSource({
+                        country: recipientAddress.country,
+                        municipality: municipalityForVersion,
+                        zoneId,
+                        methodId,
+                        cost,
+                        freeDelivery: cost === 0,
+                        currency: opt.currency || 'SEK'
+                    }));
+                }
+            } catch (e) {
+                // best effort, do not fail options endpoint
+            }
             const byType = (type) => dbOptions.filter(o => (o.type || '').toLowerCase() === (type || '').toLowerCase());
             const home = [...byType('home'), ...byType('home_eco')];
             const parcelLocker = byType('parcel_locker');

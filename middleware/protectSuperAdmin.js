@@ -1,5 +1,6 @@
 const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
+const { logger } = require('../core/logging/logger');
 
 const db = getDBInstance();
 
@@ -59,7 +60,7 @@ async function protectSuperAdmin(req, res, next) {
 
         // Prevent deleting the last super_admin
         if (req.method === 'DELETE' && superAdminCount <= 1) {
-            console.log('❌ [PROTECT SUPER ADMIN] Attempt to delete last super_admin blocked');
+            logger.warn('protect_super_admin_delete_last_blocked');
             return res.status(403).json({
                 success: false,
                 message: 'Cannot delete the last super_admin account',
@@ -69,7 +70,7 @@ async function protectSuperAdmin(req, res, next) {
 
         // Prevent deleting any super_admin if it would leave less than 1
         if (req.method === 'DELETE' && superAdminCount <= 1) {
-            console.log('❌ [PROTECT SUPER ADMIN] Attempt to delete super_admin would leave no super_admin');
+            logger.warn('protect_super_admin_delete_would_empty');
             return res.status(403).json({
                 success: false,
                 message: 'Cannot delete super_admin. At least one super_admin must exist.',
@@ -84,7 +85,7 @@ async function protectSuperAdmin(req, res, next) {
             const targetAdminId = admin._id || admin.id;
             
             if (currentAdminId.toString() === targetAdminId.toString()) {
-                console.log('❌ [PROTECT SUPER ADMIN] Attempt to self-downgrade blocked');
+                logger.warn('protect_super_admin_self_downgrade_blocked');
                 return res.status(403).json({
                     success: false,
                     message: 'Cannot downgrade your own role from super_admin',
@@ -94,7 +95,7 @@ async function protectSuperAdmin(req, res, next) {
 
             // Check if this would leave less than 1 super_admin
             if (superAdminCount <= 1) {
-                console.log('❌ [PROTECT SUPER ADMIN] Attempt to downgrade last super_admin blocked');
+                logger.warn('protect_super_admin_downgrade_last_blocked');
                 return res.status(403).json({
                     success: false,
                     message: 'Cannot downgrade the last super_admin account',
@@ -102,7 +103,7 @@ async function protectSuperAdmin(req, res, next) {
                 });
             }
 
-            console.log('❌ [PROTECT SUPER ADMIN] Attempt to downgrade super_admin blocked');
+            logger.warn('protect_super_admin_downgrade_blocked');
             return res.status(403).json({
                 success: false,
                 message: 'Cannot downgrade super_admin role',
@@ -113,7 +114,7 @@ async function protectSuperAdmin(req, res, next) {
         // Prevent changing super_admin email (optional - can be relaxed if needed)
         // This is a security measure to prevent account takeover
         if (req.body.email && req.body.email !== admin.email) {
-            console.log('⚠️ [PROTECT SUPER ADMIN] Attempt to change super_admin email detected');
+            logger.warn('protect_super_admin_email_change_attempt');
             // Allow but log for audit (can be made stricter if needed)
             // For now, we'll allow it but log it
         }
@@ -122,7 +123,7 @@ async function protectSuperAdmin(req, res, next) {
         next();
 
     } catch (error) {
-        console.error('❌ [PROTECT SUPER ADMIN] Error:', error);
+        logger.error('protect_super_admin_middleware_error', { message: error.message });
         res.status(500).json({
             success: false,
             error: 'Internal server error during super admin protection check',

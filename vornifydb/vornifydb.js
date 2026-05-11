@@ -7,6 +7,10 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
+function devDbLog(...args) {
+    if (process.env.NODE_ENV === 'development') console.log(...args);
+}
+
 class VortexDB {
     constructor() {
         // Set ffmpeg paths
@@ -58,7 +62,7 @@ class VortexDB {
 
             // Add connection event handlers
             this.client.on('connectionPoolCreated', () => {
-                console.log('✅ MongoDB connection pool created');
+                devDbLog('MongoDB connection pool created');
             });
 
             this.client.on('connectionCreated', () => {
@@ -102,7 +106,7 @@ class VortexDB {
                 try {
                     // Try ping first to see if already connected
                     await this.client.db('admin').command({ ping: 1 });
-                    console.log('✅ MongoDB already connected');
+                    devDbLog('MongoDB already connected');
                     return true;
                 } catch (pingError) {
                     // If ping fails, connect
@@ -327,6 +331,7 @@ class VortexDB {
                 '--create': this.createRecord.bind(this),
                 '--read': this.readRecords.bind(this),
                 '--update': this.updateRecord.bind(this),
+                '--update-operator': this.updateRecordOperator.bind(this),
                 '--delete': this.deleteRecord.bind(this),
                 '--delete-many': this.deleteManyRecords.bind(this),
                 '--verify': this.verifyRecord.bind(this),
@@ -413,8 +418,10 @@ class VortexDB {
                 }
             }
         } catch (error) {
-            console.error('❌ Execute operation error:', error);
-            console.error('❌ Error details:', error.stack);
+            console.error('Execute operation error:', error.message || error);
+            if (process.env.NODE_ENV === 'development' && error.stack) {
+                console.error(error.stack);
+            }
             const errorMessage = error.message || error.toString() || 'Unknown error';
             
             // If it's a connection error, try to reconnect
@@ -565,10 +572,8 @@ class VortexDB {
             
             // DEBUG: Log images field if it exists (for reviews)
             if (data.id && data.id.startsWith('RV')) {
-                console.log(`🔍 createRecord - Review ${data.id}:`, {
+                devDbLog(`createRecord review ${data.id}`, {
                     hasImages: 'images' in data,
-                    imagesType: typeof data.images,
-                    imagesValue: data.images,
                     imagesIsArray: Array.isArray(data.images),
                     imagesLength: Array.isArray(data.images) ? data.images.length : 'N/A'
                 });
@@ -578,7 +583,7 @@ class VortexDB {
             
             // Verify what was inserted
             if (data.id && data.id.startsWith('RV')) {
-                console.log(`✅ createRecord - Review ${data.id} inserted. Inserted ID: ${result.insertedId}`);
+                devDbLog(`createRecord review ${data.id} inserted`, { insertedId: String(result.insertedId) });
             }
             
             return {
@@ -814,6 +819,40 @@ class VortexDB {
         }
     }
 
+    /**
+     * Update Record with raw operators ($inc, $set, arrayFilters, etc.).
+     * Use sparingly for atomic operations (e.g. inventory deduction).
+     *
+     * data: { filter, update, options? }
+     */
+    async updateRecordOperator(collection, data) {
+        try {
+            if (!data.filter || !data.update) {
+                return {
+                    success: false,
+                    error: 'Filter and update fields are required'
+                };
+            }
+            let filter = data.filter;
+            if (filter && filter._id != null && typeof filter._id === 'string' && ObjectId.isValid(filter._id)) {
+                filter = { ...filter, _id: new ObjectId(filter._id) };
+            }
+            const options = (data.options && typeof data.options === 'object') ? data.options : undefined;
+            const result = await collection.updateOne(filter, data.update, options);
+            if (result.matchedCount === 0) {
+                return {
+                    success: false,
+                    error: 'No document matched the filter (update not applied)',
+                    data: result
+                };
+            }
+            return { success: true, data: result };
+        } catch (error) {
+            console.error('Error in updateRecordOperator:', error);
+            return { success: false, error: error.message };
+        }
+    }
+
     // Delete Record
     async deleteRecord(collection, query) {
         try {
@@ -1017,7 +1056,7 @@ class VortexDB {
                 chunks.push(videoBuffer.slice(i, Math.min(i + chunkSize, videoBuffer.length)));
             }
 
-            console.log(`Splitting video into ${chunks.length} chunks...`);
+            devDbLog(`Splitting video into ${chunks.length} chunks`);
 
             // Create video document with metadata
             const videoDoc = {
@@ -1047,7 +1086,7 @@ class VortexDB {
                 }));
 
                 await chunksCollection.insertMany(batch, { ordered: true });
-                console.log(`Uploaded chunks ${i} to ${Math.min(i + batchSize, chunks.length)}`);
+                devDbLog(`Uploaded video chunks batch ending ${Math.min(i + batchSize, chunks.length)}`);
             }
 
             return {
@@ -1108,7 +1147,7 @@ class VortexDB {
                 throw new Error("Video ID is required");
             }
 
-            console.log('Fetching video with ID:', data.id);
+            devDbLog('getVideo lookup', data.id);
 
             // Get video metadata
             const videoMetadata = await collection.findOne({ 
@@ -1117,11 +1156,11 @@ class VortexDB {
             });
 
             if (!videoMetadata) {
-                console.log('Video metadata not found');
+                devDbLog('getVideo metadata missing', data.id);
                 throw new Error("Video not found");
             }
 
-            console.log('Found video metadata:', videoMetadata.filename);
+            devDbLog('getVideo metadata ok', videoMetadata.filename);
 
             // Get chunks from separate collection
             const chunksCollection = collection.s.db.collection('video_chunks');
@@ -1134,18 +1173,17 @@ class VortexDB {
                 .toArray();
 
             if (chunks.length === 0) {
-                console.log('No chunks found for video');
+                devDbLog('getVideo no chunks', data.id);
                 throw new Error("Video chunks not found");
             }
 
-            console.log(`Found ${chunks.length} chunks`);
+            devDbLog(`getVideo chunks=${chunks.length}`);
 
             // Reconstruct video buffer
             const bufferChunks = chunks.map(chunk => chunk.data.buffer);
             const videoBuffer = Buffer.concat(bufferChunks);
             
-            console.log(`Reconstructed video buffer size: ${videoBuffer.length} bytes`);
-            console.log(`Expected size from metadata: ${videoMetadata.size} bytes`);
+            devDbLog('getVideo buffer', { bytes: videoBuffer.length, expected: videoMetadata.size });
 
             // Verify the buffer contains valid video data
             if (videoBuffer.length === 0 || videoBuffer.length !== videoMetadata.size) {
