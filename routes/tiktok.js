@@ -49,6 +49,186 @@ function safeRespond(res, payload) {
     return res.json(payload);
 }
 
+const tiktokCatalog = require('../services/tiktokCatalogService');
+
+function csvEscape(value) {
+    if (value === null || value === undefined) return '';
+    const str = String(value);
+    if (/[",\n\r]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+}
+
+function buildProductLookupQuery(id) {
+    if (/^[a-fA-F0-9]{24}$/.test(id)) {
+        try {
+            const { ObjectId } = require('mongodb');
+            return { $or: [{ id }, { _id: new ObjectId(id) }] };
+        } catch (e) {
+            return { id };
+        }
+    }
+    return { id };
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/tiktok/catalog
+// TikTok Product Catalog data feed (JSON or CSV). Published products only.
+// Query: ?format=json|csv (default json), optional ?key= when TIKTOK_CATALOG_FEED_KEY is set.
+// ---------------------------------------------------------------------------
+router.get('/catalog', async (req, res) => {
+    try {
+        if (!tiktokCatalog.validateCatalogFeedKey(req)) {
+            return res.status(401).json({
+                success: false,
+                error: 'Invalid or missing catalog feed key',
+                code: 'catalog_feed_unauthorized'
+            });
+        }
+
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: { published: true }
+        });
+
+        if (!result.success) {
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to fetch products for TikTok catalog',
+                code: 'catalog_db_error'
+            });
+        }
+
+        let products = result.data || [];
+        if (!Array.isArray(products)) products = products ? [products] : [];
+        products = products.filter((p) => tiktokCatalog.isPublishedForCatalog(p));
+
+        const items = products.map((p) => tiktokCatalog.productToTikTokCatalogItem(p)).filter((row) => row.id);
+
+        const format = String(req.query.format || 'json').toLowerCase();
+        if (format === 'csv') {
+            const headers = [
+                'id',
+                'title',
+                'description',
+                'availability',
+                'condition',
+                'price',
+                'currency',
+                'link',
+                'image_link',
+                'brand',
+                'gtin',
+                'mpn'
+            ];
+            const lines = [headers.join(',')];
+            for (const row of items) {
+                lines.push(
+                    [
+                        row.id,
+                        row.title,
+                        row.description,
+                        row.availability,
+                        row.condition,
+                        row.price,
+                        row.currency,
+                        row.link,
+                        row.image_link,
+                        row.brand,
+                        row.gtin,
+                        row.mpn
+                    ].map(csvEscape).join(',')
+                );
+            }
+            res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+            res.setHeader('Cache-Control', 'public, max-age=300');
+            return res.status(200).send(lines.join('\n'));
+        }
+
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        return res.status(200).json({
+            success: true,
+            generatedAt: new Date().toISOString(),
+            count: items.length,
+            baseUrl: tiktokCatalog.getCatalogBaseUrl(),
+            productPathPrefix: tiktokCatalog.getProductPathPrefix(),
+            contentIdRule:
+                'Use each item.id as the ONLY content_id in ViewContent, AddToCart, and purchase contents — must match MongoDB _id string.',
+            linkRule:
+                'item.link must match the storefront route exactly (including www vs apex if applicable).',
+            products: items
+        });
+    } catch (err) {
+        logger.error('tiktok_catalog_route_failed', { message: err?.message });
+        return res.status(500).json({
+            success: false,
+            error: err?.message || 'catalog generation failed',
+            code: 'catalog_exception'
+        });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/tiktok/product/:id/analytics
+// Lightweight internal metrics: storefront views + catalog row for alignment.
+// Does not replace TikTok Events Manager for conversion by content_id.
+// ---------------------------------------------------------------------------
+router.get('/product/:id/analytics', async (req, res) => {
+    try {
+        const id = String(req.params.id || '').trim();
+        if (!id) {
+            return res.status(400).json({ success: false, error: 'id is required' });
+        }
+
+        const query = buildProductLookupQuery(id);
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: query
+        });
+
+        if (!result.success || !result.data) {
+            return res.status(404).json({ success: false, error: 'Product not found' });
+        }
+
+        const product = Array.isArray(result.data) ? result.data[0] : result.data;
+        if (!tiktokCatalog.isPublishedForCatalog(product)) {
+            return res.status(404).json({ success: false, error: 'Product not found or not published' });
+        }
+
+        const catalogItem = tiktokCatalog.productToTikTokCatalogItem(product);
+        const catalogId = catalogItem.id;
+
+        return res.json({
+            success: true,
+            productId: catalogId,
+            storefrontMetrics: {
+                views: typeof product.views === 'number' ? product.views : null,
+                viewsLast7Days: typeof product.viewsLast7Days === 'number' ? product.viewsLast7Days : null,
+                lastViewedAt: product.lastViewedAt || null
+            },
+            catalog: catalogItem,
+            tiktokPixelContract: {
+                content_id: catalogId,
+                content_ids: [catalogId],
+                page_url_must_match: catalogItem.link,
+                note: 'Fire ViewContent on the product page with this content_id. AddToCart and CompletePayment contents[].content_id must use the same string for catalog matching.'
+            },
+            funnel: {
+                purchasesByOrders: null,
+                note: 'Aggregate purchase counts per SKU require a reporting job or TikTok Events Manager; not computed here to avoid full-order scans.'
+            }
+        });
+    } catch (err) {
+        logger.warn('tiktok_product_analytics_failed', { message: err?.message });
+        return res.status(500).json({ success: false, error: err?.message || 'exception' });
+    }
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/tiktok/track
 // Generic server-side mirror of any standard or custom TikTok event.
@@ -458,6 +638,17 @@ router.get('/health', (req, res) => {
         recovery: {
             sessionLookup: 'webhook auto-recovers ttclid + completePaymentEventId from tiktok_sessions when missing on the order',
             idempotency: 'webhook never re-fires CompletePayment when order.tiktok.completePaymentSentAt is set'
+        },
+        catalog: {
+            endpoints: {
+                catalogJson: 'GET /api/tiktok/catalog?format=json',
+                catalogCsv: 'GET /api/tiktok/catalog?format=csv',
+                productAnalytics: 'GET /api/tiktok/product/:id/analytics'
+            },
+            baseUrl: tiktokCatalog.getCatalogBaseUrl(),
+            productPathPrefix: tiktokCatalog.getProductPathPrefix(),
+            contentIdRule: 'catalog id = MongoDB _id string; Pixel content_id must match exactly',
+            feedKeyRequired: !!process.env.TIKTOK_CATALOG_FEED_KEY
         }
     });
 });
