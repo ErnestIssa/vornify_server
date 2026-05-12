@@ -163,18 +163,45 @@ function buildUserObject(input = {}) {
 }
 
 /**
+ * True when string is a 24-char hex MongoDB ObjectId (Peak Mode catalog `id`).
+ */
+function isMongoObjectIdString(value) {
+    if (value == null) return false;
+    const s = String(value).trim();
+    return /^[a-fA-F0-9]{24}$/.test(s);
+}
+
+/**
+ * Pick the single `content_id` for a cart/order line so it matches the TikTok
+ * catalog primary `id` (Mongo `_id` string). Never prefer a business SKU over
+ * a Mongo id when both are present (legacy payloads used SKU in `productId`).
+ *
+ * Priority:
+ *   1. `mongoProductId` (explicit storefront field)
+ *   2. First among productId / id / variantId that looks like a Mongo ObjectId
+ *   3. Fallback: productId → id → variantId → sku
+ */
+function resolveLineItemContentId(item) {
+    if (!item || typeof item !== 'object') return null;
+    if (item.mongoProductId != null && isMongoObjectIdString(item.mongoProductId)) {
+        return String(item.mongoProductId).trim();
+    }
+    const candidates = [item.productId, item.id, item.variantId];
+    for (const c of candidates) {
+        if (c != null && isMongoObjectIdString(c)) return String(c).trim();
+    }
+    const fallback = item.productId ?? item.id ?? item.variantId ?? item.sku;
+    return fallback != null && String(fallback).trim() !== '' ? String(fallback).trim() : null;
+}
+
+/**
  * Build a TikTok `contents[]` array from Peak Mode cart/order items.
  * Tolerates missing fields — TikTok matches by content_id primarily.
  */
 function buildContentsFromItems(items, { fallbackCurrency } = {}) {
     if (!Array.isArray(items) || items.length === 0) return [];
     return items.map((item) => {
-        const id =
-            item.productId ||
-            item.id ||
-            item.variantId ||
-            item.sku ||
-            null;
+        const id = resolveLineItemContentId(item);
         const price = Number.isFinite(Number(item.price)) ? Number(item.price) : undefined;
         const qty = Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 1;
         const name = item.title || item.name || item.productName || undefined;
@@ -196,10 +223,7 @@ function buildContentsFromItems(items, { fallbackCurrency } = {}) {
 
 function buildContentIdsFromItems(items) {
     if (!Array.isArray(items)) return [];
-    return items
-        .map((i) => i.productId || i.id || i.variantId || i.sku)
-        .filter(Boolean)
-        .map(String);
+    return items.map((i) => resolveLineItemContentId(i)).filter(Boolean).map(String);
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +830,8 @@ module.exports = {
     buildUserObject,
     buildContentsFromItems,
     buildContentIdsFromItems,
+    resolveLineItemContentId,
+    isMongoObjectIdString,
     extractClientContextFromReq,
     generateEventId,
     hashEmail,

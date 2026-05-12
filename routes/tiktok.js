@@ -159,6 +159,8 @@ router.get('/catalog', async (req, res) => {
                 'Use each item.id as the ONLY content_id in ViewContent, AddToCart, and purchase contents — must match MongoDB _id string.',
             linkRule:
                 'item.link must match the storefront route exactly (including www vs apex if applicable).',
+            tikTokCommerceManagerNote:
+                'In TikTok Catalog product detail, "SKU ID" is often your feed `id` (here: MongoDB ObjectId). "Product ID" is TikTok internal — ignore it for Pixel matching. Pixel content_id must equal feed `id` only.',
             products: items
         });
     } catch (err) {
