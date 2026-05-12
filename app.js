@@ -195,6 +195,33 @@ function isLocalhostDevOrigin(origin) {
     }
 }
 
+/** RFC1918 IPv4 hostnames only (e.g. phone hotspot http://172.20.x.x:8085). Opt-in via CORS_ALLOW_PRIVATE_LAN. */
+function isPrivateLanHttpOrigin(origin) {
+    if (!origin || typeof origin !== 'string') return false;
+    try {
+        const u = new URL(origin);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+        const h = u.hostname;
+        const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+        if (!m) return false;
+        const a = Number(m[1]);
+        const b = Number(m[2]);
+        const c = Number(m[3]);
+        const d = Number(m[4]);
+        if ([a, b, c, d].some((x) => x > 255)) return false;
+        if (a === 10) return true;
+        if (a === 172 && b >= 16 && b <= 31) return true;
+        if (a === 192 && b === 168) return true;
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+function allowPrivateLanCors() {
+    return process.env.CORS_ALLOW_PRIVATE_LAN === 'true' || process.env.CORS_ALLOW_PRIVATE_LAN === '1';
+}
+
 const apiCorsOptions = {
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
@@ -202,12 +229,16 @@ const apiCorsOptions = {
         if (isLocalhostDevOrigin(origin)) {
             if (process.env.CORS_ALLOW_LOCALHOST === 'false') {
                 console.warn('[CORS] Localhost origin blocked (CORS_ALLOW_LOCALHOST=false):', origin);
-                return callback(new Error('Not allowed by CORS'));
+                return callback(null, false);
             }
             return callback(null, true);
         }
+        if (isPrivateLanHttpOrigin(origin) && allowPrivateLanCors()) {
+            return callback(null, true);
+        }
         console.warn('[CORS] Blocked origin:', origin);
-        callback(new Error('Not allowed by CORS'));
+        // Deny without throwing — avoids 500 INTERNAL_ERROR in errorResponder for browser CORS failures
+        return callback(null, false);
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     // If-Match + X-Cart-Version: storefront optimistic concurrency / cart versioning (OPTIONS preflight must list them).
@@ -366,14 +397,16 @@ app.get('/api/apple-pay/verify', (req, res) => {
     }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.status(200).json({ 
-        status: 'healthy', 
+// Health check (root + /api for clients that use .../api as API base)
+function sendHealthPayload(req, res) {
+    res.status(200).json({
+        status: 'healthy',
         environment: process.env.NODE_ENV,
         timestamp: new Date().toISOString()
     });
-});
+}
+app.get('/health', sendHealthPayload);
+app.get('/api/health', sendHealthPayload);
 
 // Meta Commerce Manager product feed (public CSV)
 // Accessible at: /meta-feed.csv
@@ -387,6 +420,7 @@ app.get('/', (req, res) => {
         status: 'running',
         endpoints: {
             health: '/health',
+            healthUnderApi: '/api/health',
             api: '/api'
         }
     });
