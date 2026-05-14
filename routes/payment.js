@@ -357,27 +357,64 @@ async function deductInventoryForOrder(order) {
     for (const it of items) {
         const productId = it.productId;
         const qty = it.quantity;
-        const hasVariantId = !!it.variantId;
         const baseProductFilter = buildProductFilterForInventory(productId);
-        let variantElemMatch;
-        if (hasVariantId) {
-            variantElemMatch = { id: it.variantId, quantity: { $gte: qty }, available: { $ne: false } };
-        } else if (it.colorId && it.sizeId) {
-            variantElemMatch = {
-                colorId: it.colorId,
-                sizeId: it.sizeId,
-                quantity: { $gte: qty },
-                available: { $ne: false }
-            };
-        } else {
-            return { success: false, error: 'missing_variant_identity', item: it };
+
+        const readResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'products',
+            command: '--read',
+            data: baseProductFilter
+        });
+        const product = readResult.success ? normalizeReadFirst(readResult.data) : null;
+        if (!product) {
+            return { success: false, error: 'product_not_found', item: it };
         }
 
-        const filter = { ...baseProductFilter, 'inventory.variants': { $elemMatch: variantElemMatch } };
+        const variants = Array.isArray(product.inventory?.variants) ? product.inventory.variants : [];
+        let target = null;
+        if (it.variantId) {
+            target = variants.find((v) => String(v.id) === String(it.variantId));
+        }
+        if (!target && it.colorId && it.sizeId) {
+            const c = String(it.colorId).trim();
+            const s = String(it.sizeId).trim();
+            target = variants.find(
+                (v) => String(v.colorId || '').trim() === c && String(v.sizeId || '').trim() === s
+            );
+        }
+        // One-row inventory (e.g. simple SKU) when the line item did not send both color and size ids
+        if (!target && variants.length === 1 && (!it.colorId || !it.sizeId)) {
+            target = variants[0];
+        }
+        if (!target) {
+            return {
+                success: false,
+                error: 'variant_not_found_for_line_item',
+                item: it,
+                productId,
+                variantCount: variants.length
+            };
+        }
+        if (target.available === false) {
+            return { success: false, error: 'variant_unavailable', item: it };
+        }
+        const stock = Number(target.quantity);
+        if (!Number.isFinite(stock) || stock < qty) {
+            return { success: false, error: 'insufficient_stock', item: it, stock, requested: qty };
+        }
 
-        const arrayFilters = hasVariantId
-            ? [{ 'v.id': it.variantId }]
-            : [{ 'v.colorId': it.colorId, 'v.sizeId': it.sizeId }];
+        const variantRowId = String(target.id);
+        const filter = {
+            ...baseProductFilter,
+            'inventory.variants': {
+                $elemMatch: {
+                    id: variantRowId,
+                    quantity: { $gte: qty },
+                    available: { $ne: false }
+                }
+            }
+        };
+        const arrayFilters = [{ 'v.id': variantRowId }];
 
         const update = {
             $inc: {
