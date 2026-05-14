@@ -2350,8 +2350,6 @@ router.post('/payment-failed', async (req, res) => {
         // Checkout often uses TEMP ids or creates the orders row only after payment — do not 404:
         // the client still needs 200 + checkoutNavigation to reach the payment-failed page.
         if (!order) {
-            logger.warn('payment_failure_no_order_row', { orderId });
-
             let paymentIntentObj = null;
             if (paymentIntentId) {
                 try {
@@ -2360,6 +2358,85 @@ router.post('/payment-failed', async (req, res) => {
                     logger.warn('payment_failure_orphan_pi_retrieve_failed', { message: piErr.message, orderId });
                 }
             }
+
+            // Bank 3DS / issuer UI can look like "approved" while Stripe.js still rejects (e.g. return_url,
+            // double submit). If the PaymentIntent is actually succeeded, finalize now instead of sending the user to failure.
+            if (paymentIntentObj && paymentIntentObj.status === 'succeeded') {
+                logger.info('payment_failed_endpoint_pi_already_succeeded', {
+                    orderId,
+                    paymentIntentId: paymentIntentObj.id
+                });
+                try {
+                    await handlePaymentIntentSucceeded(paymentIntentObj, { hintOrderId: orderId });
+                } catch (finErr) {
+                    logger.error('payment_failed_finalize_from_succeeded_pi_failed', {
+                        message: finErr.message,
+                        orderId,
+                        paymentIntentId: paymentIntentObj.id
+                    });
+                }
+                const refind = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'orders',
+                    command: '--read',
+                    data: { orderId }
+                });
+                let created = normalizeReadFirst(refind.data);
+                const metaOid = paymentIntentObj.metadata && paymentIntentObj.metadata.orderId;
+                if (!created && metaOid && String(metaOid) !== String(orderId)) {
+                    const refind2 = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'orders',
+                        command: '--read',
+                        data: { orderId: String(metaOid) }
+                    });
+                    created = normalizeReadFirst(refind2.data);
+                }
+                if (created) {
+                    const finalOrderId = created.orderId || orderId;
+                    return res.json({
+                        success: true,
+                        message: 'Payment succeeded; order finalized.',
+                        orderId: finalOrderId,
+                        paymentIntentId: paymentIntentObj.id,
+                        orderNotFound: false,
+                        paymentRecovered: true,
+                        paymentStatus: 'succeeded',
+                        shouldRedirectToSuccess: true,
+                        userMessage: 'Your payment completed. Redirecting…',
+                        ...checkoutNavigationExtras({ paymentIntent: paymentIntentObj })
+                    });
+                }
+                logger.warn('payment_failed_succeeded_pi_but_no_order_after_finalize', {
+                    orderId,
+                    paymentIntentId: paymentIntentObj.id,
+                    metadataOrderId: metaOid || null
+                });
+            }
+
+            if (paymentIntentObj && paymentIntentObj.status === 'processing') {
+                logger.info('payment_failed_endpoint_pi_processing', { orderId, paymentIntentId: paymentIntentObj.id });
+                return res.json({
+                    success: true,
+                    message: 'Payment is still processing',
+                    orderId,
+                    paymentIntentId: paymentIntentObj.id,
+                    orderNotFound: true,
+                    paymentStatus: 'processing',
+                    shouldRedirectToSuccess: false,
+                    shouldWaitForWebhook: true,
+                    userMessage: 'Your bank is still processing this payment. Wait a moment, then refresh or check your email—do not pay again yet.',
+                    ...checkoutNavigationExtras({ paymentIntent: paymentIntentObj })
+                });
+            }
+
+            logger.warn('payment_failure_no_order_row', {
+                orderId,
+                stripeStatus: paymentIntentObj?.status ?? null,
+                stripeDeclineMessage: paymentIntentObj?.last_payment_error?.message ?? null,
+                stripeDeclineCode: paymentIntentObj?.last_payment_error?.decline_code ?? null,
+                stripeErrorType: paymentIntentObj?.last_payment_error?.type ?? null
+            });
 
             if (paymentIntentObj) {
                 const paymentFailureService = require('../services/paymentFailureService');
@@ -2385,7 +2462,8 @@ router.post('/payment-failed', async (req, res) => {
                 orderId,
                 paymentIntentId: paymentIntentId || null,
                 orderNotFound: true,
-                ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true })
+                stripePaymentIntentStatus: paymentIntentObj?.status ?? null,
+                ...checkoutNavigationExtras({ shouldRedirectToFailurePage: true, paymentIntent: paymentIntentObj || undefined })
             });
         }
         
