@@ -256,9 +256,11 @@ async function generateUniqueOrderId() {
                     setTimeout(() => reject(new Error('Order ID check timeout')), 5000)
                 )
             ]);
-        
-        // VornifyDB returns single object when query is provided, or error if not found
-        exists = result.success && result.data;
+
+        // Filter read by { orderId } returns an array (possibly []). Empty array is truthy in JS,
+        // so we must use length — otherwise every ID looks "taken" and we always hit fallback.
+        const data = result.success ? result.data : null;
+        exists = Array.isArray(data) ? data.length > 0 : Boolean(data);
         } catch (error) {
             logger.warn('orders_id_generation_check_failed', { orderId, attempt: attempts, message: error.message });
             // If timeout or error, assume ID doesn't exist and use it
