@@ -21,6 +21,22 @@ const { logger } = require('../core/logging/logger');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 const tiktokEvents = require('../services/tiktokEvents');
 
+/** Stripe PaymentIntent metadata: values must be strings; max 50 keys, key length 40, value 500. */
+function sanitizeStripePaymentIntentMetadata(meta) {
+    const out = {};
+    if (!meta || typeof meta !== 'object') return out;
+    for (const [k, v] of Object.entries(meta)) {
+        if (typeof k !== 'string' || !k.trim()) continue;
+        const key = k.trim();
+        if (key.length > 40) continue;
+        if (v === undefined || v === null) continue;
+        const s = typeof v === 'string' ? v : String(v);
+        out[key] = s.length > 500 ? s.slice(0, 500) : s;
+        if (Object.keys(out).length >= 50) break;
+    }
+    return out;
+}
+
 // Validate Stripe configuration at startup (no secret material in logs)
 if (!process.env.STRIPE_SECRET_KEY) {
     console.error('STRIPE_SECRET_KEY is missing from environment variables');
@@ -167,6 +183,50 @@ function normalizeReadFirst(data) {
     if (data == null) return null;
     if (Array.isArray(data)) return data.length ? data[0] : null;
     return data;
+}
+
+/** Stripe idempotency keys: only [A-Za-z0-9_-], max 255 chars (colons etc. cause API errors). */
+function toStripeIdempotencyKey(base, suffix = '') {
+    const s = `${base || ''}${suffix || ''}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return s.length <= 255 ? s : s.slice(0, 255);
+}
+
+/** Stripe metadata values must be strings (max 500 chars each). */
+function coerceStripeMetadataObject(meta) {
+    if (!meta || typeof meta !== 'object') return {};
+    const out = {};
+    for (const [k, v] of Object.entries(meta)) {
+        if (v === undefined || v === null) continue;
+        let s = typeof v === 'string' ? v : String(v);
+        if (s.length > 500) s = s.slice(0, 500);
+        out[k] = s;
+    }
+    return out;
+}
+
+/** Return true if value looks like a Stripe PaymentIntent id (pi_…). */
+function isLikelyStripePaymentIntentId(v) {
+    return typeof v === 'string' && /^pi_[a-zA-Z0-9]+$/.test(v.trim());
+}
+
+/** Normalize orderId from JSON (string or accidental single-element array). */
+function normalizeIncomingOrderId(raw) {
+    if (raw == null) return null;
+    if (Array.isArray(raw)) {
+        const first = raw[0];
+        return first != null && first !== '' ? String(first).trim() : null;
+    }
+    const s = String(raw).trim();
+    return s === '' ? null : s;
+}
+
+/** Real checkout id for DB/Stripe sync (PM + digits only; excludes TEMP and Mongo ids). */
+function stableCheckoutOrderIdForPrepare(orderIdIncoming) {
+    const s = normalizeIncomingOrderId(orderIdIncoming);
+    if (!s || s.toUpperCase().startsWith('TEMP-')) return null;
+    const pm = s.match(/^PM(\d+)$/i);
+    if (pm) return `PM${pm[1]}`;
+    return null;
 }
 
 /** Normalize country to ISO 2-letter code (e.g. "Sweden" -> "SE") for zone lookup. */
@@ -1749,8 +1809,11 @@ router.post('/prepare-confirmation', async (req, res) => {
         requireFields(body, ['userId'], { userMessage: 'Something went wrong. Please refresh and try again.' });
 
         const userId = body.userId;
-        const paymentIntentId = body.paymentIntentId || null;
-        const orderIdIncoming = body.orderId || null;
+        const paymentIntentIdRaw = body.paymentIntentId;
+        const paymentIntentId = isLikelyStripePaymentIntentId(paymentIntentIdRaw)
+            ? String(paymentIntentIdRaw).trim()
+            : null;
+        const orderIdIncoming = normalizeIncomingOrderId(body.orderId);
         const merged = mergePrepareCheckoutInput(body);
         let { shippingAddress, shippingMethod, discountCode } = merged;
 
@@ -1865,13 +1928,17 @@ router.post('/prepare-confirmation', async (req, res) => {
             const updateable = intent.status === 'requires_payment_method' || intent.status === 'requires_confirmation';
             if (updateable) {
                 action = 'updated';
+                // Do not re-send automatic_payment_methods / payment_method_options on update — Stripe
+                // often rejects changing these once the intent exists (Link / wallets), causing 500s here.
                 intent = await stripe.paymentIntents.update(
                     paymentIntentId,
                     {
                         amount: amountInCents,
                         currency: currencyLower,
-                        metadata: { ...intent.metadata, ...baseMetadata },
-                        ...getPaymentIntentSecurityOptions()
+                        metadata: sanitizeStripePaymentIntentMetadata({
+                            ...(intent.metadata || {}),
+                            ...baseMetadata
+                        })
                     },
                     { idempotencyKey }
                 );
@@ -1963,14 +2030,14 @@ router.post('/prepare-confirmation', async (req, res) => {
                     intent = await stripe.paymentIntents.update(
                         intent.id,
                         {
-                            metadata: {
-                                ...intent.metadata,
+                            metadata: sanitizeStripePaymentIntentMetadata({
+                                ...(intent.metadata || {}),
                                 orderId: stableOrderId,
                                 isTemporary: 'false',
                                 updatedAt: new Date().toISOString()
-                            }
+                            })
                         },
-                        { idempotencyKey: `${idempotencyKey}:meta` }
+                        { idempotencyKey: `${idempotencyKey}-pm-meta` }
                     );
                 }
             } catch (e) {
@@ -2004,14 +2071,23 @@ router.post('/prepare-confirmation', async (req, res) => {
     } catch (err) {
         // Keep response shape compatible with existing clients but provide /core-like details
         const msg = err?.message || 'prepare-confirmation failed';
+        const stripeCode = err?.code || err?.raw?.code || null;
         logger.error('prepare_confirmation_failed', {
             requestId: req.requestId,
             idempotencyKey,
             message: msg,
             code: err?.code,
+            stripeCode,
+            stripeType: err?.type || null,
+            stripeStatusCode: err?.statusCode ?? null,
             details: err?.details
         });
-        const httpStatus = err?.httpStatus && Number.isFinite(err.httpStatus) ? err.httpStatus : 500;
+        let httpStatus = 500;
+        if (err instanceof AppError && Number.isFinite(err.httpStatus)) {
+            httpStatus = err.httpStatus;
+        } else if (Number.isFinite(err?.statusCode) && err.statusCode >= 400 && err.statusCode < 600) {
+            httpStatus = err.statusCode;
+        }
         return res.status(httpStatus).json({
             success: false,
             error: msg,
