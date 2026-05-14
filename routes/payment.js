@@ -335,6 +335,21 @@ function groupOrderItemsForDeduction(items) {
     return Array.from(out.values());
 }
 
+/** Same idea as routes/cart.js — products may match on string `id` or Mongo `_id`. */
+function buildProductFilterForInventory(productId) {
+    const pid = String(productId || '').trim();
+    if (!pid) return { id: '__no_such_product__' };
+    if (/^[a-fA-F0-9]{24}$/.test(pid)) {
+        try {
+            const { ObjectId } = require('mongodb');
+            return { $or: [{ id: pid }, { _id: new ObjectId(pid) }] };
+        } catch (e) {
+            return { id: pid };
+        }
+    }
+    return { id: pid };
+}
+
 async function deductInventoryForOrder(order) {
     const items = groupOrderItemsForDeduction(order?.items || []);
     if (items.length === 0) return { success: true, skipped: true };
@@ -343,18 +358,26 @@ async function deductInventoryForOrder(order) {
         const productId = it.productId;
         const qty = it.quantity;
         const hasVariantId = !!it.variantId;
-        const filter = { id: String(productId) };
-        const arrayFilters = [];
-
+        const baseProductFilter = buildProductFilterForInventory(productId);
+        let variantElemMatch;
         if (hasVariantId) {
-            filter['inventory.variants'] = { $elemMatch: { id: it.variantId, quantity: { $gte: qty }, available: { $ne: false } } };
-            arrayFilters.push({ 'v.id': it.variantId });
+            variantElemMatch = { id: it.variantId, quantity: { $gte: qty }, available: { $ne: false } };
         } else if (it.colorId && it.sizeId) {
-            filter['inventory.variants'] = { $elemMatch: { colorId: it.colorId, sizeId: it.sizeId, quantity: { $gte: qty }, available: { $ne: false } } };
-            arrayFilters.push({ 'v.colorId': it.colorId, 'v.sizeId': it.sizeId });
+            variantElemMatch = {
+                colorId: it.colorId,
+                sizeId: it.sizeId,
+                quantity: { $gte: qty },
+                available: { $ne: false }
+            };
         } else {
             return { success: false, error: 'missing_variant_identity', item: it };
         }
+
+        const filter = { ...baseProductFilter, 'inventory.variants': { $elemMatch: variantElemMatch } };
+
+        const arrayFilters = hasVariantId
+            ? [{ 'v.id': it.variantId }]
+            : [{ 'v.colorId': it.colorId, 'v.sizeId': it.sizeId }];
 
         const update = {
             $inc: {
