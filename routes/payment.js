@@ -319,7 +319,9 @@ function groupOrderItemsForDeduction(items) {
     const out = new Map();
     const arr = Array.isArray(items) ? items : [];
     for (const it of arr) {
-        const productId = String(it.id || it.productId || '').trim();
+        // Cart/order lines usually set `id` to a line-item key (e.g. item_…) and `productId` to the catalog id.
+        // Never prefer line-item id over productId or inventory lookup hits nothing → auto-refund.
+        const productId = String(it.productId || it.product_id || it.id || '').trim();
         if (!productId) continue;
         const qty = typeof it.quantity === 'number' && !isNaN(it.quantity) ? it.quantity : Number(it.quantity);
         const q = Number.isFinite(qty) ? Math.max(0, Math.floor(qty)) : 0;
