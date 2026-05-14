@@ -3348,6 +3348,14 @@ router.post('/finalize-after-payment', async (req, res) => {
 async function handleGetPaymentIntentStatus(req, res) {
     try {
         const { paymentIntentId } = req.params;
+        const redirectStatus = String(
+            req.query.redirect_status || req.query.redirectStatus || ''
+        ).toLowerCase();
+        /** Stripe appends this on confirmPayment return_url; Klarna may fail before PI gets last_payment_error. */
+        const failedByReturnUrl =
+            redirectStatus === 'failed' ||
+            redirectStatus === 'canceled' ||
+            redirectStatus === 'cancelled';
 
         const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
@@ -3366,6 +3374,8 @@ async function handleGetPaymentIntentStatus(req, res) {
             paymentIntent.status === 'canceled' ||
             (paymentIntent.status === 'requires_payment_method' && paymentIntent.last_payment_error);
 
+        const shouldFail = failedTerminal || failedByReturnUrl;
+
         res.json({
             success: true,
             paymentIntentId: paymentIntent.id,
@@ -3378,7 +3388,10 @@ async function handleGetPaymentIntentStatus(req, res) {
             canConfirm,
             isProcessing,
             isCompleted,
-            shouldRedirectToPaymentFailedPage: failedTerminal,
+            shouldRedirectToPaymentFailedPage: shouldFail,
+            redirectStatusForwarded: redirectStatus || null,
+            resumeHint:
+                'After Klarna/3DS return, read redirect_status from the return_url query. If failed/canceled, call GET /api/payments/status/:pi?redirect_status=failed (or pass the actual value) so shouldRedirectToPaymentFailedPage is true even when last_payment_error is not yet populated. If redirect_status=succeeded and status is succeeded, POST /api/payments/confirm then thank-you.',
             message: isProcessing
                 ? 'Payment is currently being processed'
                 : isCompleted
@@ -3386,7 +3399,7 @@ async function handleGetPaymentIntentStatus(req, res) {
                     : canConfirm
                         ? 'Payment can be confirmed'
                         : 'Payment status unknown',
-            ...checkoutNavigationExtras({ paymentIntent })
+            ...checkoutNavigationExtras({ paymentIntent, shouldRedirectToFailurePage: shouldFail })
         });
     } catch (error) {
         logger.error('get_payment_status_error', { message: error.message, code: error.code });
