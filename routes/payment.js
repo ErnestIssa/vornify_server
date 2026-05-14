@@ -69,6 +69,64 @@ async function readPendingCheckoutRow(query) {
     return rows[0] || null;
 }
 
+/** All rows matching a simple filter (e.g. customerEmail). */
+async function readAllPendingCheckoutRows(query) {
+    const r = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'pending_checkouts',
+        command: '--read',
+        data: query
+    });
+    if (!r.success || !r.data) return [];
+    return Array.isArray(r.data) ? r.data : [r.data];
+}
+
+async function getCustomerEmailForPaymentIntent(paymentIntent) {
+    const meta = paymentIntent.metadata || {};
+    if (meta.customerEmail && String(meta.customerEmail).trim()) {
+        return String(meta.customerEmail).trim();
+    }
+    const cid = paymentIntent.customer;
+    if (!cid || typeof cid !== 'string') return '';
+    try {
+        const c = await stripe.customers.retrieve(cid);
+        if (c && c.email) return String(c.email).trim();
+    } catch (e) {
+        logger.warn('payment_intent_customer_email_lookup_failed', { message: e.message, customer: cid });
+    }
+    return '';
+}
+
+/**
+ * When prepare-confirmation creates a new PI, metadata may still be TEMP while pending_checkouts
+ * uses PMxxxx. Match by payer email + charged amount (last resort for webhook finalize).
+ */
+async function findPendingCheckoutByEmailAndAmount(paymentIntent) {
+    const rawEmail = await getCustomerEmailForPaymentIntent(paymentIntent);
+    const emailTrim = String(rawEmail).trim();
+    if (!emailTrim) return null;
+    let rows = await readAllPendingCheckoutRows({ customerEmail: emailTrim });
+    if (!rows.length) {
+        rows = await readAllPendingCheckoutRows({ customerEmail: emailTrim.toLowerCase() });
+    }
+    if (!rows.length) return null;
+    const amountCents = paymentIntent.amount;
+    const candidates = rows.filter((p) => {
+        if (!p || !p.orderDraft) return false;
+        if (p.status === 'completed') return false;
+        const t = Number(p.orderDraft.total ?? p.orderDraft.totals?.total ?? 0);
+        if (Number.isNaN(t)) return false;
+        return Math.round(t * 100) === amountCents;
+    });
+    if (!candidates.length) return null;
+    candidates.sort(
+        (a, b) =>
+            new Date(b.updatedAt || b.createdAt || 0).getTime() -
+            new Date(a.updatedAt || a.createdAt || 0).getTime()
+    );
+    return candidates[0];
+}
+
 /**
  * Find draft checkout for a succeeded PaymentIntent.
  * Order: by paymentIntentId (fixes "pay before draft saved" / TEMP metadata mismatch), then hint orderId, then metadata orderId.
@@ -85,6 +143,18 @@ async function findPendingCheckoutForPaymentIntent(paymentIntent, hintOrderId) {
     if (metaOid) {
         p = await readPendingCheckoutRow({ orderId: metaOid });
         if (p?.orderDraft) return p;
+    }
+    const tempLike = !metaOid || String(metaOid).startsWith('TEMP-');
+    if (tempLike) {
+        p = await findPendingCheckoutByEmailAndAmount(paymentIntent);
+        if (p?.orderDraft) {
+            logger.warn('payment_pending_resolved_by_email_amount', {
+                paymentIntentId: piId,
+                pendingOrderId: p.orderId,
+                metadataOrderId: metaOid || null
+            });
+            return p;
+        }
     }
     return null;
 }
@@ -1759,6 +1829,19 @@ router.post('/prepare-confirmation', async (req, res) => {
         const currencyLower = 'sek';
         const amountInCents = Math.round(validatedAmount * 100);
 
+        const customerEmailHint =
+            String(body.customerEmail || body.email || '').trim() ||
+            (body.customer && typeof body.customer === 'object' && body.customer.email
+                ? String(body.customer.email).trim()
+                : '') ||
+            '';
+        const customerNameHint =
+            String(body.customerName || '').trim() ||
+            (body.customer && typeof body.customer === 'object' && body.customer.name
+                ? String(body.customer.name).trim()
+                : '') ||
+            '';
+
         const baseMetadata = {
             // keep an order identifier for thank-you canonical totals (TEMP ok)
             orderId: orderIdIncoming || `TEMP-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -1768,11 +1851,14 @@ router.post('/prepare-confirmation', async (req, res) => {
             vatRate: String(totals.vatRate || 0.25),
             country: String(totals.country || ''),
             total: String(totals.total || validatedAmount || 0),
-            preparedAt: new Date().toISOString()
+            preparedAt: new Date().toISOString(),
+            ...(customerEmailHint ? { customerEmail: customerEmailHint } : {}),
+            ...(customerNameHint ? { customerName: customerNameHint } : {})
         };
 
         let intent = null;
         let action = 'created';
+        const previousPaymentIntentId = paymentIntentId || null;
 
         if (paymentIntentId) {
             intent = await stripe.paymentIntents.retrieve(paymentIntentId);
@@ -1822,6 +1908,78 @@ router.post('/prepare-confirmation', async (req, res) => {
                 userMessage: 'We could not prepare the payment. Please try again.',
                 details: { paymentIntentId: intent.id, status: intent.status }
             });
+        }
+
+        // Replacing a non-updateable intent creates a NEW pi_*; the storefront must switch clientSecret.
+        // Cancel the abandoned intent so the client does not report payment-failed against the wrong id.
+        if (action === 'created' && previousPaymentIntentId && previousPaymentIntentId !== intent.id) {
+            try {
+                const oldInt = await stripe.paymentIntents.retrieve(previousPaymentIntentId);
+                if (oldInt.status === 'requires_payment_method') {
+                    await stripe.paymentIntents.cancel(previousPaymentIntentId);
+                    logger.info('prepare_confirmation_cancelled_stale_intent', {
+                        canceled: previousPaymentIntentId,
+                        replacedBy: intent.id
+                    });
+                }
+            } catch (e) {
+                logger.warn('prepare_confirmation_stale_intent_cancel_failed', {
+                    message: e.message,
+                    paymentIntentId: previousPaymentIntentId
+                });
+            }
+        }
+
+        const stableOrderId =
+            orderIdIncoming && !String(orderIdIncoming).startsWith('TEMP-')
+                ? String(orderIdIncoming).trim()
+                : null;
+        if (stableOrderId) {
+            try {
+                await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'pending_checkouts',
+                    command: '--update',
+                    data: {
+                        filter: { orderId: stableOrderId },
+                        update: {
+                            paymentIntentId: intent.id,
+                            updatedAt: new Date().toISOString()
+                        }
+                    }
+                });
+            } catch (e) {
+                logger.warn('prepare_confirmation_pending_pi_sync_failed', {
+                    message: e.message,
+                    stableOrderId,
+                    paymentIntentId: intent.id
+                });
+            }
+            try {
+                const needMeta =
+                    intent.metadata?.orderId !== stableOrderId ||
+                    intent.metadata?.isTemporary === 'true';
+                if (needMeta) {
+                    intent = await stripe.paymentIntents.update(
+                        intent.id,
+                        {
+                            metadata: {
+                                ...intent.metadata,
+                                orderId: stableOrderId,
+                                isTemporary: 'false',
+                                updatedAt: new Date().toISOString()
+                            }
+                        },
+                        { idempotencyKey: `${idempotencyKey}:meta` }
+                    );
+                }
+            } catch (e) {
+                logger.warn('prepare_confirmation_stripe_orderid_metadata_failed', {
+                    message: e.message,
+                    stableOrderId,
+                    paymentIntentId: intent.id
+                });
+            }
         }
 
         return res.json({
