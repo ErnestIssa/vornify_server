@@ -100,9 +100,11 @@ router.post('/notice-bars', authenticateAdmin, async (req, res) => {
             });
         }
         const draftCheck = noticeBarService.validateNoticeBarContent(
-            noticeBarService.normalizeDraftPayload(
-                body.draft || { text: body.text || body.message || 'New notice', animation: 'scroll_marquee' }
-            )
+            noticeBarService.extractDraftPatchFromBody(body) || {
+                text: body.text || body.message || '',
+                animation: 'scroll_marquee'
+            },
+            { draftAutosave: true }
         );
         if (!draftCheck.ok) {
             return res.status(400).json({
@@ -216,15 +218,18 @@ router.put('/notice-bars/:id/draft', authenticateAdmin, async (req, res) => {
             update.schedule = scheduleCheck.schedule;
         }
 
-        if (body.draft !== undefined) {
+        const draftPatch = noticeBarService.extractDraftPatchFromBody(body);
+        if (Object.keys(draftPatch).length > 0 || body.draft !== undefined) {
             const mergedDraft = noticeBarService.normalizeContent(
                 {
                     ...(doc.draft || noticeBarService.DEFAULT_CONTENT),
-                    ...noticeBarService.normalizeDraftPayload(body.draft)
+                    ...draftPatch
                 },
                 { partial: false }
             );
-            const draftCheck = noticeBarService.validateNoticeBarContent(mergedDraft);
+            const draftCheck = noticeBarService.validateNoticeBarContent(mergedDraft, {
+                draftAutosave: true
+            });
             if (!draftCheck.ok) {
                 return res.status(400).json({
                     success: false,
@@ -267,12 +272,15 @@ router.post('/notice-bars/:id/publish', authenticateAdmin, async (req, res) => {
             return res.status(404).json({ success: false, error: 'Notice bar not found' });
         }
 
-        const draftCheck = noticeBarService.validateNoticeBarContent(doc.draft || {});
+        const draftCheck = noticeBarService.validateNoticeBarContent(doc.draft || {}, {
+            requireForPublish: true
+        });
         if (!draftCheck.ok) {
             return res.status(400).json({
                 success: false,
                 error: draftCheck.error,
-                fields: draftCheck.fields
+                fields: draftCheck.fields,
+                userMessage: 'Add notice text before publishing (1–120 characters).'
             });
         }
 

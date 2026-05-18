@@ -1,0 +1,86 @@
+[
+  {
+    "placement": "hero_below_nav_desktop",
+    "locale": "en",
+    "enabled": true,
+    "priority": 30,
+    "content": {
+      "text": "LAUNCH • 15% OFF YOUR FIRST ORDER • LIMITED TIME",
+      "thinOnDesktop": true,
+      "animation": "scroll_marquee",
+      "locale": "en",
+      "style": {},
+      "media": {}
+    }
+  },
+  {
+    "placement": "hero_below_nav_desktop",
+    "locale": "sv",
+    "enabled": true,
+    "priority": 30,
+    "content": {
+      "text": "LANSERING • 15% RABATT PÅ FÖRSTA ORDERN • BEGRÄNSAD TID",
+      "thinOnDesktop": true,
+      "animation": "scroll_marquee",
+      "locale": "sv",
+      "style": {},
+      "media": {}
+    }
+  },
+  {
+    "placement": "home_below_hero",
+    "locale": "en",
+    "enabled": true,
+    "priority": 20,
+    "content": {
+      "text": "WINTER DROP • NEW ARRIVALS • SHOP NOW",
+      "thinOnDesktop": false,
+      "animation": "scroll_marquee",
+      "locale": "en",
+      "style": {},
+      "media": {}
+    }
+  },
+  {
+    "placement": "home_below_hero",
+    "locale": "sv",
+    "enabled": true,
+    "priority": 20,
+    "content": {
+      "text": "VINTERDROP • NYA PRODUKTER • HANDLA NU",
+      "thinOnDesktop": false,
+      "animation": "scroll_marquee",
+      "locale": "sv",
+      "style": {},
+      "media": {}
+    }
+  },
+  {
+    "placement": "home_above_social",
+    "locale": "en",
+    "enabled": true,
+    "priority": 10,
+    "content": {
+      "text": "FOLLOW US ON INSTAGRAM & TIKTOK • JOIN THE COMMUNITY",
+      "thinOnDesktop": false,
+      "animation": "scroll_marquee",
+      "locale": "en",
+      "style": {},
+      "media": {}
+    }
+  },
+  {
+    "placement": "home_above_social",
+    "locale": "sv",
+    "enabled": true,
+    "priority": 10,
+    "content": {
+      "text": "FÖLJ OSS PÅ INSTAGRAM & TIKTOK • BLI EN DEL AV GEMENSKAPEN",
+      "thinOnDesktop": false,
+      "animation": "scroll_marquee",
+      "locale": "sv",
+      "style": {},
+      "media": {}
+    }
+  }
+]

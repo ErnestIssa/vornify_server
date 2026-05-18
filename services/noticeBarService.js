@@ -129,17 +129,23 @@ function normalizeContent(input, { partial = false } = {}) {
 }
 
 /**
+ * @param {object} opts
+ * @param {boolean} [opts.partial] - only validate fields present in payload
+ * @param {boolean} [opts.draftAutosave] - allow empty text/animation while editing (publish still strict)
+ * @param {boolean} [opts.requireForPublish] - text + animation required (publish gate)
  * @returns {{ ok: true, content: object } | { ok: false, error: string, fields?: Record<string, string> }}
  */
-function validateNoticeBarContent(content, { partial = false } = {}) {
+function validateNoticeBarContent(content, { partial = false, draftAutosave = false, requireForPublish = false } = {}) {
     const fields = {};
     if (!content || typeof content !== 'object') {
         return { ok: false, error: 'Invalid content', fields: { draft: 'Content object required' } };
     }
 
-    if (!partial || content.text !== undefined) {
+    const strict = requireForPublish || (!partial && !draftAutosave);
+
+    if (content.text !== undefined || strict) {
         const text = content.text !== undefined ? String(content.text).trim() : '';
-        if (!partial && (!text || text.length < TEXT_MIN)) {
+        if (strict && (!text || text.length < TEXT_MIN)) {
             fields.text = `Text is required (${TEXT_MIN}–${TEXT_MAX} characters)`;
         } else if (text.length > TEXT_MAX) {
             fields.text = `Text must be at most ${TEXT_MAX} characters`;
@@ -148,9 +154,9 @@ function validateNoticeBarContent(content, { partial = false } = {}) {
         }
     }
 
-    if (!partial || content.animation !== undefined) {
+    if (content.animation !== undefined || strict) {
         const anim = content.animation != null ? String(content.animation) : '';
-        if (!partial && !anim) {
+        if (strict && !anim) {
             fields.animation = 'Animation is required';
         } else if (anim && !NOTICE_BAR_ANIMATIONS.includes(anim)) {
             fields.animation = `Must be one of: ${NOTICE_BAR_ANIMATIONS.join(', ')}`;
@@ -297,6 +303,20 @@ function toPublicItem(doc) {
     };
 }
 
+/** Pull draft fields from body.draft or top-level editor fields (message, text, style, …). */
+function extractDraftPatchFromBody(body) {
+    if (!body || typeof body !== 'object') return {};
+    const metaKeys = new Set(['enabled', 'priority', 'placement', 'schedule', 'id', 'version', 'publishedAt']);
+    if (body.draft && typeof body.draft === 'object') {
+        return normalizeDraftPayload(body.draft);
+    }
+    const patch = {};
+    for (const [key, value] of Object.entries(body)) {
+        if (!metaKeys.has(key)) patch[key] = value;
+    }
+    return normalizeDraftPayload(patch);
+}
+
 function newDocumentDefaults(body = {}, adminUsername = 'system') {
     const now = new Date().toISOString();
     const draftInput = normalizeDraftPayload(
@@ -334,6 +354,7 @@ module.exports = {
     normalizeId,
     normalizePlacement,
     normalizeDraftPayload,
+    extractDraftPatchFromBody,
     contentForAdminResponse,
     buildProductLookupQuery,
     normalizeContent,
