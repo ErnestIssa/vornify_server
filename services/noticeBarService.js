@@ -26,6 +26,39 @@ function normalizePlacement(placement) {
 
 const NOTICE_BAR_ANIMATIONS = ['scroll_marquee', 'fade', 'slide_in', 'none'];
 
+/** Admin UI labels → canonical animation enum */
+const ANIMATION_ALIASES = {
+    scroll_marquee: 'scroll_marquee',
+    marquee: 'scroll_marquee',
+    scroll: 'scroll_marquee',
+    'scroll-left': 'scroll_marquee',
+    'scroll_left': 'scroll_marquee',
+    'scroll-marquee': 'scroll_marquee',
+    'marquee_scroll': 'scroll_marquee',
+    fade: 'fade',
+    slide_in: 'slide_in',
+    slide: 'slide_in',
+    'slide-in': 'slide_in',
+    scrollmarquee: 'scroll_marquee',
+    none: 'none',
+    static: 'none',
+    off: 'none',
+    disabled: 'none'
+};
+
+function normalizeAnimation(value, { allowDefault = true } = {}) {
+    if (value == null || value === '') {
+        return allowDefault ? 'scroll_marquee' : '';
+    }
+    if (typeof value !== 'string' && typeof value !== 'number') {
+        return allowDefault ? 'scroll_marquee' : '';
+    }
+    const key = String(value).trim().toLowerCase().replace(/\s+/g, '_');
+    if (ANIMATION_ALIASES[key]) return ANIMATION_ALIASES[key];
+    if (NOTICE_BAR_ANIMATIONS.includes(key)) return key;
+    return allowDefault ? 'scroll_marquee' : key;
+}
+
 const TEXT_MAX = 120;
 const TEXT_MIN = 1;
 const MAX_BULLET_SEGMENTS = 4;
@@ -90,6 +123,9 @@ function normalizeDraftPayload(input) {
         delete d.backgroundUrl;
         delete d.imageUrl;
     }
+    if (d.animation !== undefined) {
+        d.animation = normalizeAnimation(d.animation);
+    }
     return d;
 }
 
@@ -114,7 +150,9 @@ function normalizeContent(input, { partial = false } = {}) {
     };
     if (normalized.text !== undefined) out.text = String(normalized.text).trim();
     if (normalized.thinOnDesktop !== undefined) out.thinOnDesktop = Boolean(normalized.thinOnDesktop);
-    if (normalized.animation !== undefined) out.animation = String(normalized.animation).trim();
+    if (normalized.animation !== undefined) {
+        out.animation = normalizeAnimation(normalized.animation);
+    }
     if (normalized.locale !== undefined) {
         const loc = normalized.locale;
         out.locale = loc === 'en' || loc === 'sv' ? loc : null;
@@ -155,7 +193,8 @@ function validateNoticeBarContent(content, { partial = false, draftAutosave = fa
     }
 
     if (content.animation !== undefined || strict) {
-        const anim = content.animation != null ? String(content.animation) : '';
+        const rawAnim = content.animation != null ? String(content.animation) : '';
+        const anim = normalizeAnimation(rawAnim, { allowDefault: !strict });
         if (strict && !anim) {
             fields.animation = 'Animation is required';
         } else if (anim && !NOTICE_BAR_ANIMATIONS.includes(anim)) {
@@ -349,10 +388,12 @@ function newDocumentDefaults(body = {}, adminUsername = 'system') {
 module.exports = {
     NOTICE_BAR_PLACEMENTS,
     PLACEMENT_ALIASES,
+    ANIMATION_ALIASES,
     NOTICE_BAR_ANIMATIONS,
     DEFAULT_CONTENT,
     normalizeId,
     normalizePlacement,
+    normalizeAnimation,
     normalizeDraftPayload,
     extractDraftPatchFromBody,
     contentForAdminResponse,

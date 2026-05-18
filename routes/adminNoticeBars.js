@@ -66,7 +66,9 @@ router.get('/notice-bars', authenticateAdmin, async (req, res) => {
             success: true,
             items,
             placementOptions: noticeBarService.NOTICE_BAR_PLACEMENTS,
-            placementAliases: noticeBarService.PLACEMENT_ALIASES
+            placementAliases: noticeBarService.PLACEMENT_ALIASES,
+            animationOptions: noticeBarService.NOTICE_BAR_ANIMATIONS,
+            animationAliases: noticeBarService.ANIMATION_ALIASES
         });
     } catch (err) {
         console.error('[NOTICE BARS] list error:', err);
