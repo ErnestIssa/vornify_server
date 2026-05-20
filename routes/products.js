@@ -12,6 +12,7 @@ const currencySelectionService = require('../services/currencySelectionService')
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 const { logger } = require('../core/logging/logger');
+const featuredProduct = require('../utils/featuredProduct');
 
 const STORE_BASE_CURRENCY = 'SEK';
 const optionalAuthenticateAdmin = authenticateAdmin.optionalAuthenticateAdmin || (async (req, res, next) => { req.isAdminRequest = false; next(); });
@@ -759,9 +760,9 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
             query.category = category;
         }
         
-        // Add featured filter if provided
-        if (featured === 'true') {
-            query.featured = true;
+        const featuredOnly = featuredProduct.parseFeaturedQueryParam(featured);
+        if (featuredOnly) {
+            Object.assign(query, featuredProduct.buildFeaturedMongoClause());
         }
         
         const result = await db.executeOperation({
@@ -789,6 +790,10 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 });
             }
             
+            if (featuredOnly) {
+                products = products.filter(featuredProduct.isFeaturedProduct);
+            }
+
             // Apply search filter if provided (case-insensitive)
             if (search) {
                 const searchLower = search.toLowerCase();
@@ -920,6 +925,7 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 success: true,
                 data: productsWithSEO,
                 count: productsWithSEO.length,
+                featuredOnly: featuredOnly || undefined,
                 language: language,
                 currency: displayCurrency || STORE_BASE_CURRENCY,
                 currencySymbol: currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY)
@@ -1047,6 +1053,13 @@ router.post('/', authenticateAdmin, async (req, res) => {
         productData.active = productData.active !== undefined ? productData.active : true;
         productData.featured = productData.featured !== undefined ? productData.featured : false;
         productData.published = productData.published !== undefined ? productData.published : false;
+        if (!Array.isArray(productData.tags)) {
+            productData.tags = productData.tags ? [productData.tags] : [];
+        }
+        Object.assign(
+            productData,
+            featuredProduct.applyFeaturedSyncToPayload(productData)
+        );
         if (productData.warehouseIds !== undefined) {
             productData.warehouseIds = Array.isArray(productData.warehouseIds) ? productData.warehouseIds : (productData.warehouseIds ? [productData.warehouseIds] : []);
         }
@@ -1222,6 +1235,17 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
         // Ensure published is persisted when admin sends it (list badge toggle or edit form)
         if (hasPublishedInBody) {
             updateData.published = publishedFromRequest;
+        }
+
+        if (
+            updateData.tags !== undefined ||
+            updateData.featured !== undefined ||
+            updateData.isFeatured !== undefined
+        ) {
+            Object.assign(
+                updateData,
+                featuredProduct.applyFeaturedSyncToPayload(updateData, existingProduct)
+            );
         }
         
         const result = await db.executeOperation({
