@@ -13,6 +13,7 @@ const authenticateAdmin = require('../middleware/authenticateAdmin');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 const { logger } = require('../core/logging/logger');
 const featuredProduct = require('../utils/featuredProduct');
+const productFilterService = require('../services/productFilterService');
 
 const STORE_BASE_CURRENCY = 'SEK';
 const optionalAuthenticateAdmin = authenticateAdmin.optionalAuthenticateAdmin || (async (req, res, next) => { req.isAdminRequest = false; next(); });
@@ -453,6 +454,119 @@ router.get('/sitemap', async (req, res) => {
     }
 });
 
+/**
+ * Load published (or all for admin) catalog, optionally featured-only.
+ */
+async function loadCatalogForFilters(req, { featuredOnly }) {
+    let query = {};
+    if (!req.isAdminRequest) {
+        query.published = true;
+    }
+    if (featuredOnly) {
+        Object.assign(query, featuredProduct.buildFeaturedMongoClause());
+    }
+    const result = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'products',
+        command: '--read',
+        data: query
+    });
+    if (!result.success) return { ok: false, error: result.error };
+    let products = result.data || [];
+    if (!Array.isArray(products)) products = products ? [products] : [];
+    if (!req.isAdminRequest) {
+        products = products.filter(isPublishedForStorefront);
+    }
+    if (featuredOnly) {
+        products = products.filter(featuredProduct.isFeaturedProduct);
+    }
+    products = products.filter((p) => p.active !== false);
+    return { ok: true, products };
+}
+
+async function getPriceContextFromRequest(req) {
+    const rateCache = {};
+    const { vatRate } = vatService.getCountryAndVatFromRequest(req);
+    const { currency: displayCurrency } = currencySelectionService.getDisplayCurrencyFromRequest(req);
+    let sekToDisplayRate = 1;
+    if (displayCurrency && displayCurrency !== STORE_BASE_CURRENCY) {
+        try {
+            sekToDisplayRate = await currencyService.getExchangeRate(
+                STORE_BASE_CURRENCY,
+                displayCurrency,
+                rateCache
+            );
+        } catch (e) {
+            devWarn('Product filter: currency rate fetch failed, using SEK', e.message);
+        }
+    }
+    return { vatRate, sekToDisplayRate, displayCurrency: displayCurrency || STORE_BASE_CURRENCY };
+}
+
+function hasActiveProductFilters(filters) {
+    return (
+        (filters.categories && filters.categories.length > 0) ||
+        (filters.types && filters.types.length > 0) ||
+        (filters.sizes && filters.sizes.length > 0) ||
+        (filters.colors && filters.colors.length > 0) ||
+        (filters.tags && filters.tags.length > 0) ||
+        filters.priceMin != null ||
+        filters.priceMax != null ||
+        Boolean(filters.search) ||
+        Boolean(filters.sort)
+    );
+}
+
+// GET /api/products/filter-options — facet lists for filter modal
+router.get('/filter-options', optionalAuthenticateAdmin, async (req, res) => {
+    try {
+        const featuredOnly = featuredProduct.parseFeaturedQueryParam(req.query.featured);
+        const loaded = await loadCatalogForFilters(req, { featuredOnly });
+        if (!loaded.ok) {
+            return res.status(500).json({ success: false, error: loaded.error || 'Failed to load catalog' });
+        }
+        const listable = loaded.products.filter(productFilterService.isListableOnStorefront);
+        const priceCtx = await getPriceContextFromRequest(req);
+        const facets = productFilterService.extractFacets(listable, priceCtx);
+        const language = translationService.getLanguageFromRequest(req);
+
+        res.json({
+            success: true,
+            featuredOnly: featuredOnly || undefined,
+            facets,
+            language,
+            currency: priceCtx.displayCurrency
+        });
+    } catch (err) {
+        logger.error('products_filter_options_error', { message: err.message });
+        res.status(500).json({ success: false, error: 'Failed to load filter options' });
+    }
+});
+
+// GET /api/products/count — live match count for filter modal
+router.get('/count', optionalAuthenticateAdmin, async (req, res) => {
+    try {
+        const featuredOnly = featuredProduct.parseFeaturedQueryParam(req.query.featured);
+        const filters = productFilterService.parseFilterQuery(req.query);
+        const loaded = await loadCatalogForFilters(req, { featuredOnly });
+        if (!loaded.ok) {
+            return res.status(500).json({ success: false, error: loaded.error || 'Failed to load catalog' });
+        }
+        const priceCtx = await getPriceContextFromRequest(req);
+        const matched = productFilterService.filterAndSortProducts(loaded.products, filters, priceCtx);
+
+        res.json({
+            success: true,
+            count: matched.length,
+            featuredOnly: featuredOnly || undefined,
+            appliedFilters: productFilterService.buildAppliedFiltersResponse(filters)
+        });
+    } catch (err) {
+        logger.error('products_count_error', { message: err.message });
+        res.status(500).json({ success: false, error: 'Failed to count products' });
+    }
+});
+
 // GET /api/products/:id - Get product by ID with complete inventory data
 router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
     try {
@@ -742,6 +856,10 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
 router.get('/', optionalAuthenticateAdmin, async (req, res) => {
     try {
         const { category, featured, limit, search } = req.query;
+        const listFilters = productFilterService.parseFilterQuery(req.query);
+        if (search && !listFilters.search) {
+            listFilters.search = String(search).trim();
+        }
         
         // Get requested language from query parameter
         const language = translationService.getLanguageFromRequest(req);
@@ -754,9 +872,14 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
             query.published = true;
         }
         
-        // Add category filter if provided
-        // Note: We'll do case-insensitive matching in application layer for better compatibility
-        if (category) {
+        // Single category in DB query; multi-category filtered in application layer
+        const categoryList =
+            listFilters.categories.length > 0
+                ? listFilters.categories
+                : category
+                  ? [productFilterService.toFacetId(category)]
+                  : [];
+        if (category && !String(category).includes(',') && listFilters.categories.length === 0) {
             query.category = category;
         }
         
@@ -781,10 +904,13 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 products = Array.isArray(products) ? products : (products ? [products] : []);
             }
             
-            // Apply case-insensitive category filter if provided
-            if (category) {
+            if (categoryList.length > 0) {
+                products = products.filter((product) =>
+                    categoryList.includes(productFilterService.toFacetId(product.category))
+                );
+            } else if (category) {
                 const categoryLower = category.toLowerCase();
-                products = products.filter(product => {
+                products = products.filter((product) => {
                     const productCategory = (product.category || '').toLowerCase();
                     return productCategory === categoryLower;
                 });
@@ -794,24 +920,10 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 products = products.filter(featuredProduct.isFeaturedProduct);
             }
 
-            // Apply search filter if provided (case-insensitive)
-            if (search) {
-                const searchLower = search.toLowerCase();
-                products = products.filter(product => {
-                    const name = (product.name || '').toLowerCase();
-                    const description = (product.description || '').toLowerCase();
-                    const productCategory = (product.category || '').toLowerCase();
-                    const productClasses = Array.isArray(product.productClasses) 
-                        ? product.productClasses.map(c => c.toLowerCase()).join(' ')
-                        : '';
-                    
-                    return name.includes(searchLower) ||
-                           description.includes(searchLower) ||
-                           productCategory.includes(searchLower) ||
-                           productClasses.includes(searchLower);
-                });
+            if (featuredOnly || hasActiveProductFilters(listFilters)) {
+                products = products.filter(productFilterService.isListableOnStorefront);
             }
-            
+
             // Apply limit if provided
             if (limit && parseInt(limit) > 0) {
                 products = products.slice(0, parseInt(limit));
@@ -828,6 +940,7 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                     devWarn('Product list: currency rate fetch failed, using SEK', e.message);
                 }
             }
+            const priceCtx = { vatRate, sekToDisplayRate, displayCurrency: displayCurrency || STORE_BASE_CURRENCY };
 
             // Process inventory data for each product; prices stored in SEK, converted to display currency
             products = await Promise.all(products.map(async (product) => {
@@ -912,7 +1025,7 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
             }
             
             // Add SEO fields to each product (additive only)
-            const productsWithSEO = products.map(product => {
+            let productsWithSEO = products.map(product => {
                 const reviewStats = reviewStatsMap[product.id] || null;
                 const seoFields = seoHelper.getProductSEOFields(product, reviewStats);
                 return {
@@ -920,12 +1033,25 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                     ...seoFields
                 };
             });
+
+            if (hasActiveProductFilters(listFilters)) {
+                productsWithSEO = productsWithSEO.filter((p) =>
+                    productFilterService.productMatchesFilters(p, listFilters, priceCtx)
+                );
+            }
+            if (listFilters.sort) {
+                productsWithSEO = productFilterService.sortProducts(productsWithSEO, listFilters.sort);
+            }
             
             res.json({
                 success: true,
                 data: productsWithSEO,
                 count: productsWithSEO.length,
+                total: productsWithSEO.length,
                 featuredOnly: featuredOnly || undefined,
+                appliedFilters: hasActiveProductFilters(listFilters)
+                    ? productFilterService.buildAppliedFiltersResponse(listFilters)
+                    : undefined,
                 language: language,
                 currency: displayCurrency || STORE_BASE_CURRENCY,
                 currencySymbol: currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY)
