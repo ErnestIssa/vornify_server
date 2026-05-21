@@ -77,6 +77,53 @@ function toDisplayLabel(value) {
 }
 
 /**
+ * One filter chip per logical size/color across the catalog.
+ * Merges by normalized display name (e.g. id "Medium" + id "M" + name "M" → one "m").
+ */
+function catalogFacetMergeKey(entry) {
+    const nameKey = toFacetId(entry.name);
+    if (nameKey) return nameKey;
+    return toFacetId(entry.id) || entry.id;
+}
+
+function mergeSizeFacet(map, entry) {
+    const key = catalogFacetMergeKey(entry);
+    if (!key) return;
+    const name = String(entry.name || entry.id || key).trim();
+    if (!map.has(key)) {
+        map.set(key, { id: key, name });
+        return;
+    }
+    const cur = map.get(key);
+    if (name.length > (cur.name || '').length) cur.name = name;
+}
+
+function mergeColorFacet(map, entry) {
+    const key = catalogFacetMergeKey(entry);
+    if (!key) return;
+    const name = String(entry.name || entry.id || key).trim();
+    const hex = entry.hex || '#000000';
+    if (!map.has(key)) {
+        map.set(key, { id: key, name, hex });
+        return;
+    }
+    const cur = map.get(key);
+    if (name.length > (cur.name || '').length) cur.name = name;
+    if (cur.hex === '#000000' && hex !== '#000000') cur.hex = hex;
+}
+
+/** Dedupe facet arrays by id (safety net for client-side merges). */
+function dedupeFacetList(items) {
+    const map = new Map();
+    for (const item of items || []) {
+        if (!item || item.id == null || item.id === '') continue;
+        const key = toFacetId(item.id);
+        if (!map.has(key)) map.set(key, item);
+    }
+    return [...map.values()];
+}
+
+/**
  * @param {object} query — req.query
  */
 function parseFilterQuery(query = {}) {
@@ -439,14 +486,10 @@ function extractFacets(products, ctx) {
         }
 
         for (const entry of collectProductSizeEntries(product).values()) {
-            sizes.set(entry.id, { id: entry.id, name: entry.name });
+            mergeSizeFacet(sizes, entry);
         }
         for (const entry of collectProductColorEntries(product).values()) {
-            colors.set(entry.id, {
-                id: entry.id,
-                name: entry.name,
-                hex: entry.hex
-            });
+            mergeColorFacet(colors, entry);
         }
 
         for (const tagId of getProductTagIds(product)) {
@@ -461,11 +504,11 @@ function extractFacets(products, ctx) {
     const sortByLabel = (a, b) => (a.label || a.name || '').localeCompare(b.label || b.name || '');
 
     return {
-        categories: [...categories.values()].sort(sortByLabel),
-        types: [...types.values()].sort(sortByLabel),
-        sizes: [...sizes.values()].sort(sortByLabel),
-        colors: [...colors.values()].sort(sortByLabel),
-        tags: [...tags.values()].sort(sortByLabel),
+        categories: dedupeFacetList([...categories.values()]).sort(sortByLabel),
+        types: dedupeFacetList([...types.values()]).sort(sortByLabel),
+        sizes: dedupeFacetList([...sizes.values()]).sort(sortByLabel),
+        colors: dedupeFacetList([...colors.values()]).sort(sortByLabel),
+        tags: dedupeFacetList([...tags.values()]).sort(sortByLabel),
         priceRange: {
             min: priceMin != null ? Math.floor(priceMin) : 0,
             max: priceMax != null ? Math.ceil(priceMax) : 0,
@@ -512,6 +555,8 @@ module.exports = {
     productMatchesSizeFilter,
     collectProductColorEntries,
     collectProductSizeEntries,
+    catalogFacetMergeKey,
+    dedupeFacetList,
     sortProducts,
     extractFacets,
     filterAndSortProducts,

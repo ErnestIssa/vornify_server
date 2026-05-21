@@ -46,3 +46,26 @@ console.log('facet sizes', sizeIds);
 if (!ok || !colorIds.includes('midnight-black') || !sizeIds.includes('m')) {
     process.exitCode = 1;
 }
+
+const p2 = normalizeProductForCatalog({
+    id: 'p2',
+    published: true,
+    active: true,
+    price: 50,
+    inventory: {
+        colors: [{ id: 'white', name: 'White', hex: '#fff' }],
+        sizes: [{ id: 'Medium', name: 'M' }],
+        variants: [{ colorId: 'white', sizeId: 'Medium', quantity: 1 }]
+    }
+});
+const multiFacets = productFilterService.extractFacets([product, p2], {
+    displayCurrency: 'SEK',
+    vatRate: 0.25
+});
+const mCount = multiFacets.sizes.filter((s) => s.name === 'M' || s.id === 'm').length;
+if (mCount !== 1) {
+    console.error('FAIL expected one M size facet, got', multiFacets.sizes);
+    process.exitCode = 1;
+} else {
+    console.log('dedupe OK: one M facet for M + Medium ids');
+}
