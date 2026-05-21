@@ -60,6 +60,13 @@ function etagForBody(body) {
     return `"${hash}"`;
 }
 
+/** Send JSON without going through storefrontCache's wrapped res.json (avoids infinite recursion). */
+function sendJson(res, body) {
+    const fn = res._jsonWithoutCache;
+    if (fn) return fn.call(res, body);
+    return res.json(body);
+}
+
 function pruneIfNeeded() {
     if (store.size <= MAX_ENTRIES) return;
     const now = Date.now();
@@ -115,7 +122,8 @@ function tryHit(req, res, namespace) {
         return true;
     }
 
-    res.status(200).json(entry.body);
+    res.status(200);
+    sendJson(res, entry.body);
     return true;
 }
 
@@ -125,7 +133,7 @@ function tryHit(req, res, namespace) {
 function json(res, req, body, namespace, ttlSec) {
     if (shouldBypass(req)) {
         res.set('X-Cache', 'BYPASS');
-        return res.json(body);
+        return sendJson(res, body);
     }
 
     const cacheKey = buildCacheKey(req, namespace);
@@ -139,7 +147,7 @@ function json(res, req, body, namespace, ttlSec) {
         return res.status(304).end();
     }
 
-    return res.json(body);
+    return sendJson(res, body);
 }
 
 /** Invalidate all namespaces whose store key starts with any prefix (e.g. "products:") */

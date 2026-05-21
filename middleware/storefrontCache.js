@@ -118,13 +118,17 @@ function storefrontCacheMiddleware(req, res, next) {
         return next();
     }
 
+    if (!res._jsonWithoutCache) {
+        res._jsonWithoutCache = res.json.bind(res);
+    }
+
     if (responseCache.tryHit(req, res, rule.namespace)) {
         return;
     }
 
     req._responseCache = rule;
 
-    const originalJson = res.json.bind(res);
+    const originalJson = res._jsonWithoutCache;
     res.json = function cacheAwareJson(body) {
         if (
             req._responseCache &&

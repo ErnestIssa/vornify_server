@@ -413,7 +413,7 @@ function sendHealthPayload(req, res) {
         timestamp: new Date().toISOString()
     });
 }
-app.get('/health', sendHealthPayload);
+app.get('/health', cors(apiCorsOptions), sendHealthPayload);
 app.get('/api/health', sendHealthPayload);
 
 // Meta Commerce Manager product feed (public CSV)
