@@ -43,6 +43,8 @@ const metaFeedRoutes = require('./routes/metaFeed');
 const vatRoutes = require('./routes/vat');
 const tiktokRoutes = require('./routes/tiktok');
 const errorHandler = require('./middleware/errorHandler');
+const { optionalAuthenticateAdmin } = require('./middleware/authenticateAdmin');
+const storefrontCacheMiddleware = require('./middleware/storefrontCache');
 const abandonedCartService = require('./services/abandonedCartService');
 const abandonedCheckoutService = require('./services/abandonedCheckoutService');
 const paymentFailureService = require('./services/paymentFailureService');
@@ -255,7 +257,7 @@ const apiCorsOptions = {
         'X-Cart-Version',
         'Idempotency-Key'
     ],
-    exposedHeaders: ['X-Cart-Version', 'X-Request-Id'],
+    exposedHeaders: ['X-Cart-Version', 'X-Request-Id', 'X-Cache', 'ETag'],
     credentials: true,
     maxAge: 86400,
     preflightContinue: false,
@@ -263,6 +265,10 @@ const apiCorsOptions = {
 };
 
 app.use('/api', cors(apiCorsOptions));
+
+// Storefront performance: optional admin detection + site-wide GET response cache (ISR-style)
+app.use('/api', optionalAuthenticateAdmin);
+app.use('/api', storefrontCacheMiddleware);
 
 // Increase payload size limit for video uploads (set to 200MB)
 app.use(express.json({ limit: '200mb' }));

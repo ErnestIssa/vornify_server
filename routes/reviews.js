@@ -3,6 +3,7 @@ const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 
 const db = getDBInstance();
+const cacheInvalidation = require('../services/cacheInvalidation');
 
 // Helper function to generate unique Review ID
 async function generateUniqueReviewId() {
@@ -759,6 +760,7 @@ router.post('/', async (req, res) => {
                 // Don't fail the request if email fails
             }
             
+            cacheInvalidation.onReviewsChanged();
             res.status(201).json({
                 success: true,
                 message: 'Review received! Our team will verify it before publishing.',
@@ -816,6 +818,7 @@ router.put('/:id', async (req, res) => {
         });
         
         if (result.success) {
+            cacheInvalidation.onReviewsChanged();
             res.json({
                 success: true,
                 message: 'Review updated successfully',
@@ -858,6 +861,7 @@ router.post('/:id/approve', async (req, res) => {
         });
         
         if (result.success) {
+            cacheInvalidation.onReviewsChanged();
             const review = await fetchReviewById(id);
             res.json({
                 success: true,
@@ -901,6 +905,7 @@ router.post('/:id/reject', async (req, res) => {
         });
         
         if (result.success) {
+            cacheInvalidation.onReviewsChanged();
             const review = await fetchReviewById(id);
             res.json({
                 success: true,
@@ -949,6 +954,7 @@ router.post('/:id/flag', async (req, res) => {
         });
         
         if (result.success) {
+            cacheInvalidation.onReviewsChanged();
             const review = await fetchReviewById(id);
             res.json({
                 success: true,
@@ -998,6 +1004,7 @@ router.post('/:id/response', async (req, res) => {
         });
         
         if (result.success) {
+            cacheInvalidation.onReviewsChanged();
             const review = await fetchReviewById(id);
             res.json({
                 success: true,
@@ -1043,6 +1050,7 @@ router.put('/:id/helpful', async (req, res) => {
         });
         
         if (result.success) {
+            cacheInvalidation.onReviewsChanged();
             res.json({
                 success: true,
                 message: 'Helpful votes updated successfully',
@@ -1073,6 +1081,7 @@ router.delete('/:id', async (req, res) => {
         });
         
         if (result.success) {
+            cacheInvalidation.onReviewsChanged();
             res.json({
                 success: true,
                 message: 'Review deleted successfully'

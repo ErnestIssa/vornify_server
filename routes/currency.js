@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const currencyService = require('../services/currencyService');
 const currencySelectionService = require('../services/currencySelectionService');
+const responseCache = require('../core/cache/responseCache');
 
 /**
  * GET /api/currency/display
@@ -9,14 +10,21 @@ const currencySelectionService = require('../services/currencySelectionService')
  * Returns currency code and symbol (SEK→kr, EUR→€, USD→$). Never uses £.
  */
 router.get('/currency/display', (req, res) => {
+    if (responseCache.tryHit(req, res, 'currency:display')) return;
+
     const { currency, currencySymbol, country } = currencySelectionService.getDisplayCurrencyFromRequest(req);
-    res.json({
-        success: true,
-        currency,
-        currencySymbol,
-        country,
-        storeBaseCurrency: currencySelectionService.STORE_BASE_CURRENCY
-    });
+    return responseCache.json(
+        res,
+        req,
+        {
+            success: true,
+            currency,
+            currencySymbol,
+            country,
+            storeBaseCurrency: currencySelectionService.STORE_BASE_CURRENCY
+        },
+        'currency:display'
+    );
 });
 
 /**
@@ -69,8 +77,10 @@ router.get('/convert', async (req, res) => {
  */
 router.get('/settings/currencies', async (req, res) => {
     try {
+        if (responseCache.tryHit(req, res, 'currency:settings')) return;
+
         const result = await currencyService.getSupportedCurrencies();
-        res.status(200).json(result);
+        return responseCache.json(res, req, result, 'currency:settings');
     } catch (error) {
         console.error('Error getting supported currencies:', error);
         res.status(500).json({

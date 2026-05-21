@@ -5,6 +5,8 @@ const authenticateAdmin = require('../middleware/authenticateAdmin');
 const router = express.Router();
 const db = getDBInstance();
 const { devLog } = require('../core/logging/devConsole');
+const responseCache = require('../core/cache/responseCache');
+const cacheInvalidation = require('../services/cacheInvalidation');
 
 /**
  * GET /api/admin/content
@@ -14,6 +16,8 @@ const { devLog } = require('../core/logging/devConsole');
  */
 router.get('/content', async (req, res) => {
     try {
+        if (responseCache.tryHit(req, res, 'admin:content')) return;
+
         if (process.env.NODE_ENV === 'development' && req.query._ping) {
             devLog('[admin/content] ping');
         }
@@ -62,10 +66,13 @@ router.get('/content', async (req, res) => {
             }
             : defaultContent;
 
-        res.status(200).json({
-            success: true,
-            ...responseContent
-        });
+        return responseCache.json(
+            res,
+            req,
+            { success: true, ...responseContent },
+            'admin:content',
+            120
+        );
 
     } catch (error) {
         console.error('❌ [ADMIN CONTENT] Error fetching content:', error);
@@ -138,6 +145,7 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                 });
 
                 if (updateResult.success) {
+                    cacheInvalidation.onSiteContentChanged();
                     res.json({
                         success: true,
                         message: `${section} content updated successfully`,
@@ -170,6 +178,7 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                 });
 
                 if (createResult.success) {
+                    cacheInvalidation.onSiteContentChanged();
                     res.json({
                         success: true,
                         message: `${section} content created successfully`,
@@ -224,6 +233,7 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                 });
 
                 if (updateResult.success) {
+                    cacheInvalidation.onSiteContentChanged();
                     res.json({
                         success: true,
                         message: 'Content updated successfully',
@@ -255,6 +265,7 @@ router.put('/content', authenticateAdmin, async (req, res) => {
                 });
 
                 if (createResult.success) {
+                    cacheInvalidation.onSiteContentChanged();
                     res.json({
                         success: true,
                         message: 'Content created successfully',

@@ -14,6 +14,13 @@ const { devLog, devWarn } = require('../core/logging/devConsole');
 const { logger } = require('../core/logging/logger');
 const featuredProduct = require('../utils/featuredProduct');
 const productFilterService = require('../services/productFilterService');
+const responseCache = require('../core/cache/responseCache');
+const catalogCache = require('../services/catalogCache');
+const cacheInvalidation = require('../services/cacheInvalidation');
+
+function bustProductCaches() {
+    cacheInvalidation.onCatalogChanged();
+}
 
 const STORE_BASE_CURRENCY = 'SEK';
 const optionalAuthenticateAdmin = authenticateAdmin.optionalAuthenticateAdmin || (async (req, res, next) => { req.isAdminRequest = false; next(); });
@@ -312,10 +319,12 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
             products = products.slice(0, limit);
             
             devLog(`[Most Viewed] Returning ${products.length} products (sorted from ${result.data?.length || 0} total)`);
-            res.json({
-                success: true,
-                data: products
-            });
+            return responseCache.json(
+                res,
+                req,
+                { success: true, data: products },
+                'products:most-viewed'
+            );
         } else {
             logger.error('products_most_viewed_query_failed', {
                 message: result?.error || result?.message || 'unknown'
@@ -339,6 +348,8 @@ router.get('/most-viewed', optionalAuthenticateAdmin, async (req, res) => {
 // This route must be defined before /:id to avoid route conflicts
 router.get('/categories', optionalAuthenticateAdmin, async (req, res) => {
     try {
+        if (responseCache.tryHit(req, res, 'products:categories')) return;
+
         // Storefront: filter published at DB level; admin: all products
         const query = req.isAdminRequest ? {} : { published: true };
         const result = await db.executeOperation({
@@ -380,11 +391,16 @@ router.get('/categories', optionalAuthenticateAdmin, async (req, res) => {
             // Remove duplicates after normalization
             const uniqueCategories = [...new Set(normalizedCategories)].sort();
             
-            res.json({
-                success: true,
-                data: uniqueCategories,
-                count: uniqueCategories.length
-            });
+            return responseCache.json(
+                res,
+                req,
+                {
+                    success: true,
+                    data: uniqueCategories,
+                    count: uniqueCategories.length
+                },
+                'products:categories'
+            );
         } else {
             res.status(500).json({
                 success: false,
@@ -454,34 +470,8 @@ router.get('/sitemap', async (req, res) => {
     }
 });
 
-/**
- * Load published (or all for admin) catalog, optionally featured-only.
- */
 async function loadCatalogForFilters(req, { featuredOnly }) {
-    let query = {};
-    if (!req.isAdminRequest) {
-        query.published = true;
-    }
-    if (featuredOnly) {
-        Object.assign(query, featuredProduct.buildFeaturedMongoClause());
-    }
-    const result = await db.executeOperation({
-        database_name: 'peakmode',
-        collection_name: 'products',
-        command: '--read',
-        data: query
-    });
-    if (!result.success) return { ok: false, error: result.error };
-    let products = result.data || [];
-    if (!Array.isArray(products)) products = products ? [products] : [];
-    if (!req.isAdminRequest) {
-        products = products.filter(isPublishedForStorefront);
-    }
-    if (featuredOnly) {
-        products = products.filter(featuredProduct.isFeaturedProduct);
-    }
-    products = products.filter((p) => p.active !== false);
-    return { ok: true, products };
+    return catalogCache.getCatalogProducts(db, req, { featuredOnly });
 }
 
 async function getPriceContextFromRequest(req) {
@@ -520,6 +510,8 @@ function hasActiveProductFilters(filters) {
 // GET /api/products/filter-options — facet lists for filter modal
 router.get('/filter-options', optionalAuthenticateAdmin, async (req, res) => {
     try {
+        if (responseCache.tryHit(req, res, 'products:filter-options')) return;
+
         const featuredOnly = featuredProduct.parseFeaturedQueryParam(req.query.featured);
         const loaded = await loadCatalogForFilters(req, { featuredOnly });
         if (!loaded.ok) {
@@ -530,13 +522,18 @@ router.get('/filter-options', optionalAuthenticateAdmin, async (req, res) => {
         const facets = productFilterService.extractFacets(listable, priceCtx);
         const language = translationService.getLanguageFromRequest(req);
 
-        res.json({
-            success: true,
-            featuredOnly: featuredOnly || undefined,
-            facets,
-            language,
-            currency: priceCtx.displayCurrency
-        });
+        return responseCache.json(
+            res,
+            req,
+            {
+                success: true,
+                featuredOnly: featuredOnly || undefined,
+                facets,
+                language,
+                currency: priceCtx.displayCurrency
+            },
+            'products:filter-options'
+        );
     } catch (err) {
         logger.error('products_filter_options_error', { message: err.message });
         res.status(500).json({ success: false, error: 'Failed to load filter options' });
@@ -546,6 +543,8 @@ router.get('/filter-options', optionalAuthenticateAdmin, async (req, res) => {
 // GET /api/products/count — live match count for filter modal
 router.get('/count', optionalAuthenticateAdmin, async (req, res) => {
     try {
+        if (responseCache.tryHit(req, res, 'products:count')) return;
+
         const featuredOnly = featuredProduct.parseFeaturedQueryParam(req.query.featured);
         const filters = productFilterService.parseFilterQuery(req.query);
         const loaded = await loadCatalogForFilters(req, { featuredOnly });
@@ -555,12 +554,17 @@ router.get('/count', optionalAuthenticateAdmin, async (req, res) => {
         const priceCtx = await getPriceContextFromRequest(req);
         const matched = productFilterService.filterAndSortProducts(loaded.products, filters, priceCtx);
 
-        res.json({
-            success: true,
-            count: matched.length,
-            featuredOnly: featuredOnly || undefined,
-            appliedFilters: productFilterService.buildAppliedFiltersResponse(filters)
-        });
+        return responseCache.json(
+            res,
+            req,
+            {
+                success: true,
+                count: matched.length,
+                featuredOnly: featuredOnly || undefined,
+                appliedFilters: productFilterService.buildAppliedFiltersResponse(filters)
+            },
+            'products:count'
+        );
     } catch (err) {
         logger.error('products_count_error', { message: err.message });
         res.status(500).json({ success: false, error: 'Failed to count products' });
@@ -570,6 +574,8 @@ router.get('/count', optionalAuthenticateAdmin, async (req, res) => {
 // GET /api/products/:id - Get product by ID with complete inventory data
 router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
     try {
+        if (responseCache.tryHit(req, res, 'products:detail')) return;
+
         const { id } = req.params;
         
         // Single query resolves by id or _id (reduces up to 3 reads to 1)
@@ -717,13 +723,20 @@ router.get('/:id', optionalAuthenticateAdmin, async (req, res) => {
                 ...seoFields
             };
             
-            res.json({
-                success: true,
-                data: productWithSEO,
-                language: language,
-                currency: product.currency || STORE_BASE_CURRENCY,
-                currencySymbol: product.currencySymbol || currencySelectionService.getCurrencySymbol(product.currency || STORE_BASE_CURRENCY)
-            });
+            return responseCache.json(
+                res,
+                req,
+                {
+                    success: true,
+                    data: productWithSEO,
+                    language: language,
+                    currency: product.currency || STORE_BASE_CURRENCY,
+                    currencySymbol:
+                        product.currencySymbol ||
+                        currencySelectionService.getCurrencySymbol(product.currency || STORE_BASE_CURRENCY)
+                },
+                'products:detail'
+            );
         } else {
             res.status(404).json({
                 success: false,
@@ -855,6 +868,8 @@ router.post('/:id/view', optionalAuthenticateAdmin, async (req, res) => {
 // GET /api/products - Get all products
 router.get('/', optionalAuthenticateAdmin, async (req, res) => {
     try {
+        if (responseCache.tryHit(req, res, 'products:list')) return;
+
         const { category, featured, limit, search } = req.query;
         const listFilters = productFilterService.parseFilterQuery(req.query);
         if (search && !listFilters.search) {
@@ -1043,19 +1058,26 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 productsWithSEO = productFilterService.sortProducts(productsWithSEO, listFilters.sort);
             }
             
-            res.json({
-                success: true,
-                data: productsWithSEO,
-                count: productsWithSEO.length,
-                total: productsWithSEO.length,
-                featuredOnly: featuredOnly || undefined,
-                appliedFilters: hasActiveProductFilters(listFilters)
-                    ? productFilterService.buildAppliedFiltersResponse(listFilters)
-                    : undefined,
-                language: language,
-                currency: displayCurrency || STORE_BASE_CURRENCY,
-                currencySymbol: currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY)
-            });
+            return responseCache.json(
+                res,
+                req,
+                {
+                    success: true,
+                    data: productsWithSEO,
+                    count: productsWithSEO.length,
+                    total: productsWithSEO.length,
+                    featuredOnly: featuredOnly || undefined,
+                    appliedFilters: hasActiveProductFilters(listFilters)
+                        ? productFilterService.buildAppliedFiltersResponse(listFilters)
+                        : undefined,
+                    language: language,
+                    currency: displayCurrency || STORE_BASE_CURRENCY,
+                    currencySymbol:
+                        currencySymbol ||
+                        currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY)
+                },
+                'products:list'
+            );
         } else {
             res.status(500).json({
                 success: false,
@@ -1223,6 +1245,7 @@ router.post('/', authenticateAdmin, async (req, res) => {
         let created = readResult.success && readResult.data ? readResult.data : productData;
         if (!created.id) created.id = productData.id;
         normalizeProductForResponse(created);
+        bustProductCaches();
         
         res.status(201).json({
             success: true,
@@ -1385,6 +1408,7 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
         });
         
         if (result.success) {
+            bustProductCaches();
             res.json({
                 success: true,
                 message: 'Product updated successfully',
@@ -1554,6 +1578,7 @@ router.delete('/:id', authenticateAdmin, async (req, res) => {
         });
         
         if (result.success) {
+            bustProductCaches();
             res.json({
                 success: true,
                 message: 'Product deleted successfully'

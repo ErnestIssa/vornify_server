@@ -6,6 +6,7 @@ const express = require('express');
 const router = express.Router();
 const vatService = require('../services/vatService');
 const currencySelectionService = require('../services/currencySelectionService');
+const responseCache = require('../core/cache/responseCache');
 
 /**
  * GET /api/vat
@@ -15,16 +16,24 @@ const currencySelectionService = require('../services/currencySelectionService')
  * Symbols: SEK→kr, EUR→€, USD→$ (never £).
  */
 router.get('/', (req, res) => {
+    if (responseCache.tryHit(req, res, 'vat:config')) return;
+
     const { country, vatRate } = vatService.getCountryAndVatFromRequest(req);
     const { currency, currencySymbol } = currencySelectionService.getDisplayCurrencyFromRequest(req);
-    res.json({
-        success: true,
-        country,
-        vatRate,
-        currency,
-        currencySymbol,
-        message: 'VAT rate for display; final VAT is applied at checkout based on shipping country. Currency can be overridden with ?currency=SEK|EUR|USD.'
-    });
+    return responseCache.json(
+        res,
+        req,
+        {
+            success: true,
+            country,
+            vatRate,
+            currency,
+            currencySymbol,
+            message:
+                'VAT rate for display; final VAT is applied at checkout based on shipping country. Currency can be overridden with ?currency=SEK|EUR|USD.'
+        },
+        'vat:config'
+    );
 });
 
 module.exports = router;

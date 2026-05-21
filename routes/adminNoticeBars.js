@@ -2,6 +2,7 @@ const express = require('express');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 const noticeBarService = require('../services/noticeBarService');
+const cacheInvalidation = require('../services/cacheInvalidation');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -308,6 +309,8 @@ router.post('/notice-bars/:id/publish', authenticateAdmin, async (req, res) => {
                 error: result.error || 'Failed to publish'
             });
         }
+
+        cacheInvalidation.onSiteContentChanged();
 
         const refreshed = await readNoticeBarById(req.params.id);
         res.json({
