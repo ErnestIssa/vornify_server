@@ -50,8 +50,13 @@ function stableQuery(query = {}) {
     return keys.map((k) => `${k}=${String(query[k])}`).join('&');
 }
 
+function requestPathname(req) {
+    const raw = req.originalUrl || req.url || '';
+    return raw.split('?')[0].replace(/\/+$/, '') || '/';
+}
+
 function buildCacheKey(req, namespace) {
-    const raw = [namespace, stableQuery(req.query), req.path || ''].join('|');
+    const raw = [namespace, stableQuery(req.query), requestPathname(req)].join('|');
     return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
@@ -62,6 +67,7 @@ function etagForBody(body) {
 
 /** Send JSON without going through storefrontCache's wrapped res.json (avoids infinite recursion). */
 function sendJson(res, body) {
+    if (res.headersSent) return res;
     const fn = res._jsonWithoutCache;
     if (fn) return fn.call(res, body);
     return res.json(body);
@@ -107,47 +113,57 @@ function set(namespace, cacheKey, body, ttlSec) {
  * Try to respond from cache. Returns true if response was sent (200 or 304).
  */
 function tryHit(req, res, namespace) {
-    if (shouldBypass(req)) return false;
+    if (shouldBypass(req) || res.headersSent) return false;
     const cacheKey = buildCacheKey(req, namespace);
     const entry = get(namespace, cacheKey);
     if (!entry) return false;
 
-    res.set('Cache-Control', `public, max-age=${entry.maxAge}, stale-while-revalidate=120`);
-    res.set('ETag', entry.etag);
-    res.set('X-Cache', 'HIT');
+    try {
+        res.set('Cache-Control', `public, max-age=${entry.maxAge}, stale-while-revalidate=120`);
+        res.set('ETag', entry.etag);
+        res.set('X-Cache', 'HIT');
 
-    const inm = req.headers['if-none-match'];
-    if (inm && inm === entry.etag) {
-        res.status(304).end();
-        return true;
+        const inm = req.headers['if-none-match'];
+        if (inm && inm === entry.etag) {
+            res.status(304).end();
+            return true;
+        }
+
+        res.status(200);
+        sendJson(res, entry.body);
+        return res.headersSent;
+    } catch (_) {
+        return false;
     }
-
-    res.status(200);
-    sendJson(res, entry.body);
-    return true;
 }
 
 /**
  * Store body and send JSON with cache headers.
  */
 function json(res, req, body, namespace, ttlSec) {
+    if (res.headersSent) return res;
     if (shouldBypass(req)) {
         res.set('X-Cache', 'BYPASS');
         return sendJson(res, body);
     }
 
-    const cacheKey = buildCacheKey(req, namespace);
-    const entry = set(namespace, cacheKey, body, ttlSec);
-    res.set('Cache-Control', `public, max-age=${entry.maxAge}, stale-while-revalidate=120`);
-    res.set('ETag', entry.etag);
-    res.set('X-Cache', 'MISS');
+    try {
+        const cacheKey = buildCacheKey(req, namespace);
+        const entry = set(namespace, cacheKey, body, ttlSec);
+        res.set('Cache-Control', `public, max-age=${entry.maxAge}, stale-while-revalidate=120`);
+        res.set('ETag', entry.etag);
+        res.set('X-Cache', 'MISS');
 
-    const inm = req.headers['if-none-match'];
-    if (inm && inm === entry.etag) {
-        return res.status(304).end();
+        const inm = req.headers['if-none-match'];
+        if (inm && inm === entry.etag) {
+            return res.status(304).end();
+        }
+
+        return sendJson(res, body);
+    } catch (_) {
+        res.set('X-Cache', 'BYPASS');
+        return sendJson(res, body);
     }
-
-    return sendJson(res, body);
 }
 
 /** Invalidate all namespaces whose store key starts with any prefix (e.g. "products:") */

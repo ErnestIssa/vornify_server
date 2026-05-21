@@ -6,7 +6,6 @@ const express = require('express');
 const router = express.Router();
 const vatService = require('../services/vatService');
 const currencySelectionService = require('../services/currencySelectionService');
-const responseCache = require('../core/cache/responseCache');
 
 /**
  * GET /api/vat
@@ -14,16 +13,13 @@ const responseCache = require('../core/cache/responseCache');
  * Country: Cloudflare CF-IPCountry or ?country= override.
  * Currency: ?currency= override (SEK, EUR, USD) or auto from country (SE→SEK, EU→EUR, else→USD).
  * Symbols: SEK→kr, EUR→€, USD→$ (never £).
+ * Response cache: storefrontCacheMiddleware wraps res.json (namespace vat:config).
  */
 router.get('/', (req, res) => {
-    if (responseCache.tryHit(req, res, 'vat:config')) return;
-
-    const { country, vatRate } = vatService.getCountryAndVatFromRequest(req);
-    const { currency, currencySymbol } = currencySelectionService.getDisplayCurrencyFromRequest(req);
-    return responseCache.json(
-        res,
-        req,
-        {
+    try {
+        const { country, vatRate } = vatService.getCountryAndVatFromRequest(req);
+        const { currency, currencySymbol } = currencySelectionService.getDisplayCurrencyFromRequest(req);
+        return res.json({
             success: true,
             country,
             vatRate,
@@ -31,9 +27,14 @@ router.get('/', (req, res) => {
             currencySymbol,
             message:
                 'VAT rate for display; final VAT is applied at checkout based on shipping country. Currency can be overridden with ?currency=SEK|EUR|USD.'
-        },
-        'vat:config'
-    );
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            error: 'Failed to resolve VAT settings',
+            message: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
 });
 
 module.exports = router;

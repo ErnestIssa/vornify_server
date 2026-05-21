@@ -10,21 +10,22 @@ const responseCache = require('../core/cache/responseCache');
  * Returns currency code and symbol (SEK→kr, EUR→€, USD→$). Never uses £.
  */
 router.get('/currency/display', (req, res) => {
-    if (responseCache.tryHit(req, res, 'currency:display')) return;
-
-    const { currency, currencySymbol, country } = currencySelectionService.getDisplayCurrencyFromRequest(req);
-    return responseCache.json(
-        res,
-        req,
-        {
+    try {
+        const { currency, currencySymbol, country } = currencySelectionService.getDisplayCurrencyFromRequest(req);
+        return res.json({
             success: true,
             currency,
             currencySymbol,
             country,
             storeBaseCurrency: currencySelectionService.STORE_BASE_CURRENCY
-        },
-        'currency:display'
-    );
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            error: 'Failed to resolve display currency',
+            message: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
 });
 
 /**

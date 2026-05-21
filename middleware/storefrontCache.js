@@ -105,50 +105,52 @@ function matchCacheRule(path) {
 }
 
 function storefrontCacheMiddleware(req, res, next) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-        return next();
-    }
-    if (responseCache.shouldBypass(req)) {
-        return next();
-    }
-
-    const path = pathWithoutQuery(req);
-    const rule = matchCacheRule(path);
-    if (!rule) {
-        return next();
-    }
-
-    if (!res._jsonWithoutCache) {
-        res._jsonWithoutCache = res.json.bind(res);
-    }
-
-    if (responseCache.tryHit(req, res, rule.namespace)) {
-        return;
-    }
-
-    req._responseCache = rule;
-
-    const originalJson = res._jsonWithoutCache;
-    res.json = function cacheAwareJson(body) {
-        if (
-            req._responseCache &&
-            !res.headersSent &&
-            res.statusCode >= 200 &&
-            res.statusCode < 300 &&
-            body !== undefined
-        ) {
-            return responseCache.json(
-                res,
-                req,
-                body,
-                req._responseCache.namespace,
-                req._responseCache.ttl
-            );
+    try {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+            return next();
         }
-        return originalJson(body);
-    };
+        if (responseCache.shouldBypass(req)) {
+            return next();
+        }
 
-    next();
+        const path = pathWithoutQuery(req);
+        const rule = matchCacheRule(path);
+        if (!rule) {
+            return next();
+        }
+
+        if (!res._jsonWithoutCache) {
+            res._jsonWithoutCache = res.json.bind(res);
+        }
+
+        // Do not tryHit here — route handlers run first; avoids double-send when
+        // cache keys differed (req.path vs full pathname) and ERR_HTTP_HEADERS_SENT → 500.
+        req._responseCache = rule;
+
+        const originalJson = res._jsonWithoutCache;
+        res.json = function cacheAwareJson(body) {
+            if (
+                req._responseCache &&
+                !res.headersSent &&
+                res.statusCode >= 200 &&
+                res.statusCode < 300 &&
+                body !== undefined
+            ) {
+                return responseCache.json(
+                    res,
+                    req,
+                    body,
+                    req._responseCache.namespace,
+                    req._responseCache.ttl
+                );
+            }
+            return originalJson(body);
+        };
+
+        return next();
+    } catch (err) {
+        return next(err);
+    }
 }
 
 module.exports = storefrontCacheMiddleware;
