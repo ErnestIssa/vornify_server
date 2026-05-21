@@ -132,42 +132,10 @@ function validateCloudinaryMedia(media, imagePublicIds) {
  * @param {Object} product - Raw product from DB
  * @returns {Object} - Same object with id and variant.quantity guaranteed
  */
-function ensureInventoryStorefrontDefaults(inv) {
-    if (!inv) return;
-    if (!inv.storefront || typeof inv.storefront !== 'object') inv.storefront = {};
-    if (typeof inv.storefront.showListingWhenFullySoldOut !== 'boolean') {
-        inv.storefront.showListingWhenFullySoldOut = false;
-    }
-}
+const { normalizeProductForCatalog } = require('../services/productCatalogNormalize');
 
 function normalizeProductForResponse(product) {
-    if (!product) return product;
-    if (!product.id && product._id) {
-        product.id = typeof product._id === 'string' ? product._id : product._id.toString();
-    }
-    const inv = product.inventory;
-    ensureInventoryStorefrontDefaults(inv);
-    if (inv && inv.variants && Array.isArray(inv.variants)) {
-        inv.variants = inv.variants.map(v => ({
-            ...v,
-            quantity: v.quantity !== undefined ? v.quantity : (v.stock !== undefined ? v.stock : 0)
-        }));
-    }
-    if (product.variants && Array.isArray(product.variants)) {
-        product.variants = product.variants.map(v => ({
-            ...v,
-            quantity: v.quantity !== undefined ? v.quantity : (v.stock !== undefined ? v.stock : 0)
-        }));
-    }
-    if (inv) {
-        const matrix = variantService.buildColorSizeMatrix(inv);
-        if (matrix) {
-            inv.colorSizeMatrix = matrix;
-        } else {
-            delete inv.colorSizeMatrix;
-        }
-    }
-    return product;
+    return normalizeProductForCatalog(product);
 }
 
 /**

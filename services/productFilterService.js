@@ -23,12 +23,49 @@ function parseCommaList(value) {
         .filter(Boolean);
 }
 
+/** Strip legacy storefront prefix `name:` (old dedupeColorOptions / dedupeSizeOptions). */
+function normalizeFilterParamToken(value) {
+    const s = String(value || '').trim();
+    if (/^name:/i.test(s)) return s.slice(5).trim();
+    return s;
+}
+
 function toFacetId(value) {
     return String(value || '')
         .trim()
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '');
+}
+
+function normalizeRawId(value) {
+    if (value == null || value === '') return '';
+    return String(value).trim();
+}
+
+/** All facet ids that should match this color/size value (canonical id + display name slug). */
+function facetAliasKeys(rawId, displayName) {
+    const keys = new Set();
+    const id = normalizeRawId(rawId);
+    const name = normalizeRawId(displayName);
+    if (id) keys.add(toFacetId(id));
+    if (name) keys.add(toFacetId(name));
+    if (id && name && toFacetId(id) !== toFacetId(name)) {
+        keys.add(toFacetId(name));
+    }
+    return keys;
+}
+
+function findColorDef(colors, colorId) {
+    const want = normalizeRawId(colorId);
+    if (!want) return null;
+    return (colors || []).find((c) => c && normalizeRawId(c.id) === want) || null;
+}
+
+function findSizeDef(sizes, sizeId) {
+    const want = normalizeRawId(sizeId);
+    if (!want) return null;
+    return (sizes || []).find((s) => s && normalizeRawId(s.id) === want) || null;
 }
 
 function toDisplayLabel(value) {
@@ -62,8 +99,8 @@ function parseFilterQuery(query = {}) {
     return {
         categories: categories.map((c) => toFacetId(c)),
         types: types.map((t) => toFacetId(t)),
-        sizes: sizes.map((s) => toFacetId(s)),
-        colors: colors.map((c) => toFacetId(c)),
+        sizes: sizes.map((s) => toFacetId(normalizeFilterParamToken(s))),
+        colors: colors.map((c) => toFacetId(normalizeFilterParamToken(c))),
         tags: tags.map((t) => toFacetId(t)),
         priceMin: Number.isFinite(priceMin) ? priceMin : null,
         priceMax: Number.isFinite(priceMax) ? priceMax : null,
@@ -130,71 +167,122 @@ function getProductTypeIds(product) {
     return ids;
 }
 
-function getProductSizeIds(product) {
+/**
+ * Canonical facet entries for sizes on a product.
+ * @returns {Map<string, { id: string, name: string, matchKeys: Set<string> }>}
+ */
+function collectProductSizeEntries(product) {
     const map = new Map();
     const inv = product.inventory || {};
+    const sizeCatalog = inv.sizes || product.sizes || [];
 
-    const addSize = (sizeLike) => {
-        if (!sizeLike) return;
-        const rawId = sizeLike.id || sizeLike.sizeId || sizeLike.name;
-        if (!rawId) return;
-        const id = toFacetId(rawId);
-        map.set(id, {
-            id,
-            name: sizeLike.name || String(rawId)
-        });
-    };
-
-    if (inv.colorSizeMatrix?.byColor && Array.isArray(inv.colorSizeMatrix.byColor)) {
-        for (const row of inv.colorSizeMatrix.byColor) {
-            for (const s of row.sizes || []) addSize(s);
-        }
-    }
-    for (const s of inv.sizes || product.sizes || []) addSize(s);
-
-    for (const v of inv.variants || product.variants || []) {
-        if (!v.sizeId) continue;
-        const def = (inv.sizes || []).find((sz) => sz.id === v.sizeId);
-        addSize(def || { id: v.sizeId, name: v.sizeId });
-    }
-
-    return new Set(map.keys());
-}
-
-function getProductColorIds(product) {
-    const map = new Map();
-    const inv = product.inventory || {};
-
-    const addColor = (colorLike) => {
-        if (!colorLike) return;
-        const rawId = colorLike.id || colorLike.colorId || colorLike.name;
-        if (!rawId) return;
-        const id = toFacetId(rawId);
-        map.set(id, {
-            id,
-            hex: colorLike.hex || '#000000',
-            name: colorLike.name || String(rawId)
-        });
-    };
-
-    if (inv.colorSizeMatrix?.byColor && Array.isArray(inv.colorSizeMatrix.byColor)) {
-        for (const row of inv.colorSizeMatrix.byColor) {
-            addColor({
-                id: row.colorId || row.id,
-                name: row.name || row.colorName,
-                hex: row.hex
+    const register = (rawId, name) => {
+        const idNorm = normalizeRawId(rawId);
+        if (!idNorm) return;
+        const canonical = toFacetId(idNorm);
+        const displayName = name || idNorm;
+        const matchKeys = facetAliasKeys(idNorm, displayName);
+        const existing = map.get(canonical);
+        if (existing) {
+            matchKeys.forEach((k) => existing.matchKeys.add(k));
+            if (!existing.name && displayName) existing.name = String(displayName);
+        } else {
+            map.set(canonical, {
+                id: canonical,
+                name: String(displayName),
+                matchKeys
             });
         }
-    }
-    for (const c of inv.colors || product.colors || []) addColor(c);
+    };
 
+    if (Array.isArray(inv.colorSizeMatrix?.byColor)) {
+        for (const row of inv.colorSizeMatrix.byColor) {
+            for (const s of row.sizes || []) {
+                if (s && s.hasVariant === false) continue;
+                register(s.sizeId || s.id, s.name);
+            }
+        }
+    }
     for (const v of inv.variants || product.variants || []) {
-        if (!v.colorId) continue;
-        const def = (inv.colors || []).find((c) => c.id === v.colorId);
-        addColor(def || { id: v.colorId, name: v.colorId, hex: '#000000' });
+        if (!v || !v.sizeId) continue;
+        const def = findSizeDef(sizeCatalog, v.sizeId);
+        register(v.sizeId, def ? def.name : v.sizeId);
     }
 
-    return new Set(map.keys());
+    return map;
+}
+
+/**
+ * Canonical facet entries for colors on a product.
+ * @returns {Map<string, { id: string, name: string, hex: string, matchKeys: Set<string> }>}
+ */
+function collectProductColorEntries(product) {
+    const map = new Map();
+    const inv = product.inventory || {};
+    const colorCatalog = inv.colors || product.colors || [];
+
+    const register = (rawId, name, hex) => {
+        const idNorm = normalizeRawId(rawId);
+        if (!idNorm) return;
+        const canonical = toFacetId(idNorm);
+        const displayName = name || idNorm;
+        const matchKeys = facetAliasKeys(idNorm, displayName);
+        const existing = map.get(canonical);
+        if (existing) {
+            matchKeys.forEach((k) => existing.matchKeys.add(k));
+            if (hex && existing.hex === '#000000') existing.hex = hex;
+            if (!existing.name && displayName) existing.name = String(displayName);
+        } else {
+            map.set(canonical, {
+                id: canonical,
+                name: String(displayName),
+                hex: hex || '#000000',
+                matchKeys
+            });
+        }
+    };
+
+    if (Array.isArray(inv.colorSizeMatrix?.byColor)) {
+        for (const row of inv.colorSizeMatrix.byColor) {
+            register(row.id || row.colorId, row.name || row.colorName, row.hex);
+        }
+    }
+    for (const c of colorCatalog) {
+        register(c.id || c.colorId, c.name, c.hex);
+    }
+    for (const v of inv.variants || product.variants || []) {
+        if (!v || !v.colorId) continue;
+        const def = findColorDef(colorCatalog, v.colorId);
+        register(v.colorId, def ? def.name : v.colorId, def ? def.hex : '#000000');
+    }
+
+    return map;
+}
+
+function getProductSizeMatchKeys(product) {
+    const keys = new Set();
+    for (const entry of collectProductSizeEntries(product).values()) {
+        entry.matchKeys.forEach((k) => keys.add(k));
+    }
+    return keys;
+}
+
+function getProductColorMatchKeys(product) {
+    const keys = new Set();
+    for (const entry of collectProductColorEntries(product).values()) {
+        entry.matchKeys.forEach((k) => keys.add(k));
+    }
+    return keys;
+}
+
+function productMatchesSizeFilter(product, filterSizeIds) {
+    const keys = getProductSizeMatchKeys(product);
+    return filterSizeIds.some((s) => keys.has(s));
+}
+
+function productMatchesColorFilter(product, filterColorIds) {
+    const keys = getProductColorMatchKeys(product);
+    return filterColorIds.some((c) => keys.has(c));
 }
 
 function getProductTagIds(product) {
@@ -233,14 +321,12 @@ function productMatchesFilters(product, filters, ctx) {
         if (!filters.types.some((t) => typeIds.has(t))) return false;
     }
 
-    if (filters.sizes.length > 0) {
-        const sizeIds = getProductSizeIds(product);
-        if (!filters.sizes.some((s) => sizeIds.has(s))) return false;
+    if (filters.sizes.length > 0 && !productMatchesSizeFilter(product, filters.sizes)) {
+        return false;
     }
 
-    if (filters.colors.length > 0) {
-        const colorIds = getProductColorIds(product);
-        if (!filters.colors.some((c) => colorIds.has(c))) return false;
+    if (filters.colors.length > 0 && !productMatchesColorFilter(product, filters.colors)) {
+        return false;
     }
 
     if (filters.tags.length > 0) {
@@ -352,40 +438,16 @@ function extractFacets(products, ctx) {
             }
         }
 
-        const inv = product.inventory || {};
-        const addSizeToFacet = (sizeLike) => {
-            const rawId = sizeLike?.id || sizeLike?.sizeId || sizeLike?.name;
-            if (!rawId) return;
-            const id = toFacetId(rawId);
-            sizes.set(id, { id, name: sizeLike.name || String(rawId) });
-        };
-        if (inv.colorSizeMatrix?.byColor) {
-            for (const row of inv.colorSizeMatrix.byColor) {
-                for (const s of row.sizes || []) addSizeToFacet(s);
-            }
+        for (const entry of collectProductSizeEntries(product).values()) {
+            sizes.set(entry.id, { id: entry.id, name: entry.name });
         }
-        for (const s of inv.sizes || product.sizes || []) addSizeToFacet(s);
-
-        const addColorToFacet = (colorLike) => {
-            const rawId = colorLike?.id || colorLike?.colorId || colorLike?.name;
-            if (!rawId) return;
-            const id = toFacetId(rawId);
-            colors.set(id, {
-                id,
-                name: colorLike.name || String(rawId),
-                hex: colorLike.hex || '#000000'
+        for (const entry of collectProductColorEntries(product).values()) {
+            colors.set(entry.id, {
+                id: entry.id,
+                name: entry.name,
+                hex: entry.hex
             });
-        };
-        if (inv.colorSizeMatrix?.byColor) {
-            for (const row of inv.colorSizeMatrix.byColor) {
-                addColorToFacet({
-                    id: row.colorId || row.id,
-                    name: row.name || row.colorName,
-                    hex: row.hex
-                });
-            }
         }
-        for (const c of inv.colors || product.colors || []) addColorToFacet(c);
 
         for (const tagId of getProductTagIds(product)) {
             tags.set(tagId, { id: tagId, label: toDisplayLabel(tagId) });
@@ -446,6 +508,10 @@ module.exports = {
     computeDisplayPrice,
     attachDisplayPrice,
     productMatchesFilters,
+    productMatchesColorFilter,
+    productMatchesSizeFilter,
+    collectProductColorEntries,
+    collectProductSizeEntries,
     sortProducts,
     extractFacets,
     filterAndSortProducts,

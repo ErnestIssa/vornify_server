@@ -4,6 +4,7 @@
  */
 
 const featuredProduct = require('../utils/featuredProduct');
+const { normalizeCatalogProducts } = require('./productCatalogNormalize');
 
 const TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS) || 90_000;
 
@@ -46,6 +47,7 @@ async function loadFromDb(db, req, { featuredOnly }) {
         products = products.filter(featuredProduct.isFeaturedProduct);
     }
     products = products.filter((p) => p.active !== false);
+    products = normalizeCatalogProducts(products);
 
     return { ok: true, products };
 }
