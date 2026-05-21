@@ -245,7 +245,8 @@ const apiCorsOptions = {
         return callback(null, false);
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    // If-Match + X-Cart-Version: storefront optimistic concurrency / cart versioning (OPTIONS preflight must list them).
+    // If-Match / If-None-Match: cart versioning + storefront conditional GET (ETag revalidation).
+    // X-Skip-Cache: bypass response cache (admin/debug). OPTIONS preflight must list every custom header.
     allowedHeaders: [
         'Content-Type',
         'Authorization',
@@ -254,7 +255,9 @@ const apiCorsOptions = {
         'api-key',
         'X-Request-Id',
         'If-Match',
+        'If-None-Match',
         'X-Cart-Version',
+        'X-Skip-Cache',
         'Idempotency-Key'
     ],
     exposedHeaders: ['X-Cart-Version', 'X-Request-Id', 'X-Cache', 'ETag'],
