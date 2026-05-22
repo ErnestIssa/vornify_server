@@ -475,6 +475,105 @@ function hasActiveProductFilters(filters) {
     );
 }
 
+/** Storefront filtered list + count + filter-options share catalogCache + productFilterService. */
+function shouldUseCatalogFilterPipeline(req, { featuredOnly, listFilters }) {
+    return !req.isAdminRequest && (featuredOnly || hasActiveProductFilters(listFilters));
+}
+
+async function enrichProductsForStorefrontList(products, req, language, priceCtx) {
+    const rateCache = {};
+    const { vatRate, sekToDisplayRate, displayCurrency } = priceCtx;
+    const currencySymbol = currencySelectionService.getCurrencySymbol(displayCurrency);
+    const { country: vatCountry } = vatService.getCountryAndVatFromRequest(req);
+
+    return Promise.all(
+        products.map(async (product) => {
+            const basePrice = product.price || 0;
+            product.vat_display = { country: vatCountry, vat_rate: vatRate };
+            const priceInclVatSEK = Math.round(basePrice * (1 + vatRate) * 100) / 100;
+            product.price_including_vat =
+                displayCurrency === STORE_BASE_CURRENCY
+                    ? priceInclVatSEK
+                    : Math.round(priceInclVatSEK * sekToDisplayRate * 100) / 100;
+            const compareAt = product.compareAtPrice ?? product.compare_at_price;
+            if (typeof compareAt === 'number' && !isNaN(compareAt) && compareAt > 0) {
+                const compareAtSEK = Math.round(compareAt * (1 + vatRate) * 100) / 100;
+                product.compare_at_price_including_vat =
+                    displayCurrency === STORE_BASE_CURRENCY
+                        ? compareAtSEK
+                        : Math.round(compareAtSEK * sekToDisplayRate * 100) / 100;
+            }
+            product.currency = displayCurrency || STORE_BASE_CURRENCY;
+            product.currencySymbol =
+                currencySymbol ||
+                currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY);
+            try {
+                const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(
+                    basePrice,
+                    STORE_BASE_CURRENCY,
+                    rateCache
+                );
+                product.base_price = basePrice;
+                product.prices = multiCurrencyPrices;
+            } catch (currencyError) {
+                logger.warn('products_list_multi_currency_failed', {
+                    productId: product.id,
+                    message: currencyError.message || String(currencyError)
+                });
+                product.base_price = basePrice;
+                product.prices = { [STORE_BASE_CURRENCY]: basePrice };
+            }
+
+            if (product.inventory) {
+                if (product.inventory.colors && Array.isArray(product.inventory.colors)) {
+                    product.inventory.colors = product.inventory.colors.map((color, index) => ({
+                        id: color.id || `color_${Date.now()}_${index}`,
+                        name: color.name || 'Unnamed Color',
+                        hex: color.hex || '#000000',
+                        available: color.available !== undefined ? color.available : true,
+                        sortOrder: color.sortOrder !== undefined ? color.sortOrder : index
+                    }));
+                }
+                if (product.inventory.sizes && Array.isArray(product.inventory.sizes)) {
+                    product.inventory.sizes = product.inventory.sizes.map((size, index) => ({
+                        id: size.id || `size_${Date.now()}_${index}`,
+                        name: size.name || 'Unnamed Size',
+                        description: size.description || '',
+                        available: size.available !== undefined ? size.available : true,
+                        sortOrder: size.sortOrder !== undefined ? size.sortOrder : index
+                    }));
+                }
+                if (product.inventory.variants && Array.isArray(product.inventory.variants)) {
+                    product.inventory.variants = product.inventory.variants.map((variant, index) => ({
+                        id: variant.id || `variant_${Date.now()}_${index}`,
+                        colorId: variant.colorId,
+                        sizeId: variant.sizeId,
+                        sku: variant.sku || '',
+                        price: variant.price || product.price,
+                        quantity:
+                            variant.quantity !== undefined
+                                ? variant.quantity
+                                : variant.stock !== undefined
+                                  ? variant.stock
+                                  : 0,
+                        stock:
+                            variant.stock !== undefined
+                                ? variant.stock
+                                : variant.quantity !== undefined
+                                  ? variant.quantity
+                                  : 0,
+                        available: variant.available !== undefined ? variant.available : true,
+                        images: variant.images || [],
+                        sortOrder: variant.sortOrder !== undefined ? variant.sortOrder : index
+                    }));
+                }
+            }
+            normalizeProductForResponse(product);
+            return translationService.translateProduct(product, language);
+        })
+    );
+}
+
 // GET /api/products/filter-options — facet lists for filter modal
 router.get('/filter-options', optionalAuthenticateAdmin, async (req, res) => {
     try {
@@ -843,50 +942,66 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
         if (search && !listFilters.search) {
             listFilters.search = String(search).trim();
         }
-        
-        // Get requested language from query parameter
+
         const language = translationService.getLanguageFromRequest(req);
-        
-        let query = {};
-        
-        // Storefront: filter at DB level to avoid full scan (published: true only)
-        // Admin with token: see all products including drafts
-        if (!req.isAdminRequest) {
-            query.published = true;
-        }
-        
-        // Single category in DB query; multi-category filtered in application layer
-        const categoryList =
-            listFilters.categories.length > 0
-                ? listFilters.categories
-                : category
-                  ? [productFilterService.toFacetId(category)]
-                  : [];
-        if (category && !String(category).includes(',') && listFilters.categories.length === 0) {
-            query.category = category;
-        }
-        
         const featuredOnly = featuredProduct.parseFeaturedQueryParam(featured);
-        if (featuredOnly) {
-            Object.assign(query, featuredProduct.buildFeaturedMongoClause());
-        }
-        
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'products',
-            command: '--read',
-            data: query
-        });
-        
-        if (result.success) {
-            let products = result.data || [];
-            // Storefront: only published products (drafts must never appear); admin with token sees all
+        const useCatalogPipeline = shouldUseCatalogFilterPipeline(req, { featuredOnly, listFilters });
+        const priceCtx = await getPriceContextFromRequest(req);
+        const displayCurrency = priceCtx.displayCurrency;
+        const currencySymbol = currencySelectionService.getCurrencySymbol(displayCurrency);
+
+        let products = [];
+
+        if (useCatalogPipeline) {
+            const loaded = await loadCatalogForFilters(req, { featuredOnly });
+            if (!loaded.ok) {
+                return res.status(500).json({
+                    success: false,
+                    error: loaded.error || 'Failed to load catalog'
+                });
+            }
+            products = productFilterService.filterAndSortProducts(loaded.products, listFilters, priceCtx);
+        } else {
+            let query = {};
+            if (!req.isAdminRequest) {
+                query.published = true;
+            }
+
+            const categoryList =
+                listFilters.categories.length > 0
+                    ? listFilters.categories
+                    : category
+                      ? [productFilterService.toFacetId(category)]
+                      : [];
+            if (category && !String(category).includes(',') && listFilters.categories.length === 0) {
+                query.category = category;
+            }
+
+            if (featuredOnly) {
+                Object.assign(query, featuredProduct.buildFeaturedMongoClause());
+            }
+
+            const result = await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'products',
+                command: '--read',
+                data: query
+            });
+
+            if (!result.success) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'Failed to retrieve products'
+                });
+            }
+
+            products = result.data || [];
             if (!req.isAdminRequest) {
                 products = (Array.isArray(products) ? products : []).filter(isPublishedForStorefront);
             } else {
-                products = Array.isArray(products) ? products : (products ? [products] : []);
+                products = Array.isArray(products) ? products : products ? [products] : [];
             }
-            
+
             if (categoryList.length > 0) {
                 products = products.filter((product) =>
                     categoryList.includes(productFilterService.toFacetId(product.category))
@@ -898,160 +1013,72 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                     return productCategory === categoryLower;
                 });
             }
-            
+
             if (featuredOnly) {
                 products = products.filter(featuredProduct.isFeaturedProduct);
             }
 
-            if (featuredOnly || hasActiveProductFilters(listFilters)) {
+            if (featuredOnly) {
                 products = products.filter(productFilterService.isListableOnStorefront);
             }
 
-            // Apply limit if provided
-            if (limit && parseInt(limit) > 0) {
-                products = products.slice(0, parseInt(limit));
-            }
-            
-            const rateCache = {};
-            const { country: vatCountry, vatRate } = vatService.getCountryAndVatFromRequest(req);
-            const { currency: displayCurrency, currencySymbol } = currencySelectionService.getDisplayCurrencyFromRequest(req);
-            let sekToDisplayRate = 1;
-            if (displayCurrency && displayCurrency !== STORE_BASE_CURRENCY) {
-                try {
-                    sekToDisplayRate = await currencyService.getExchangeRate(STORE_BASE_CURRENCY, displayCurrency, rateCache);
-                } catch (e) {
-                    devWarn('Product list: currency rate fetch failed, using SEK', e.message);
-                }
-            }
-            const priceCtx = { vatRate, sekToDisplayRate, displayCurrency: displayCurrency || STORE_BASE_CURRENCY };
-
-            // Process inventory data for each product; prices stored in SEK, converted to display currency
-            products = await Promise.all(products.map(async (product) => {
-                const basePrice = product.price || 0;
-                product.vat_display = { country: vatCountry, vat_rate: vatRate };
-                let priceInclVatSEK = Math.round(basePrice * (1 + vatRate) * 100) / 100;
-                product.price_including_vat = displayCurrency === STORE_BASE_CURRENCY ? priceInclVatSEK : Math.round(priceInclVatSEK * sekToDisplayRate * 100) / 100;
-                const compareAt = product.compareAtPrice ?? product.compare_at_price;
-                if (typeof compareAt === 'number' && !isNaN(compareAt) && compareAt > 0) {
-                    const compareAtSEK = Math.round(compareAt * (1 + vatRate) * 100) / 100;
-                    product.compare_at_price_including_vat = displayCurrency === STORE_BASE_CURRENCY ? compareAtSEK : Math.round(compareAtSEK * sekToDisplayRate * 100) / 100;
-                }
-                product.currency = displayCurrency || STORE_BASE_CURRENCY;
-                product.currencySymbol = currencySymbol || currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY);
-                try {
-                    const multiCurrencyPrices = await currencyService.getMultiCurrencyPrices(basePrice, STORE_BASE_CURRENCY, rateCache);
-                    product.base_price = basePrice;
-                    product.prices = multiCurrencyPrices;
-                } catch (currencyError) {
-                    logger.warn('products_list_multi_currency_failed', {
-                        productId: product.id,
-                        message: currencyError.message || String(currencyError)
-                    });
-                    product.base_price = basePrice;
-                    product.prices = { [STORE_BASE_CURRENCY]: basePrice };
-                }
-                
-                if (product.inventory) {
-                    // Process colors
-                    if (product.inventory.colors && Array.isArray(product.inventory.colors)) {
-                        product.inventory.colors = product.inventory.colors.map((color, index) => ({
-                            id: color.id || `color_${Date.now()}_${index}`,
-                            name: color.name || 'Unnamed Color',
-                            hex: color.hex || '#000000',
-                            available: color.available !== undefined ? color.available : true,
-                            sortOrder: color.sortOrder !== undefined ? color.sortOrder : index
-                        }));
-                    }
-                    
-                    // Process sizes
-                    if (product.inventory.sizes && Array.isArray(product.inventory.sizes)) {
-                        product.inventory.sizes = product.inventory.sizes.map((size, index) => ({
-                            id: size.id || `size_${Date.now()}_${index}`,
-                            name: size.name || 'Unnamed Size',
-                            description: size.description || '',
-                            available: size.available !== undefined ? size.available : true,
-                            sortOrder: size.sortOrder !== undefined ? size.sortOrder : index
-                        }));
-                    }
-                    
-                    // Process variants (storefront expects quantity; backend stores quantity)
-                    if (product.inventory.variants && Array.isArray(product.inventory.variants)) {
-                        product.inventory.variants = product.inventory.variants.map((variant, index) => ({
-                            id: variant.id || `variant_${Date.now()}_${index}`,
-                            colorId: variant.colorId,
-                            sizeId: variant.sizeId,
-                            sku: variant.sku || '',
-                            price: variant.price || product.price,
-                            quantity: variant.quantity !== undefined ? variant.quantity : (variant.stock !== undefined ? variant.stock : 0),
-                            stock: variant.stock !== undefined ? variant.stock : (variant.quantity !== undefined ? variant.quantity : 0),
-                            available: variant.available !== undefined ? variant.available : true,
-                            images: variant.images || [],
-                            sortOrder: variant.sortOrder !== undefined ? variant.sortOrder : index
-                        }));
-                    }
-                }
-                normalizeProductForResponse(product);
-                
-                // Translate product content based on language
-                return translationService.translateProduct(product, language);
-            }));
-            
-            // Get review statistics for all products (non-blocking, fails silently)
-            let reviewStatsMap = {};
-            try {
-                const productIds = products.map(p => p.id).filter(Boolean);
-                if (productIds.length > 0) {
-                    reviewStatsMap = await reviewStatsHelper.getMultipleProductReviewStats(productIds);
-                }
-            } catch (error) {
-                logger.warn('products_detail_review_stats_seo_failed', { message: error.message });
-            }
-            
-            // Add SEO fields to each product (additive only)
-            let productsWithSEO = products.map(product => {
-                const reviewStats = reviewStatsMap[product.id] || null;
-                const seoFields = seoHelper.getProductSEOFields(product, reviewStats);
-                return {
-                    ...product,
-                    ...seoFields
-                };
-            });
-
             if (hasActiveProductFilters(listFilters)) {
-                productsWithSEO = productsWithSEO.filter((p) =>
-                    productFilterService.productMatchesFilters(p, listFilters, priceCtx)
-                );
+                products = products
+                    .filter(productFilterService.isListableOnStorefront)
+                    .filter((p) => productFilterService.productMatchesFilters(p, listFilters, priceCtx));
+                if (listFilters.sort) {
+                    products = productFilterService.sortProducts(products, listFilters.sort);
+                }
             }
-            if (listFilters.sort) {
-                productsWithSEO = productFilterService.sortProducts(productsWithSEO, listFilters.sort);
-            }
-            
-            return responseCache.json(
-                res,
-                req,
-                {
-                    success: true,
-                    data: productsWithSEO,
-                    count: productsWithSEO.length,
-                    total: productsWithSEO.length,
-                    featuredOnly: featuredOnly || undefined,
-                    appliedFilters: hasActiveProductFilters(listFilters)
-                        ? productFilterService.buildAppliedFiltersResponse(listFilters)
-                        : undefined,
-                    language: language,
-                    currency: displayCurrency || STORE_BASE_CURRENCY,
-                    currencySymbol:
-                        currencySymbol ||
-                        currencySelectionService.getCurrencySymbol(displayCurrency || STORE_BASE_CURRENCY)
-                },
-                'products:list'
-            );
-        } else {
-            res.status(500).json({
-                success: false,
-                error: 'Failed to retrieve products'
-            });
         }
+
+        if (limit && parseInt(limit, 10) > 0) {
+            products = products.slice(0, parseInt(limit, 10));
+        }
+
+        products = await enrichProductsForStorefrontList(products, req, language, priceCtx);
+
+        let reviewStatsMap = {};
+        try {
+            const productIds = products.map((p) => p.id).filter(Boolean);
+            if (productIds.length > 0) {
+                reviewStatsMap = await reviewStatsHelper.getMultipleProductReviewStats(productIds);
+            }
+        } catch (error) {
+            logger.warn('products_detail_review_stats_seo_failed', { message: error.message });
+        }
+
+        const productsWithSEO = products.map((product) => {
+            const reviewStats = reviewStatsMap[product.id] || null;
+            const seoFields = seoHelper.getProductSEOFields(product, reviewStats);
+            const searchMatch = listFilters.search
+                ? productFilterService.buildSearchMatchAnnotation(product, listFilters.search)
+                : undefined;
+            return {
+                ...product,
+                ...seoFields,
+                ...(searchMatch ? { searchMatch } : {})
+            };
+        });
+
+        return responseCache.json(
+            res,
+            req,
+            {
+                success: true,
+                data: productsWithSEO,
+                count: productsWithSEO.length,
+                total: productsWithSEO.length,
+                featuredOnly: featuredOnly || undefined,
+                appliedFilters: hasActiveProductFilters(listFilters)
+                    ? productFilterService.buildAppliedFiltersResponse(listFilters)
+                    : undefined,
+                language,
+                currency: displayCurrency,
+                currencySymbol
+            },
+            'products:list'
+        );
     } catch (error) {
         logger.error('products_list_error', { message: error.message });
         res.status(500).json({

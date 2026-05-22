@@ -3,6 +3,7 @@
  */
 
 const featuredProduct = require('../utils/featuredProduct');
+const productSearchService = require('./productSearchService');
 
 const SORT_KEYS = new Set([
     'featured',
@@ -140,8 +141,31 @@ function parseFilterQuery(query = {}) {
         query.priceMax != null && query.priceMax !== ''
             ? Number(query.priceMax)
             : null;
-    const sort = query.sort ? String(query.sort).trim().toLowerCase() : null;
-    const search = query.search ? String(query.search).trim() : '';
+    let sort = query.sort ? String(query.sort).trim().toLowerCase() : null;
+    const skuOnly = query.sku != null && String(query.sku).trim() !== '';
+    const searchRaw =
+        query.search != null && String(query.search).trim() !== ''
+            ? String(query.search).trim()
+            : skuOnly
+              ? String(query.sku).trim()
+              : query.q != null && String(query.q).trim() !== ''
+                ? String(query.q).trim()
+                : query.query != null && String(query.query).trim() !== ''
+                  ? String(query.query).trim()
+                  : '';
+
+    const searchParsed = searchRaw ? productSearchService.parseProductSearchQuery(searchRaw) : null;
+    if (searchParsed) {
+        if (!Number.isFinite(priceMin) && searchParsed.priceMin != null) {
+            priceMin = searchParsed.priceMin;
+        }
+        if (!Number.isFinite(priceMax) && searchParsed.priceMax != null) {
+            priceMax = searchParsed.priceMax;
+        }
+        if (!sort && searchParsed.impliedSort && SORT_KEYS.has(searchParsed.impliedSort)) {
+            sort = searchParsed.impliedSort;
+        }
+    }
 
     return {
         categories: categories.map((c) => toFacetId(c)),
@@ -152,7 +176,10 @@ function parseFilterQuery(query = {}) {
         priceMin: Number.isFinite(priceMin) ? priceMin : null,
         priceMax: Number.isFinite(priceMax) ? priceMax : null,
         sort: sort && SORT_KEYS.has(sort) ? sort : null,
-        search
+        search: searchRaw,
+        searchParsed,
+        /** When true, match only SKU/MPN fields (from `?sku=`). */
+        searchSkuOnly: skuOnly && !query.search
     };
 }
 
@@ -339,23 +366,210 @@ function getProductTagIds(product) {
         .filter((t) => t && !FACET_TAG_EXCLUDE.has(t));
 }
 
-function productMatchesFilters(product, filters, ctx) {
-    if (filters.search) {
-        const searchLower = filters.search.toLowerCase();
-        const name = (product.name || '').toLowerCase();
-        const description = (product.description || '').toLowerCase();
-        const productCategory = (product.category || '').toLowerCase();
-        const productClasses = Array.isArray(product.productClasses)
-            ? product.productClasses.map((c) => String(c).toLowerCase()).join(' ')
-            : '';
-        if (
-            !name.includes(searchLower) &&
-            !description.includes(searchLower) &&
-            !productCategory.includes(searchLower) &&
-            !productClasses.includes(searchLower)
-        ) {
-            return false;
+/** All SKUs / MPNs on a product (root + every variant + matrix rows). Lowercase for matching. */
+function collectProductSkuTokens(product) {
+    const tokens = new Set();
+    const add = (value) => {
+        const s = String(value || '').trim();
+        if (s) tokens.add(s.toLowerCase());
+    };
+
+    add(product.sku);
+    add(product.mpn);
+    add(product.gtin);
+    add(product.barcode);
+
+    const inv = product.inventory || {};
+    for (const v of inv.variants || product.variants || []) {
+        add(v.sku);
+        add(v.mpn);
+        add(v.barcode);
+    }
+    if (Array.isArray(inv.colorSizeMatrix?.byColor)) {
+        for (const row of inv.colorSizeMatrix.byColor) {
+            for (const s of row.sizes || []) {
+                add(s.sku);
+            }
         }
+    }
+
+    return tokens;
+}
+
+/** Raw SKU strings (original casing) for annotations. */
+function collectProductSkuValues(product) {
+    const values = [];
+    const seen = new Set();
+    const add = (value) => {
+        const s = String(value || '').trim();
+        if (!s) return;
+        const key = s.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        values.push(s);
+    };
+    add(product.sku);
+    add(product.mpn);
+    const inv = product.inventory || {};
+    for (const v of inv.variants || product.variants || []) {
+        add(v.sku);
+        add(v.mpn);
+    }
+    if (Array.isArray(inv.colorSizeMatrix?.byColor)) {
+        for (const row of inv.colorSizeMatrix.byColor) {
+            for (const s of row.sizes || []) add(s.sku);
+        }
+    }
+    return values;
+}
+
+/** Style / “product room” prefix from variant SKU (PM-HOODIE-BLK-M → pm-hoodie). */
+function deriveSkuStylePrefix(sku) {
+    const parts = String(sku || '')
+        .trim()
+        .toLowerCase()
+        .split(/[-_]/)
+        .filter(Boolean);
+    if (parts.length >= 3) return parts.slice(0, -2).join('-');
+    if (parts.length === 2) return parts[0];
+    return parts.join('-');
+}
+
+function looksLikeSkuQuery(q) {
+    return /^[a-z0-9][a-z0-9_-]*$/i.test(q) && q.length >= 3 && (q.includes('-') || q.includes('_'));
+}
+
+function productSkuStylePrefixes(product) {
+    const prefixes = new Set();
+    for (const sku of collectProductSkuTokens(product)) {
+        const p = deriveSkuStylePrefix(sku);
+        if (p) prefixes.add(p);
+    }
+    return prefixes;
+}
+
+function productMatchesSkuStyleFamily(product, queryLower) {
+    if (!looksLikeSkuQuery(queryLower)) return false;
+    const queryPrefix = deriveSkuStylePrefix(queryLower);
+    if (!queryPrefix) return false;
+
+    for (const prefix of productSkuStylePrefixes(product)) {
+        if (prefix === queryPrefix) return true;
+    }
+    for (const sku of collectProductSkuTokens(product)) {
+        if (sku === queryPrefix || sku.startsWith(`${queryPrefix}-`) || sku.startsWith(`${queryPrefix}_`)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Text + SKU search for storefront (search modal, /shop, /all-products).
+ * SKU hit = whole parent product (all colors/sizes), never a single variant row.
+ */
+function productMatchesSearch(product, searchTerm, options = {}) {
+    const q = String(searchTerm || '').trim().toLowerCase();
+    if (!q) return true;
+
+    const skuTokens = collectProductSkuTokens(product);
+    const skuHaystack = [...skuTokens].join(' ');
+
+    if (options.searchSkuOnly) {
+        if (skuTokens.has(q)) return true;
+        if (skuHaystack.includes(q)) return true;
+        return productMatchesSkuStyleFamily(product, q);
+    }
+
+    if (skuTokens.has(q)) return true;
+    if (skuHaystack.includes(q)) return true;
+    if (productMatchesSkuStyleFamily(product, q)) return true;
+
+    const parsed =
+        options.searchParsed || productSearchService.parseProductSearchQuery(searchTerm);
+    const facetHelpers = {
+        colorEntries: collectProductColorEntries(product),
+        sizeEntries: collectProductSizeEntries(product),
+        skuTokens
+    };
+    return productSearchService.productMatchesParsedSearch(
+        product,
+        parsed,
+        options.ctx || {},
+        facetHelpers
+    );
+}
+
+/**
+ * Storefront hint when `search` is active — API always returns the full product document.
+ */
+function buildSearchMatchAnnotation(product, searchTerm) {
+    const q = String(searchTerm || '').trim();
+    if (!q) return null;
+
+    const qLower = q.toLowerCase();
+    const matchedSkus = collectProductSkuValues(product).filter((sku) => {
+        const s = sku.toLowerCase();
+        return s === qLower || s.includes(qLower);
+    });
+
+    const parsed = productSearchService.parseProductSearchQuery(q);
+
+    function intentSearchHint() {
+        if (parsed.intents.discount) return 'Showing sale and discounted items';
+        if (parsed.intents.dropped) return 'Showing dropped / latest drop items';
+        if (parsed.intents.featured) return 'Showing featured items';
+        if (parsed.intents.newest || parsed.intents.new) return 'Showing newest arrivals';
+        if (parsed.priceMin != null || parsed.priceMax != null) return 'Filtered by price in your search';
+        return 'Full product — all variants. Optional PDP pre-select from matchedSkus only.';
+    }
+
+    if (matchedSkus.length > 0) {
+        return {
+            scope: 'fullProduct',
+            matchedBy: 'sku',
+            matchedSkus,
+            skuStylePrefix: deriveSkuStylePrefix(q),
+            includeAllVariants: true,
+            intents: parsed.intents,
+            hint: 'Show the full product (all colors/sizes). Do not narrow the card or PDP to matchedSkus only.'
+        };
+    }
+
+    if (productMatchesSearch(product, q, { searchSkuOnly: false, searchParsed: parsed })) {
+        const matchedBy =
+            Object.keys(parsed.intents).length > 0
+                ? 'intent'
+                : parsed.priceMin != null || parsed.priceMax != null
+                  ? 'price'
+                  : 'text';
+        return {
+            scope: 'fullProduct',
+            matchedBy,
+            matchedSkus: [],
+            includeAllVariants: true,
+            intents: parsed.intents,
+            priceHint:
+                parsed.priceMin != null || parsed.priceMax != null
+                    ? { min: parsed.priceMin, max: parsed.priceMax }
+                    : undefined,
+            hint: intentSearchHint()
+        };
+    }
+
+    return null;
+}
+
+function productMatchesFilters(product, filters, ctx) {
+    if (
+        filters.search &&
+        !productMatchesSearch(product, filters.search, {
+            searchSkuOnly: filters.searchSkuOnly,
+            searchParsed: filters.searchParsed,
+            ctx
+        })
+    ) {
+        return false;
     }
 
     if (filters.categories.length > 0) {
@@ -540,6 +754,8 @@ function buildAppliedFiltersResponse(filters) {
     if (filters.priceMax != null) out.priceMax = filters.priceMax;
     if (filters.sort) out.sort = filters.sort;
     if (filters.search) out.search = filters.search;
+    if (filters.searchSkuOnly) out.sku = filters.search;
+    if (filters.searchParsed?.impliedSort && !out.sort) out.sort = filters.searchParsed.impliedSort;
     return out;
 }
 
@@ -553,6 +769,11 @@ module.exports = {
     productMatchesFilters,
     productMatchesColorFilter,
     productMatchesSizeFilter,
+    productMatchesSearch,
+    buildSearchMatchAnnotation,
+    collectProductSkuTokens,
+    collectProductSkuValues,
+    deriveSkuStylePrefix,
     collectProductColorEntries,
     collectProductSizeEntries,
     catalogFacetMergeKey,
