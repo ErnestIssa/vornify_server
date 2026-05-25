@@ -4,6 +4,11 @@ const getDBInstance = require('../vornifydb/dbInstance');
 
 const db = getDBInstance();
 const cacheInvalidation = require('../services/cacheInvalidation');
+const reviewFilterService = require('../services/reviewFilterService');
+const reviewsCatalogCache = require('../services/reviewsCatalogCache');
+const purchasableProductsCache = require('../services/purchasableProductsCache');
+const reviewFormService = require('../services/reviewFormService');
+const responseCache = require('../core/cache/responseCache');
 
 // Helper function to generate unique Review ID
 async function generateUniqueReviewId() {
@@ -204,6 +209,7 @@ async function fetchReviewById(id) {
         ...review,
         location: review.location || null,
         images: Array.isArray(review.images) ? review.images : (review.images ? [review.images] : []),
+        videos: Array.isArray(review.videos) ? review.videos : (review.videos ? [review.videos] : []),
         isVerified: review.verifiedPurchase || false
     };
 }
@@ -226,119 +232,249 @@ async function countReviewsForEmail(customerEmail) {
     }
 }
 
+async function loadProductMetaByIds(productIds) {
+    const unique = [...new Set(productIds.filter(Boolean))];
+    const map = {};
+    if (unique.length === 0) return map;
+
+    const result = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'products',
+        command: '--read',
+        data: { published: true }
+    });
+    if (!result.success) return map;
+
+    let products = result.data || [];
+    if (!Array.isArray(products)) products = products ? [products] : [];
+    const want = new Set(unique.map(String));
+
+    for (const product of products) {
+        const id = String(product.id || product._id || '');
+        if (!want.has(id)) continue;
+        map[id] = {
+            name: product.name,
+            imageUrl: reviewFilterService.productImageUrl(product),
+            inStock: reviewFilterService.productInStock(product),
+            slug: product.slug || null
+        };
+    }
+    return map;
+}
+
+async function searchPublishedProductsByName(q) {
+    const qLower = String(q || '').trim().toLowerCase();
+    if (!qLower) return [];
+
+    const result = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'products',
+        command: '--read',
+        data: { published: true }
+    });
+    if (!result.success) return [];
+
+    let products = result.data || [];
+    if (!Array.isArray(products)) products = products ? [products] : [];
+
+    return products
+        .filter((p) => (p.name || '').toLowerCase().includes(qLower))
+        .sort(
+            (a, b) =>
+                reviewFilterService.rankProductNameMatch(b, qLower) -
+                reviewFilterService.rankProductNameMatch(a, qLower)
+        );
+}
+
+function countReviewsForProduct(reviews, productId) {
+    const pid = String(productId);
+    return (reviews || []).filter(
+        (r) =>
+            reviewFilterService.isApprovedReview(r, 'approved') &&
+            String(reviewFilterService.getReviewProductId(r) || '') === pid
+    ).length;
+}
+
+// GET /api/reviews/purchasable-products — write-review picker (≥1 paid order ever)
+router.get('/purchasable-products', async (req, res) => {
+    try {
+        if (responseCache.tryHit(req, res, 'reviews:purchasable-products')) return;
+
+        const email = req.query.email || '';
+        const q = req.query.q || req.query.search || '';
+        const result = await purchasableProductsCache.listPurchasableProducts(db, { email, q });
+        if (!result.ok) {
+            return res.status(500).json({ success: false, error: result.error || 'Failed to load products' });
+        }
+
+        return responseCache.json(
+            res,
+            req,
+            { success: true, products: result.products },
+            'reviews:purchasable-products',
+            60
+        );
+    } catch (error) {
+        console.error('reviews_purchasable_products_error:', error);
+        res.status(500).json({ success: false, error: 'Failed to load purchasable products' });
+    }
+});
+
+// GET /api/reviews/filter-options — facets for desktop reviews filter panel
+router.get('/filter-options', async (req, res) => {
+    try {
+        if (responseCache.tryHit(req, res, 'reviews:filter-options')) return;
+
+        const filters = reviewFilterService.parseReviewFilterQuery({
+            ...req.query,
+            status: req.query.status || 'approved'
+        });
+        const loaded = await reviewsCatalogCache.getReviews(db, { status: 'approved' });
+        if (!loaded.ok) {
+            return res.status(500).json({ success: false, error: loaded.error || 'Failed to load reviews' });
+        }
+
+        const productIds = [
+            ...new Set(
+                loaded.reviews
+                    .map((r) => reviewFilterService.getReviewProductId(r))
+                    .filter(Boolean)
+            )
+        ];
+        const productMetaById = await loadProductMetaByIds(productIds);
+        const facets = reviewFilterService.extractFacets(
+            loaded.reviews,
+            filters,
+            productMetaById
+        );
+
+        return responseCache.json(res, req, { success: true, facets }, 'reviews:filter-options', 120);
+    } catch (error) {
+        console.error('reviews_filter_options_error:', error);
+        res.status(500).json({ success: false, error: 'Failed to load review filter options' });
+    }
+});
+
+// GET /api/reviews/count — live count for active filters
+router.get('/count', async (req, res) => {
+    try {
+        if (responseCache.tryHit(req, res, 'reviews:count')) return;
+
+        const filters = reviewFilterService.parseReviewFilterQuery({
+            ...req.query,
+            status: req.query.status || 'approved'
+        });
+        const loaded = await reviewsCatalogCache.getReviews(db, { status: 'approved' });
+        if (!loaded.ok) {
+            return res.status(500).json({ success: false, error: loaded.error || 'Failed to load reviews' });
+        }
+
+        const matched = reviewFilterService.filterAndSortReviews(loaded.reviews, filters);
+
+        return responseCache.json(
+            res,
+            req,
+            { success: true, count: matched.length, total: matched.length },
+            'reviews:count',
+            60
+        );
+    } catch (error) {
+        console.error('reviews_count_error:', error);
+        res.status(500).json({ success: false, error: 'Failed to count reviews' });
+    }
+});
+
+// GET /api/reviews/product-suggest — product with no reviews (did you mean)
+router.get('/product-suggest', async (req, res) => {
+    try {
+        const q = req.query.q || req.query.search || '';
+        const candidates = await searchPublishedProductsByName(q);
+        if (candidates.length === 0) {
+            return res.json({ success: true, product: null });
+        }
+
+        const loaded = await reviewsCatalogCache.getReviews(db, { status: 'approved' });
+        const reviews = loaded.ok ? loaded.reviews : [];
+
+        const product = candidates[0];
+        const id = String(product.id || product._id);
+        const reviewCount = countReviewsForProduct(reviews, id);
+
+        return res.json({
+            success: true,
+            product: {
+                id,
+                name: product.name,
+                imageUrl: reviewFilterService.productImageUrl(product),
+                inStock: reviewFilterService.productInStock(product),
+                slug: product.slug || null,
+                hasReviews: reviewCount > 0,
+                reviewCount
+            }
+        });
+    } catch (error) {
+        console.error('reviews_product_suggest_error:', error);
+        res.status(500).json({ success: false, error: 'Failed to suggest product' });
+    }
+});
+
 // GET /api/reviews - Get all reviews with filtering
 router.get('/', async (req, res) => {
     try {
-        const { 
-            page = 1, 
-            limit = 50, 
-            status, 
-            productId,
-            source, 
-            rating, 
-            verified, 
-            flagged, 
-            search,
-            startDate,
-            endDate,
-            sortBy = 'createdAt',
-            sortOrder = 'desc'
-        } = req.query;
-        
-        // Build simple query for VortexDB (no complex MongoDB operators)
-        let query = {};
-        
-        // Add simple filters (VortexDB compatible)
-        if (status) query.status = status;
-        if (productId) query.productId = productId;
-        if (source) query.reviewSource = source;
-        if (rating) query.rating = parseInt(rating);
-        if (verified !== undefined) query.verifiedPurchase = verified === 'true';
-        if (flagged !== undefined) query.flagged = flagged === 'true';
+        if (responseCache.tryHit(req, res, 'reviews:list')) return;
 
-        const result = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'reviews',
-            command: '--read',
-            data: query
-        });
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+        const filters = reviewFilterService.parseReviewFilterQuery(req.query);
 
-        if (result.success) {
-            let reviews = result.data || [];
-            if (!Array.isArray(reviews)) {
-                reviews = [reviews];
-            }
-
-            // Apply additional filters in memory (for complex queries)
-            
-            // Date range filtering
-            if (startDate || endDate) {
-                const start = startDate ? new Date(startDate) : null;
-                const end = endDate ? new Date(endDate) : null;
-                reviews = reviews.filter(review => {
-                    const reviewDate = new Date(review.createdAt);
-                    if (start && reviewDate < start) return false;
-                    if (end && reviewDate > end) return false;
-                    return true;
-                });
-            }
-            
-            // Search functionality
-            if (search) {
-                const searchLower = search.toLowerCase();
-                reviews = reviews.filter(review => {
-                    return (
-                        (review.title && review.title.toLowerCase().includes(searchLower)) ||
-                        (review.comment && review.comment.toLowerCase().includes(searchLower)) ||
-                        (review.product?.name && review.product.name.toLowerCase().includes(searchLower)) ||
-                        (review.customer?.name && review.customer.name.toLowerCase().includes(searchLower)) ||
-                        (review.customerName && review.customerName.toLowerCase().includes(searchLower))
-                    );
-                });
-            }
-
-            // Sort reviews
-            reviews.sort((a, b) => {
-                const aValue = a[sortBy] || a.createdAt;
-                const bValue = b[sortBy] || b.createdAt;
-                
-                if (sortOrder === 'desc') {
-                    return new Date(bValue) - new Date(aValue);
-                } else {
-                    return new Date(aValue) - new Date(bValue);
-                }
-            });
-
-            // Pagination
-            const startIndex = (page - 1) * limit;
-            const endIndex = startIndex + parseInt(limit);
-            const paginatedReviews = reviews.slice(startIndex, endIndex);
-
-            // Ensure all reviews have location and images fields (even if empty)
-            const normalizedReviews = paginatedReviews.map(review => ({
-                ...review,
-                location: review.location || null, // Always include location field
-                images: Array.isArray(review.images) ? review.images : (review.images ? [review.images] : []), // Always include images as array
-                // Ensure isVerified field exists (for frontend compatibility)
-                isVerified: review.verifiedPurchase || false
-            }));
-
-            res.json({
-                success: true,
-                data: normalizedReviews,
-                pagination: {
-                    page: parseInt(page),
-                    limit: parseInt(limit),
-                    total: reviews.length,
-                    pages: Math.ceil(reviews.length / limit)
-                }
-            });
-        } else {
-            res.status(500).json({
+        const loaded = await reviewsCatalogCache.getReviews(db, { status: filters.status });
+        if (!loaded.ok) {
+            return res.status(500).json({
                 success: false,
-                error: 'Failed to retrieve reviews'
+                error: loaded.error || 'Failed to retrieve reviews'
             });
         }
+
+        let reviews = loaded.reviews;
+
+        if (req.query.flagged !== undefined) {
+            const flagged = req.query.flagged === 'true';
+            reviews = reviews.filter((r) => Boolean(r.flagged) === flagged);
+        }
+        if (req.query.source) {
+            reviews = reviews.filter((r) => r.reviewSource === req.query.source);
+        }
+        if (req.query.startDate || req.query.endDate) {
+            const start = req.query.startDate ? new Date(req.query.startDate) : null;
+            const end = req.query.endDate ? new Date(req.query.endDate) : null;
+            reviews = reviews.filter((review) => {
+                const reviewDate = new Date(review.createdAt);
+                if (start && reviewDate < start) return false;
+                if (end && reviewDate > end) return false;
+                return true;
+            });
+        }
+
+        const matched = reviewFilterService.filterAndSortReviews(reviews, filters);
+        const startIndex = (page - 1) * limit;
+        const paginatedReviews = matched.slice(startIndex, startIndex + limit);
+
+        return responseCache.json(
+            res,
+            req,
+            {
+                success: true,
+                data: paginatedReviews,
+                pagination: {
+                    page,
+                    limit,
+                    total: matched.length,
+                    pages: Math.ceil(matched.length / limit) || 0
+                }
+            },
+            'reviews:list',
+            120
+        );
     } catch (error) {
         console.error('Get reviews error:', error);
         res.status(500).json({
@@ -490,9 +626,13 @@ router.get('/:id', async (req, res) => {
             const review = result.data;
             const normalizedReview = {
                 ...review,
-                location: review.location || null, // Always include location field
-                images: Array.isArray(review.images) ? review.images : (review.images ? [review.images] : []), // Always include images as array
-                // Ensure isVerified field exists (for frontend compatibility)
+                location: review.location || null,
+                images: Array.isArray(review.images) ? review.images : (review.images ? [review.images] : []),
+                videos: Array.isArray(review.videos) ? review.videos : (review.videos ? [review.videos] : []),
+                productNames: review.productNames,
+                products: review.products,
+                sizePurchased: review.sizePurchased || null,
+                productName: review.productName || reviewFilterService.getReviewProductName(review),
                 isVerified: review.verifiedPurchase || false
             };
             
@@ -562,20 +702,32 @@ router.post('/', async (req, res) => {
             ? reviewData.reviewSource
             : (reviewData.orderId ? 'post_purchase' : 'product_page');
 
-        // For productId === 'general': skip duplicate check and review-limit check (allow multiple reviews per email).
-        if (reviewData.productId !== 'general') {
-            // 1. Duplicate: one review per (customerEmail + productId)
-            const duplicate = await hasDuplicateReview(reviewData.customerEmail, reviewData.productId);
-            if (duplicate) {
-                return res.status(409).json({
-                    success: false,
-                    message: 'You have already submitted a review for this product.',
-                    error: 'Duplicate review',
-                    code: 'DUPLICATE_REVIEW'
-                });
+        const productPayload = reviewFormService.parseProductsPayload(reviewData);
+        const effectiveProductId = productPayload.productId;
+        const isGeneralOnly =
+            !productPayload.hasCatalogProducts && effectiveProductId === 'general';
+
+        // For productId === 'general' with no catalog products: skip duplicate/limit (general feedback).
+        if (!isGeneralOnly) {
+            const duplicateIds =
+                productPayload.catalogIds.length > 0
+                    ? productPayload.catalogIds
+                    : effectiveProductId !== 'general'
+                      ? [effectiveProductId]
+                      : [];
+
+            for (const pid of duplicateIds) {
+                const duplicate = await hasDuplicateReview(reviewData.customerEmail, pid);
+                if (duplicate) {
+                    return res.status(409).json({
+                        success: false,
+                        message: 'You have already submitted a review for one of these products.',
+                        error: 'Duplicate review',
+                        code: 'DUPLICATE_REVIEW'
+                    });
+                }
             }
 
-            // 2. Review limit: max reviews per email = number of orders linked to that email
             const orderCount = await countOrdersForEmail(reviewData.customerEmail);
             const existingReviewCount = await countReviewsForEmail(reviewData.customerEmail);
             if (orderCount > 0 && existingReviewCount >= orderCount) {
@@ -588,15 +740,44 @@ router.post('/', async (req, res) => {
             }
         }
 
-        // 3. Purchase verification (backend-only authority)
-        // When productId is "general", skip purchase verification and set verifiedPurchase = false (general feedback).
         let orderInfo = null;
         let verifiedPurchase = false;
-        if (reviewData.productId !== 'general') {
+        if (productPayload.hasCatalogProducts) {
+            const verifyIds = [...new Set(productPayload.catalogIds)];
+            for (const pid of verifyIds) {
+                let info = null;
+                if (reviewData.orderId) {
+                    info = await verifyPurchaseByOrder(
+                        reviewData.orderId,
+                        reviewData.customerEmail,
+                        pid
+                    );
+                } else {
+                    info = await verifyPurchase(reviewData.customerEmail, pid);
+                }
+                if (info) {
+                    orderInfo = info;
+                    verifiedPurchase = true;
+                    break;
+                }
+            }
+            if (!verifiedPurchase) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'You must have purchased this product to submit a review. We could not verify a purchase for this email and product.',
+                    error: 'Purchase not verified',
+                    code: 'PURCHASE_NOT_VERIFIED'
+                });
+            }
+        } else if (effectiveProductId !== 'general') {
             if (reviewData.orderId) {
-                orderInfo = await verifyPurchaseByOrder(reviewData.orderId, reviewData.customerEmail, reviewData.productId);
+                orderInfo = await verifyPurchaseByOrder(
+                    reviewData.orderId,
+                    reviewData.customerEmail,
+                    effectiveProductId
+                );
             } else {
-                orderInfo = await verifyPurchase(reviewData.customerEmail, reviewData.productId);
+                orderInfo = await verifyPurchase(reviewData.customerEmail, effectiveProductId);
             }
             if (!orderInfo) {
                 return res.status(403).json({
@@ -617,61 +798,20 @@ router.post('/', async (req, res) => {
             customerInfo = await getCustomerInfo(reviewData.customerEmail);
         }
         let productInfo = null;
-        if (reviewData.productId !== 'general') {
-            productInfo = await getProductInfo(reviewData.productId);
+        if (effectiveProductId !== 'general') {
+            productInfo = await getProductInfo(effectiveProductId);
         }
 
-        // Process images field - always include it, handle null explicitly
-        const processedImages = (() => {
-            // Explicitly handle null, undefined, or missing
-            if (reviewData.images === null || reviewData.images === undefined) {
-                console.log(`📸 No images provided for review ${reviewId} (null/undefined)`);
-                return []; // Default to empty array
-            }
-            
-            if (!Array.isArray(reviewData.images)) {
-                console.warn(`⚠️ Review images is not an array for review ${reviewId}:`, typeof reviewData.images, reviewData.images);
-                return []; // Return empty array if not valid
-            }
-            
-            if (reviewData.images.length === 0) {
-                console.log(`📸 Empty images array for review ${reviewId}`);
-                return []; // Return empty array
-            }
-            
-            // Process each image - accept URLs and base64
-            const processed = reviewData.images.map((img, index) => {
-                if (img === null || img === undefined) {
-                    console.warn(`⚠️ Image at index ${index} is null/undefined`);
-                    return null;
-                }
-                if (typeof img !== 'string') {
-                    console.warn(`⚠️ Invalid image format at index ${index}:`, typeof img, img);
-                    return null;
-                }
-                // If it's already a URL string, use it
-                if (img.startsWith('http://') || img.startsWith('https://') || img.startsWith('/uploads/')) {
-                    return img;
-                }
-                // If it's base64 (for backward compatibility), keep it
-                if (img.startsWith('data:image/')) {
-                    return img;
-                }
-                // Otherwise, treat as URL string
-                return String(img);
-            }).filter(img => img !== null && img !== undefined); // Remove any null/undefined values
-            
-            console.log(`📸 Processing ${reviewData.images.length} image(s) for review ${reviewId}, ${processed.length} valid`);
-            if (processed.length > 0) {
-                console.log(`📸 First image URL: ${processed[0]}`);
-            }
-            return processed;
-        })();
+        const processedImages = reviewFormService.processMediaArray(reviewData.images, 'image', reviewId);
+        const processedVideos = reviewFormService.processMediaArray(reviewData.videos, 'video', reviewId);
 
-        // Prepare review: verifiedPurchase and reviewSource set by backend only
         const review = {
             id: reviewId,
-            productId: reviewData.productId,
+            productId: effectiveProductId,
+            productName: productPayload.productName || productInfo?.name || null,
+            productNames: productPayload.productNames.length ? productPayload.productNames : undefined,
+            products: productPayload.products.length ? productPayload.products : undefined,
+            sizePurchased: productPayload.sizePurchased,
             rating: reviewData.rating,
             comment: reviewData.comment,
             reviewSource,
@@ -682,6 +822,7 @@ router.post('/', async (req, res) => {
             createdAt: now,
             updatedAt: now,
             images: processedImages,
+            videos: processedVideos,
             ...(reviewData.customerEmail ? { customerId: reviewData.customerEmail } : {}),
             ...(reviewData.orderId ? { orderId: reviewData.orderId } : {}),
             ...(reviewData.title ? { title: reviewData.title } : {}),
@@ -777,7 +918,12 @@ router.post('/', async (req, res) => {
                     createdAt: review.createdAt,
                     updatedAt: review.updatedAt,
                     ...(review.location ? { location: review.location } : {}),
-                    images: Array.isArray(review.images) ? review.images : []
+                    ...(review.sizePurchased ? { sizePurchased: review.sizePurchased } : {}),
+                    ...(review.productName ? { productName: review.productName } : {}),
+                    ...(review.productNames ? { productNames: review.productNames } : {}),
+                    ...(review.products ? { products: review.products } : {}),
+                    images: Array.isArray(review.images) ? review.images : [],
+                    videos: Array.isArray(review.videos) ? review.videos : []
                 }
             });
         } else {

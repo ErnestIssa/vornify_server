@@ -70,9 +70,27 @@ const CACHE_RULES = [
         namespace: 'products:variants',
         ttl: 120
     },
-    { test: (p) => p === '/api/reviews', namespace: 'reviews:list', ttl: 180 },
+    { test: (p) => p === '/api/reviews', namespace: 'reviews:list', ttl: 120 },
+    { test: (p) => p === '/api/reviews/filter-options', namespace: 'reviews:filter-options', ttl: 120 },
+    { test: (p) => p === '/api/reviews/count', namespace: 'reviews:count', ttl: 60 },
     {
-        test: (p) => /^\/api\/reviews\/[^/]+$/.test(p) && p !== '/api/reviews/analytics',
+        test: (p) => p === '/api/reviews/purchasable-products',
+        namespace: 'reviews:purchasable-products',
+        ttl: 60
+    },
+    {
+        test: (p) => {
+            const m = p.match(/^\/api\/reviews\/([^/]+)$/);
+            if (!m) return false;
+            const seg = m[1];
+            return ![
+                'analytics',
+                'filter-options',
+                'count',
+                'product-suggest',
+                'purchasable-products'
+            ].includes(seg);
+        },
         namespace: 'reviews:detail',
         ttl: 180
     },

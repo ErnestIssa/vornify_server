@@ -20,11 +20,28 @@ function onPaymentsConfigChanged() {
 
 function onReviewsChanged() {
     responseCache.invalidatePrefixes(['reviews:']);
+    try {
+        const reviewsCatalogCache = require('./reviewsCatalogCache');
+        reviewsCatalogCache.invalidateReviewsCatalogCache();
+    } catch (_) {
+        /* optional */
+    }
+}
+
+function onOrdersChanged() {
+    responseCache.invalidatePrefixes(['reviews:purchasable-products']);
+    try {
+        const purchasableProductsCache = require('./purchasableProductsCache');
+        purchasableProductsCache.invalidatePurchasableProductsCache();
+    } catch (_) {
+        /* optional */
+    }
 }
 
 module.exports = {
     onCatalogChanged,
     onSiteContentChanged,
     onPaymentsConfigChanged,
-    onReviewsChanged
+    onReviewsChanged,
+    onOrdersChanged
 };

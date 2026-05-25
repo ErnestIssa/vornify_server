@@ -20,6 +20,7 @@ const { buildCartVersionSource, computeCartVersion } = require('../core/guards/c
 const { logger } = require('../core/logging/logger');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 const tiktokEvents = require('../services/tiktokEvents');
+const cacheInvalidation = require('../services/cacheInvalidation');
 
 /** Stripe PaymentIntent metadata: values must be strings; max 50 keys, key length 40, value 500. */
 function sanitizeStripePaymentIntentMetadata(meta) {
@@ -1055,6 +1056,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                 return;
             }
 
+            cacheInvalidation.onOrdersChanged();
+
             // Mark pending checkout completed (best-effort)
             try {
                 await db.executeOperation({
@@ -1239,6 +1242,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, options = {}) {
                 update: updateData
             }
         });
+
+        if (updateData.paymentStatus === 'succeeded') {
+            cacheInvalidation.onOrdersChanged();
+        }
 
         // Send confirmation/receipt emails asynchronously to avoid slowing down webhook ack or /payments/confirm.
         setImmediate(async () => {
