@@ -1,11 +1,12 @@
 const express = require('express');
 const multer = require('multer');
-const { uploadProductImage, uploadReview, uploadMessage, uploadSupport } = require('../middleware/uploadProductImage');
+const { uploadProductImage, uploadReview, uploadMessage, uploadSupport, uploadSocial } = require('../middleware/uploadProductImage');
 const { 
   uploadProductImage: uploadController,
   uploadReview: uploadReviewController,
   uploadMessage: uploadMessageController,
   uploadSupport: uploadSupportController,
+  uploadSocial: uploadSocialController,
   cleanupUnusedProductImages,
   cleanupUnusedReviewImages,
   cleanupUnusedMessageImages,
@@ -163,6 +164,24 @@ router.post('/message/multiple', uploadMessage.array('attachments', 10), uploadM
 // Upload support ticket attachments (single or multiple files)
 router.post('/support', uploadSupport.single('attachment'), handleMulterError, uploadSupportController);
 router.post('/support/multiple', uploadSupport.array('attachments', 10), handleMulterError, uploadSupportController);
+
+// POST /api/uploads/social — Admin community media (images + videos)
+router.post(
+  '/social',
+  authenticateAdmin,
+  requireCloudinaryConfig,
+  uploadSocial.array('media', 10),
+  handleMulterError,
+  uploadSocialController
+);
+router.post(
+  '/social/single',
+  authenticateAdmin,
+  requireCloudinaryConfig,
+  uploadSocial.single('media'),
+  handleMulterError,
+  uploadSocialController
+);
 
 // POST /api/uploads/cleanup-products
 // Admin-only endpoint to cleanup unused Cloudinary product images

@@ -127,6 +127,55 @@ exports.uploadReview = async (req, res) => {
 };
 
 /**
+ * Admin social/community media upload (images + videos)
+ * FormData field: "media" (single or multiple)
+ */
+exports.uploadSocial = async (req, res) => {
+  try {
+    const files = req.files || (req.file ? [req.file] : []);
+    if (!files.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded',
+        files: [],
+        count: 0
+      });
+    }
+
+    const uploaded = [];
+    for (const file of files) {
+      const url = file.path || file.secure_url;
+      const public_id = file.filename || file.public_id;
+      if (!url || !public_id) {
+        return res.status(500).json({
+          success: false,
+          message: 'Upload produced invalid file data',
+          files: [],
+          count: 0
+        });
+      }
+      const isVideo = file.mimetype && file.mimetype.startsWith('video/');
+      uploaded.push({ url, public_id, type: isVideo ? 'video' : 'image' });
+    }
+
+    return res.status(201).json({
+      success: true,
+      files: uploaded,
+      count: uploaded.length
+    });
+  } catch (error) {
+    console.error('[SOCIAL UPLOAD] error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Social media upload failed',
+      files: [],
+      count: 0,
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
  * Upload message attachments
  * Handles single file or multiple files
  */

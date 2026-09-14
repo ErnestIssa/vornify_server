@@ -1,5 +1,5 @@
 const multer = require('multer');
-const { productImageStorage, reviewStorage, messageStorage, supportStorage } = require('./cloudinaryStorage');
+const { productImageStorage, reviewStorage, messageStorage, supportStorage, socialStorage } = require('./cloudinaryStorage');
 
 const uploadProductImage = multer({
   storage: productImageStorage,
@@ -29,10 +29,18 @@ const uploadSupport = multer({
   },
 });
 
+const uploadSocial = multer({
+  storage: socialStorage,
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB community videos
+  },
+});
+
 module.exports = {
   uploadProductImage,
   uploadReview,
   uploadMessage,
   uploadSupport,
+  uploadSocial,
 };
 

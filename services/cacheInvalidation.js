@@ -38,10 +38,15 @@ function onOrdersChanged() {
     }
 }
 
+function onSocialChanged() {
+    responseCache.invalidatePrefixes(['social:']);
+}
+
 module.exports = {
     onCatalogChanged,
     onSiteContentChanged,
     onPaymentsConfigChanged,
     onReviewsChanged,
-    onOrdersChanged
+    onOrdersChanged,
+    onSocialChanged
 };

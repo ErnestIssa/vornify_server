@@ -98,7 +98,10 @@ const CACHE_RULES = [
     { test: (p) => p === '/api/payments/check-payment-methods', namespace: 'payments:methods', ttl: 300 },
     { test: (p) => p === '/api/payments/config', namespace: 'payments:config', ttl: 600 },
     { test: (p) => p === '/api/tiktok/catalog', namespace: 'tiktok:catalog', ttl: 300 },
-    { test: (p) => p === '/api/tiktok/health', namespace: 'tiktok:health', ttl: 60 }
+    { test: (p) => p === '/api/tiktok/health', namespace: 'tiktok:health', ttl: 60 },
+    { test: (p) => p === '/api/social/feed', namespace: 'social:feed', ttl: 120 },
+    { test: (p) => p === '/api/social/instagram-feed', namespace: 'social:instagram', ttl: 180 },
+    { test: (p) => p === '/api/social/categories', namespace: 'social:categories', ttl: 600 }
 ];
 
 function pathWithoutQuery(req) {

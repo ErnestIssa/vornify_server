@@ -38,7 +38,9 @@ const adminContentRoutes = require('./routes/adminContent');
 const adminNotificationsRoutes = require('./routes/adminNotifications');
 const adminShippingRoutes = require('./routes/adminShipping');
 const adminNoticeBarsRoutes = require('./routes/adminNoticeBars');
+const adminSocialRoutes = require('./routes/adminSocial');
 const publicNoticeBarsRoutes = require('./routes/publicNoticeBars');
+const socialRoutes = require('./routes/social');
 const metaFeedRoutes = require('./routes/metaFeed');
 const vatRoutes = require('./routes/vat');
 const tiktokRoutes = require('./routes/tiktok');
@@ -464,6 +466,7 @@ app.use('/api/shipping', shippingRoutes); // Shipping quotes and methods
 app.use('/api/tracking', trackingRoutes); // Package tracking
 app.use('/api/customers', customerRoutes); // Customer management and analytics
 app.use('/api/reviews', reviewRoutes); // Reviews management and moderation
+app.use('/api/social', socialRoutes); // Community + social feed (public)
 app.use('/api/vat', vatRoutes); // VAT country/rate for request (CF-IPCountry)
 app.use('/api/tiktok', tiktokRoutes); // TikTok Events API (server-side conversion tracking)
 app.use('/api', currencyRoutes); // Currency conversion and settings
@@ -471,6 +474,7 @@ app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication (login, ver
 app.use('/api/admin', adminAuthRoutes); // Also expose invite + accept-invite at /api/admin/invite, /api/admin/accept-invite (frontend expects these paths)
 app.use('/api/admin', adminContentRoutes); // Admin content management (public read, protected write)
 app.use('/api/admin', adminNoticeBarsRoutes); // Notice bars CMS (draft / publish; admin only)
+app.use('/api/admin', adminSocialRoutes); // Social / community media CMS
 app.use('/api/public', publicNoticeBarsRoutes); // Published notice bars for storefront
 app.use('/api/admin', adminNotificationsRoutes); // Admin notifications (list, create, delete, on-login)
 app.use('/api/admin/shipping', adminShippingRoutes); // Admin shipping config (zones, methods, prices, free-areas)
@@ -596,6 +600,31 @@ if (process.env.NODE_ENV !== 'test') {
         } else {
             devLog('📧 [DISCOUNT REMINDER] Service disabled (ENABLE_DISCOUNT_REMINDER=false)');
         }
+
+        // Instagram social feed sync (default every 6 hours)
+        if (process.env.ENABLE_INSTAGRAM_SYNC !== 'false') {
+            const instagramSyncService = require('./services/instagramSyncService');
+            const getDBInstance = require('./vornifydb/dbInstance');
+            const cacheInvalidation = require('./services/cacheInvalidation');
+            const socialDb = getDBInstance();
+            const hours = Number(process.env.INSTAGRAM_SYNC_INTERVAL_HOURS) || 6;
+            const intervalMs = hours * 60 * 60 * 1000;
+
+            const runInstagramSync = () => {
+                instagramSyncService.syncInstagramPosts(socialDb).then((result) => {
+                    if (result.ok) cacheInvalidation.onSocialChanged();
+                    else devLog('[INSTAGRAM SYNC] skipped/failed:', result.error || result.code);
+                }).catch((err) => {
+                    console.error('❌ [INSTAGRAM SYNC] error:', err);
+                });
+            };
+
+            devLog(`📸 [INSTAGRAM SYNC] enabled — every ${hours}h`);
+            trackTimeout(setTimeout(runInstagramSync, 5 * 60 * 1000)); // 5 min after boot
+            trackInterval(setInterval(runInstagramSync, intervalMs));
+        } else {
+            devLog('📸 [INSTAGRAM SYNC] disabled (ENABLE_INSTAGRAM_SYNC=false)');
+        }
         
         // DISABLED: Weekly product views reset was destroying trending system
         // The weekly reset hard-reset viewsLast7Days to 0 every Monday, which made
@@ -613,6 +642,7 @@ if (process.env.NODE_ENV !== 'test') {
             if (process.env.ENABLE_PAYMENT_FAILURE_EMAIL !== 'false') jobsOn.push('paymentFailureEmail');
             if (process.env.ENABLE_ABANDONED_CHECKOUT !== 'false') jobsOn.push('abandonedCheckout');
             if (process.env.ENABLE_DISCOUNT_REMINDER !== 'false') jobsOn.push('discountReminder');
+            if (process.env.ENABLE_INSTAGRAM_SYNC !== 'false') jobsOn.push('instagramSync');
             if (jobsOn.length) console.log(`Background jobs active: ${jobsOn.join(', ')}`);
         }
     });

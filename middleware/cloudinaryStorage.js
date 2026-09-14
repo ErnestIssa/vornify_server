@@ -118,11 +118,36 @@ const supportStorage = new CloudinaryStorage({
   },
 });
 
+/**
+ * Social / community media: peakmode/social/post-<id>-<index>
+ * Admin-only upload. Body: postId (optional), title slug.
+ */
+const socialStorage = new CloudinaryStorage({
+  cloudinary,
+  params: (req, file) => {
+    req._socialUploadIndex = (req._socialUploadIndex || 0) + 1;
+    const id = req.body?.postId || req.body?.post_id || Date.now();
+    const index = req._socialUploadIndex;
+    const public_id = `post-${id}-${index}`;
+    const isVideo = file.mimetype && file.mimetype.startsWith('video/');
+    return {
+      folder: 'peakmode/social',
+      public_id,
+      resource_type: isVideo ? 'video' : 'image',
+      allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm'],
+      transformation: isVideo
+        ? [{ quality: 'auto:good' }]
+        : [{ width: 1920, crop: 'limit', quality: 'auto:good' }],
+    };
+  },
+});
+
 module.exports = {
   productImageStorage,
   reviewStorage,
   messageStorage,
   supportStorage,
+  socialStorage,
   slugify,
 };
 
