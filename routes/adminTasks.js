@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 const { requirePermission, requireAnyPermission } = require('../middleware/requirePermission');
@@ -5,6 +6,8 @@ const { hasPermission } = require('../services/staffAccessPolicy');
 const { listAdmins, loadAdminById, adminIdString, resolveAccountStatus } = require('../services/adminAccountState');
 const taskService = require('../services/taskService');
 const taskStore = require('../services/taskStore');
+const taskImportService = require('../services/taskImportService');
+const taskExportService = require('../services/taskExportService');
 
 const router = express.Router();
 
@@ -38,6 +41,14 @@ function catalog() {
     };
 }
 
+function parseIds(value) {
+    return String(value || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean)
+        .slice(0, 200);
+}
+
 async function resolveAssignee(assigneeId) {
     if (assigneeId === null || assigneeId === '' || assigneeId === 'unassigned' || assigneeId === undefined) {
         return { person: null };
@@ -54,14 +65,45 @@ async function resolveAssignee(assigneeId) {
     };
 }
 
+async function loadStaff() {
+    const admins = await listAdmins();
+    return admins
+        .filter((admin) => resolveAccountStatus(admin) === 'active')
+        .map((admin) => ({
+            id: adminIdString(admin),
+            name: admin.name || admin.email || admin.username || 'Staff',
+            email: admin.email || admin.username || null,
+            role: admin.role || 'admin'
+        }));
+}
+
+function rejectIfMissing(doc, res) {
+    if (!doc) {
+        res.status(404).json({ success: false, error: 'Task not found' });
+        return true;
+    }
+    return false;
+}
+
+function rejectIfArchived(doc, res) {
+    if (taskService.isArchived(doc)) {
+        res.status(409).json({ success: false, error: 'Restore this task from Archives before editing it' });
+        return true;
+    }
+    return false;
+}
+
 router.get('/', authenticateAdmin, requirePermission('tasks.view'), async (req, res) => {
     try {
         const query = queryOf(req);
         const actorId = String(req.admin.id);
-        const rows = await taskStore.readAllTasks();
-        const stats = taskService.computeStats(rows, actorId);
+        const documents = await taskStore.readTaskDocuments();
+        const active = documents.filter((doc) => !taskService.isArchived(doc));
+        const archived = documents.filter((doc) => taskService.isArchived(doc));
+        const stats = { ...taskService.computeStats(active, actorId), archived: archived.length };
+        const pool = query.view === 'archived' ? archived : active;
         const filtered = taskService.sortTasks(
-            rows.filter((doc) => taskService.matchesView(doc, query.view, actorId) && taskService.matchesFilters(doc, query)),
+            pool.filter((doc) => taskService.matchesView(doc, query.view, actorId) && taskService.matchesFilters(doc, query)),
             query.sort
         );
         res.json({
@@ -78,16 +120,7 @@ router.get('/', authenticateAdmin, requirePermission('tasks.view'), async (req, 
 
 router.get('/assignees', authenticateAdmin, requireAnyPermission('tasks.view', 'tasks.assign'), async (_req, res) => {
     try {
-        const admins = await listAdmins();
-        const items = admins
-            .filter((admin) => resolveAccountStatus(admin) === 'active')
-            .map((admin) => ({
-                id: adminIdString(admin),
-                name: admin.name || admin.email || admin.username || 'Staff',
-                email: admin.email || admin.username || null,
-                role: admin.role || 'admin'
-            }))
-            .sort((a, b) => a.name.localeCompare(b.name));
+        const items = (await loadStaff()).sort((a, b) => a.name.localeCompare(b.name));
         res.json({ success: true, items });
     } catch (err) {
         console.error('[TASKS] assignees error:', err);
@@ -95,12 +128,153 @@ router.get('/assignees', authenticateAdmin, requireAnyPermission('tasks.view', '
     }
 });
 
+router.get('/export', authenticateAdmin, requirePermission('tasks.view'), async (req, res) => {
+    try {
+        const query = queryOf(req);
+        const ids = parseIds(req.query.ids);
+        const format = String(req.query.format || 'json').toLowerCase() === 'markdown' ? 'markdown' : 'json';
+        const documents = await taskStore.readTaskDocuments();
+        let rows;
+        if (ids.length) {
+            const wanted = new Set(ids);
+            rows = documents.filter((doc) => wanted.has(String(doc.id)));
+        } else {
+            const pool = query.view === 'archived' ? documents.filter((doc) => taskService.isArchived(doc)) : documents.filter((doc) => !taskService.isArchived(doc));
+            rows = taskService.sortTasks(
+                pool.filter((doc) => taskService.matchesView(doc, query.view, req.admin.id) && taskService.matchesFilters(doc, query)),
+                query.sort
+            );
+        }
+        const stamp = new Date().toISOString().slice(0, 10);
+        if (format === 'markdown') {
+            const body = taskExportService.toMarkdown(rows);
+            const filename = `peakmode-tasks-${stamp}.md`;
+            res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            return res.send(body);
+        }
+        const envelope = taskExportService.toEnvelope(rows);
+        const filename = `peakmode-tasks-${stamp}.json`;
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        return res.send(JSON.stringify(envelope, null, 2));
+    } catch (err) {
+        console.error('[TASKS] export error:', err);
+        res.status(500).json({ success: false, error: 'Failed to export tasks' });
+    }
+});
+
+router.post('/import/preview', authenticateAdmin, requireAnyPermission('tasks.create', 'tasks.manage'), async (req, res) => {
+    try {
+        const source = req.body?.source;
+        if (source == null || source === '') {
+            return res.status(400).json({ success: false, error: 'Choose a JSON file to import' });
+        }
+        const staff = await loadStaff();
+        const openTitles = (await taskStore.readAllTasks()).filter(taskService.isOpen).map((doc) => doc.title);
+        const preview = taskImportService.buildPreview(source, staff, openTitles);
+        if (!preview.ok) {
+            return res.status(400).json({
+                success: false,
+                code: preview.code,
+                error: preview.error,
+                summary: preview.summary,
+                rows: []
+            });
+        }
+        res.json({
+            success: true,
+            inferred: preview.inferred,
+            format: preview.format,
+            version: preview.version,
+            summary: preview.summary,
+            rows: preview.rows.map(taskImportService.toPreviewPublic)
+        });
+    } catch (err) {
+        console.error('[TASKS] import preview error:', err);
+        res.status(500).json({ success: false, error: 'Failed to preview import' });
+    }
+});
+
+router.post('/import', authenticateAdmin, requireAnyPermission('tasks.create', 'tasks.manage'), async (req, res) => {
+    try {
+        const source = req.body?.source;
+        if (source == null || source === '') {
+            return res.status(400).json({ success: false, error: 'Choose a JSON file to import' });
+        }
+        const filename = String(req.body?.filename || 'tasks.json').slice(0, 180);
+        const staff = await loadStaff();
+        const openTitles = (await taskStore.readAllTasks()).filter(taskService.isOpen).map((doc) => doc.title);
+        const plan = taskImportService.prepareCommit(source, staff, openTitles, {
+            skip: Array.isArray(req.body?.skip) ? req.body.skip : [],
+            assigneeRemap: req.body?.assigneeRemap && typeof req.body.assigneeRemap === 'object' ? req.body.assigneeRemap : {},
+            canAssign: hasPermission(req.admin.permissions, 'tasks.assign') || hasPermission(req.admin.permissions, 'tasks.manage')
+        });
+        if (!plan.ok) {
+            return res.status(400).json({
+                success: false,
+                code: plan.code,
+                error: plan.error,
+                summary: plan.summary,
+                created: 0,
+                skipped: 0,
+                failed: 0
+            });
+        }
+
+        const importBatchId = crypto.randomUUID();
+        const created = [];
+        const failed = [];
+        for (const row of plan.rows) {
+            if (row.result === 'skipped') continue;
+            if (row.result === 'error' || !row.payload) {
+                failed.push({ index: row.index, title: row.title, error: row.error || 'Could not import this task' });
+                continue;
+            }
+            const doc = taskService.newDocumentDefaults({ ...row.payload, importBatchId }, actor(req));
+            const check = taskService.validateTask(doc);
+            if (!check.ok) {
+                failed.push({ index: row.index, title: row.title, error: check.error });
+                continue;
+            }
+            const saved = await taskStore.createTask(doc);
+            if (!saved.success || !saved.data?.id) {
+                failed.push({ index: row.index, title: row.title, error: saved.error || 'Could not create task' });
+                continue;
+            }
+            await taskStore.createActivity(taskService.activityEntry(saved.data.id, actor(req), 'imported', {
+                filename,
+                importBatchId
+            }));
+            if (saved.data.assignee?.id) {
+                await taskStore.createActivity(taskService.activityEntry(saved.data.id, actor(req), 'assigned', {
+                    to: saved.data.assignee.id,
+                    toName: saved.data.assignee.name
+                }));
+            }
+            created.push(taskService.toPublic(saved.data));
+        }
+
+        res.status(created.length ? 201 : 200).json({
+            success: true,
+            importBatchId,
+            created: created.length,
+            skipped: plan.summary.skipped,
+            failed: failed.length,
+            errors: failed,
+            items: created,
+            summary: plan.summary
+        });
+    } catch (err) {
+        console.error('[TASKS] import error:', err);
+        res.status(500).json({ success: false, error: 'Failed to import tasks' });
+    }
+});
+
 router.get('/:id', authenticateAdmin, requirePermission('tasks.view'), async (req, res) => {
     try {
         const doc = await taskStore.readTaskById(req.params.id);
-        if (!doc || doc.deletedAt) {
-            return res.status(404).json({ success: false, error: 'Task not found' });
-        }
+        if (rejectIfMissing(doc, res)) return;
         const activity = await taskStore.readActivityForTask(doc.id);
         res.json({
             success: true,
@@ -153,9 +327,7 @@ router.post('/', authenticateAdmin, requireAnyPermission('tasks.create', 'tasks.
 router.patch('/:id', authenticateAdmin, requireAnyPermission('tasks.edit', 'tasks.assign', 'tasks.complete', 'tasks.manage'), async (req, res) => {
     try {
         const existing = await taskStore.readTaskById(req.params.id);
-        if (!existing || existing.deletedAt) {
-            return res.status(404).json({ success: false, error: 'Task not found' });
-        }
+        if (rejectIfMissing(existing, res) || rejectIfArchived(existing, res)) return;
         const body = { ...(req.body || {}) };
         if (body.assigneeId !== undefined) {
             const resolved = await resolveAssignee(body.assigneeId === '' || body.assigneeId === 'unassigned' ? null : body.assigneeId);
@@ -195,9 +367,7 @@ router.patch('/:id', authenticateAdmin, requireAnyPermission('tasks.edit', 'task
 router.post('/:id/complete', authenticateAdmin, requireAnyPermission('tasks.complete', 'tasks.manage'), async (req, res) => {
     try {
         const existing = await taskStore.readTaskById(req.params.id);
-        if (!existing || existing.deletedAt) {
-            return res.status(404).json({ success: false, error: 'Task not found' });
-        }
+        if (rejectIfMissing(existing, res) || rejectIfArchived(existing, res)) return;
         const next = taskService.applyPatch(existing, { status: 'completed' });
         await taskStore.updateTaskById(existing.id, next);
         const updated = await taskStore.readTaskById(existing.id);
@@ -212,12 +382,27 @@ router.post('/:id/complete', authenticateAdmin, requireAnyPermission('tasks.comp
     }
 });
 
+router.post('/:id/restore', authenticateAdmin, requireAnyPermission('tasks.delete', 'tasks.manage'), async (req, res) => {
+    try {
+        const existing = await taskStore.readTaskById(req.params.id);
+        if (rejectIfMissing(existing, res)) return;
+        if (!taskService.isArchived(existing)) {
+            return res.status(400).json({ success: false, error: 'This task is not in Archives' });
+        }
+        await taskStore.restoreTask(existing.id);
+        await taskStore.createActivity(taskService.activityEntry(existing.id, actor(req), 'restored', {}));
+        const updated = await taskStore.readTaskById(existing.id);
+        res.json({ success: true, data: taskService.toPublic(updated) });
+    } catch (err) {
+        console.error('[TASKS] restore error:', err);
+        res.status(500).json({ success: false, error: 'Failed to restore task' });
+    }
+});
+
 router.post('/:id/checklist', authenticateAdmin, requireAnyPermission('tasks.edit', 'tasks.manage'), async (req, res) => {
     try {
         const existing = await taskStore.readTaskById(req.params.id);
-        if (!existing || existing.deletedAt) {
-            return res.status(404).json({ success: false, error: 'Task not found' });
-        }
+        if (rejectIfMissing(existing, res) || rejectIfArchived(existing, res)) return;
         const title = String(req.body?.title || '').trim();
         if (!title) return res.status(400).json({ success: false, error: 'Checklist title is required' });
         const item = {
@@ -241,9 +426,7 @@ router.post('/:id/checklist', authenticateAdmin, requireAnyPermission('tasks.edi
 router.patch('/:id/checklist/:itemId', authenticateAdmin, requireAnyPermission('tasks.edit', 'tasks.complete', 'tasks.manage'), async (req, res) => {
     try {
         const existing = await taskStore.readTaskById(req.params.id);
-        if (!existing || existing.deletedAt) {
-            return res.status(404).json({ success: false, error: 'Task not found' });
-        }
+        if (rejectIfMissing(existing, res) || rejectIfArchived(existing, res)) return;
         const itemId = String(req.params.itemId);
         const checklist = (existing.checklist || []).map((item) => {
             if (item.id !== itemId) return item;
@@ -277,9 +460,7 @@ router.patch('/:id/checklist/:itemId', authenticateAdmin, requireAnyPermission('
 router.delete('/:id/checklist/:itemId', authenticateAdmin, requireAnyPermission('tasks.edit', 'tasks.manage'), async (req, res) => {
     try {
         const existing = await taskStore.readTaskById(req.params.id);
-        if (!existing || existing.deletedAt) {
-            return res.status(404).json({ success: false, error: 'Task not found' });
-        }
+        if (rejectIfMissing(existing, res) || rejectIfArchived(existing, res)) return;
         const itemId = String(req.params.itemId);
         const removed = (existing.checklist || []).find((item) => item.id === itemId);
         if (!removed) return res.status(404).json({ success: false, error: 'Checklist item not found' });
@@ -297,8 +478,9 @@ router.delete('/:id/checklist/:itemId', authenticateAdmin, requireAnyPermission(
 router.delete('/:id', authenticateAdmin, requireAnyPermission('tasks.delete', 'tasks.manage'), async (req, res) => {
     try {
         const existing = await taskStore.readTaskById(req.params.id);
-        if (!existing || existing.deletedAt) {
-            return res.status(404).json({ success: false, error: 'Task not found' });
+        if (rejectIfMissing(existing, res)) return;
+        if (taskService.isArchived(existing)) {
+            return res.status(400).json({ success: false, error: 'This task is already in Archives' });
         }
         await taskStore.archiveTask(existing.id);
         await taskStore.createActivity(taskService.activityEntry(existing.id, actor(req), 'archived', {}));

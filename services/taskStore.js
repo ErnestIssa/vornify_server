@@ -16,17 +16,25 @@ function writableFields(updateFields) {
     return rest;
 }
 
-async function readAllTasks() {
+async function readTaskDocuments() {
     const result = await db.executeOperation({
         database_name: DATABASE_NAME,
         collection_name: TASKS,
         command: '--read',
-        data: { deletedAt: null }
+        data: {}
     });
     if (!result.success || !result.data) return [];
     return (Array.isArray(result.data) ? result.data : [result.data])
         .map(taskService.normalizeId)
-        .filter((doc) => doc && !doc.deletedAt && !doc.archivedAt);
+        .filter(Boolean);
+}
+
+async function readAllTasks() {
+    return (await readTaskDocuments()).filter((doc) => !taskService.isArchived(doc));
+}
+
+async function readArchivedTasks() {
+    return (await readTaskDocuments()).filter((doc) => taskService.isArchived(doc));
 }
 
 async function readTaskById(id) {
@@ -73,7 +81,12 @@ async function createTask(doc) {
 
 async function archiveTask(id) {
     const stamp = taskService.nowIso();
-    return updateTaskById(id, { deletedAt: stamp, archivedAt: stamp, updatedAt: stamp });
+    return updateTaskById(id, { archivedAt: stamp, deletedAt: null, updatedAt: stamp });
+}
+
+async function restoreTask(id) {
+    const stamp = taskService.nowIso();
+    return updateTaskById(id, { archivedAt: null, deletedAt: null, updatedAt: stamp });
 }
 
 async function createActivity(entry) {
@@ -110,11 +123,14 @@ async function readActivityForTask(taskId) {
 }
 
 module.exports = {
+    readTaskDocuments,
     readAllTasks,
+    readArchivedTasks,
     readTaskById,
     updateTaskById,
     createTask,
     archiveTask,
+    restoreTask,
     createActivity,
     readActivityForTask
 };

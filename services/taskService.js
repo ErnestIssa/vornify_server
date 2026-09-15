@@ -15,7 +15,7 @@ const CATEGORIES = Object.freeze([
     'administration',
     'technical'
 ]);
-const VIEWS = Object.freeze(['mine', 'all', 'overdue', 'today', 'upcoming', 'completed']);
+const VIEWS = Object.freeze(['mine', 'all', 'overdue', 'today', 'upcoming', 'completed', 'archived']);
 const PRIORITY_RANK = Object.freeze({ urgent: 0, high: 1, medium: 2, low: 3 });
 
 const TITLE_MAX = 160;
@@ -204,7 +204,8 @@ function newDocumentDefaults(input, actor) {
         createdAt: stamp,
         updatedAt: stamp,
         archivedAt: null,
-        deletedAt: null
+        deletedAt: null,
+        importBatchId: str(body.importBatchId, 80) || null
     };
 }
 
@@ -246,7 +247,13 @@ function isOpen(doc) {
     return OPEN_STATUSES.includes(doc?.status);
 }
 
+function isArchived(doc) {
+    return Boolean(doc?.archivedAt || doc?.deletedAt);
+}
+
 function matchesView(doc, view, actorId) {
+    if (view === 'archived') return isArchived(doc);
+    if (isArchived(doc)) return false;
     const due = dueMeta(doc.dueDate);
     switch (view) {
         case 'mine':
@@ -361,7 +368,9 @@ function toPublic(doc) {
         checklistDone: done,
         checklistTotal: checklist.length,
         dueLabel: due.dueLabel,
-        dueState: due.dueState
+        dueState: due.dueState,
+        archivedAt: doc.archivedAt || null,
+        archived: isArchived(doc)
     };
 }
 
@@ -406,6 +415,10 @@ function activityLabel(entry) {
             return `${name} cancelled this task`;
         case 'archived':
             return `${name} archived this task`;
+        case 'restored':
+            return `${name} restored this task from Archives`;
+        case 'imported':
+            return `${name} imported this task from JSON`;
         case 'updated':
         default:
             return `${name} updated this task`;
@@ -493,12 +506,14 @@ module.exports = {
     validateTask,
     applyPatch,
     isOpen,
+    isArchived,
     matchesView,
     matchesFilters,
     sortTasks,
     computeStats,
     toPublic,
     activityEntry,
+    activityLabel,
     toActivityPublic,
     patchPermissionOk,
     diffActivity
