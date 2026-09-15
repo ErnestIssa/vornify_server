@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
+    "test:staff-access": "node scripts/testStaffAccessPolicy.js && node scripts/staffAccessAcceptance.js",
     "vercel-build": "echo 'Building...'",
     "version:show": "npm pkg get version",
     "release:patch": "npm version patch --no-git-tag-version",

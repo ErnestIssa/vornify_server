@@ -5,7 +5,7 @@ const ffprobePath = require('@ffmpeg-installer/ffmpeg').path;
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 function devDbLog(...args) {
     if (process.env.NODE_ENV === 'development') console.log(...args);
@@ -20,6 +20,7 @@ class VortexDB {
         this.dbCache = new Map();
         this.collectionCache = new Map();
         this.indexCache = new Set();
+        this._closed = false;
         
         // Initialize connection asynchronously
         this.initializeConnection().catch(error => {
@@ -43,6 +44,8 @@ class VortexDB {
                 }
             }
 
+            if (this._closed) return;
+
             this.client = new MongoClient(uri, {
                 maxPoolSize: 10,  // Reduced for M0 tier (500 max connections)
                 minPoolSize: 1,    // Keep at least one connection alive
@@ -59,6 +62,12 @@ class VortexDB {
                     wtimeout: 60000
                 }
             });
+
+            if (this._closed) {
+                await this.client.close().catch(() => {});
+                this.client = null;
+                return;
+            }
 
             // Add connection event handlers
             this.client.on('connectionPoolCreated', () => {
@@ -1219,6 +1228,7 @@ class VortexDB {
      * shutdown can take too long and deployments can time out.
      */
     async close() {
+        this._closed = true;
         try {
             if (this.client) {
                 try {

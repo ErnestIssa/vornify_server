@@ -11,5 +11,12 @@ function getDBInstance() {
     return dbInstance;
 }
 
+async function closeDBInstance() {
+    if (!dbInstance) return;
+    await dbInstance.close();
+    dbInstance = null;
+}
+
 module.exports = getDBInstance;
+module.exports.closeDBInstance = closeDBInstance;
 

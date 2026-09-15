@@ -94,7 +94,9 @@ const loginRateLimit = rateLimit({
     standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
     legacyHeaders: false,
     skip: (req) => {
-        // Skip rate limiting for whitelisted IPs (optional)
+        const ip = String(req.ip || '');
+        const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+        if (loopback && process.env.NODE_ENV !== 'production') return true;
         const whitelistedIPs = process.env.ADMIN_IP_WHITELIST ? process.env.ADMIN_IP_WHITELIST.split(',') : [];
         return whitelistedIPs.includes(req.ip);
     }
@@ -684,9 +686,16 @@ router.post('/init', async (req, res) => {
 
         // Get default credentials from request or environment
         const { username, password, name } = req.body;
-        const defaultUsername = (username || process.env.ADMIN_USERNAME || 'admin').toLowerCase().trim();
-        const defaultPassword = password || process.env.ADMIN_PASSWORD || 'admin123';
+        const defaultUsername = (username || process.env.ADMIN_USERNAME || '').toLowerCase().trim();
+        const defaultPassword = password || process.env.ADMIN_PASSWORD;
         const adminName = name || process.env.ADMIN_NAME || 'Administrator';
+        if (!defaultUsername) {
+            return res.status(400).json({
+                success: false,
+                message: 'username/email is required to bootstrap the first Super Admin',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
 
         if (!defaultPassword || defaultPassword.length < 6) {
             return res.status(400).json({

@@ -1,3 +1,4 @@
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
@@ -57,7 +58,6 @@ const abandonedCartService = require('./services/abandonedCartService');
 const abandonedCheckoutService = require('./services/abandonedCheckoutService');
 const paymentFailureService = require('./services/paymentFailureService');
 const { isDevelopment, devLog } = require('./core/logging/devConsole');
-require('dotenv').config();
 
 // Cloudinary sanity check — development only
 const cloudinary = require('./config/cloudinary');

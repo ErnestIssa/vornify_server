@@ -1,3 +1,4 @@
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const assert = require('assert');
 const {
     getPermissionsForRole,
@@ -9,6 +10,7 @@ const {
 } = require('../services/staffAccessPolicy');
 const { resolveAccountStatus, canAuthenticate } = require('../services/adminAccountState');
 const { authorizeVornifyDb } = require('../services/vornifydbAccess');
+const { closeDBInstance } = require('../vornifydb/dbInstance');
 
 assert.ok(getPermissionsForRole('super_admin').includes('staff.remove'));
 assert.ok(!getPermissionsForRole('admin').includes('staff.invite'));
@@ -51,3 +53,10 @@ assert.strictEqual(authorizeVornifyDb({ collection: 'products', command: '--read
 assert.strictEqual(authorizeVornifyDb({ collection: 'orders', command: '--read', admin: support }).ok, true);
 
 console.log('staffAccessPolicy tests passed');
+
+closeDBInstance()
+    .then(() => process.exit(0))
+    .catch((err) => {
+        console.error(err);
+        process.exit(1);
+    });
