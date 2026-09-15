@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 const db = getDBInstance();
 
@@ -84,7 +85,7 @@ async function getCarrierTrackingInfo(trackingNumber, carrier) {
 }
 
 // GET /api/tracking/admin/dashboard - Admin tracking dashboard: list all shipments with tracking
-router.get('/admin/dashboard', authenticateAdmin, async (req, res) => {
+router.get('/admin/dashboard', authenticateAdmin, requirePermission('orders.view'), async (req, res) => {
     try {
         const ordersResult = await db.executeOperation({
             database_name: 'peakmode',

@@ -1,6 +1,7 @@
 const express = require('express');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const noticeBarService = require('../services/noticeBarService');
 const cacheInvalidation = require('../services/cacheInvalidation');
 
@@ -54,7 +55,7 @@ async function updateNoticeBarById(id, updateFields) {
 /**
  * GET /api/admin/notice-bars
  */
-router.get('/notice-bars', authenticateAdmin, async (req, res) => {
+router.get('/notice-bars', authenticateAdmin, requirePermission('hub.view'), async (req, res) => {
     try {
         const includeDeleted = req.query.includeDeleted === 'true';
         const rows = await readAllNoticeBars(includeDeleted);
@@ -80,7 +81,7 @@ router.get('/notice-bars', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/notice-bars — create
  */
-router.post('/notice-bars', authenticateAdmin, async (req, res) => {
+router.post('/notice-bars', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const body = req.body || {};
         if (body.placement !== undefined) {
@@ -159,7 +160,7 @@ router.post('/notice-bars', authenticateAdmin, async (req, res) => {
 /**
  * GET /api/admin/notice-bars/:id
  */
-router.get('/notice-bars/:id', authenticateAdmin, async (req, res) => {
+router.get('/notice-bars/:id', authenticateAdmin, requirePermission('hub.view'), async (req, res) => {
     try {
         const doc = await readNoticeBarById(req.params.id);
         if (!doc || doc.deletedAt) {
@@ -175,7 +176,7 @@ router.get('/notice-bars/:id', authenticateAdmin, async (req, res) => {
 /**
  * PUT /api/admin/notice-bars/:id/draft — autosave (partial draft allowed)
  */
-router.put('/notice-bars/:id/draft', authenticateAdmin, async (req, res) => {
+router.put('/notice-bars/:id/draft', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const doc = await readNoticeBarById(req.params.id);
         if (!doc || doc.deletedAt) {
@@ -268,7 +269,7 @@ router.put('/notice-bars/:id/draft', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/notice-bars/:id/publish
  */
-router.post('/notice-bars/:id/publish', authenticateAdmin, async (req, res) => {
+router.post('/notice-bars/:id/publish', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const doc = await readNoticeBarById(req.params.id);
         if (!doc || doc.deletedAt) {
@@ -330,7 +331,7 @@ router.post('/notice-bars/:id/publish', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/notice-bars/:id/discard-draft
  */
-router.post('/notice-bars/:id/discard-draft', authenticateAdmin, async (req, res) => {
+router.post('/notice-bars/:id/discard-draft', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const doc = await readNoticeBarById(req.params.id);
         if (!doc || doc.deletedAt) {
@@ -370,7 +371,7 @@ router.post('/notice-bars/:id/discard-draft', authenticateAdmin, async (req, res
 /**
  * DELETE /api/admin/notice-bars/:id — soft delete
  */
-router.delete('/notice-bars/:id', authenticateAdmin, async (req, res) => {
+router.delete('/notice-bars/:id', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const doc = await readNoticeBarById(req.params.id);
         if (!doc || doc.deletedAt) {

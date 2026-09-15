@@ -1,5 +1,6 @@
 const express = require('express');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const releaseService = require('../services/releaseService');
 const releaseStore = require('../services/releaseStore');
 const cacheInvalidation = require('../services/cacheInvalidation');
@@ -17,14 +18,14 @@ function adminReaderId(req) {
 /**
  * GET /api/admin/releases/versions
  */
-router.get('/releases/versions', authenticateAdmin, (_req, res) => {
+router.get('/releases/versions', authenticateAdmin, requirePermission('releases.view'), (_req, res) => {
     res.json({ success: true, data: releaseService.appVersions() });
 });
 
 /**
  * GET /api/admin/releases/feed — published notes visible to this admin.
  */
-router.get('/releases/feed', authenticateAdmin, async (req, res) => {
+router.get('/releases/feed', authenticateAdmin, requirePermission('releases.view'), async (req, res) => {
     try {
         const docs = await releaseStore.livePublished({
             surface: 'admin',
@@ -42,7 +43,7 @@ router.get('/releases/feed', authenticateAdmin, async (req, res) => {
 /**
  * GET /api/admin/releases
  */
-router.get('/releases', authenticateAdmin, async (req, res) => {
+router.get('/releases', authenticateAdmin, requirePermission('releases.view'), async (req, res) => {
     try {
         await releaseStore.publishDueScheduled();
         const status = req.query.status ? String(req.query.status) : '';
@@ -69,7 +70,7 @@ router.get('/releases', authenticateAdmin, async (req, res) => {
 /**
  * GET /api/admin/releases/:id
  */
-router.get('/releases/:id', authenticateAdmin, async (req, res) => {
+router.get('/releases/:id', authenticateAdmin, requirePermission('releases.view'), async (req, res) => {
     try {
         const doc = await releaseStore.readReleaseById(req.params.id);
         if (!doc || doc.deletedAt) {
@@ -85,7 +86,7 @@ router.get('/releases/:id', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/releases
  */
-router.post('/releases', authenticateAdmin, async (req, res) => {
+router.post('/releases', authenticateAdmin, requirePermission('releases.create'), async (req, res) => {
     try {
         const doc = releaseService.newDocumentDefaults(req.body || {}, actor(req));
         const check = releaseService.validateRelease(doc, { forPublish: false });
@@ -107,7 +108,7 @@ router.post('/releases', authenticateAdmin, async (req, res) => {
 /**
  * PATCH /api/admin/releases/:id
  */
-router.patch('/releases/:id', authenticateAdmin, async (req, res) => {
+router.patch('/releases/:id', authenticateAdmin, requirePermission('releases.edit'), async (req, res) => {
     try {
         const existing = await releaseStore.readReleaseById(req.params.id);
         if (!existing || existing.deletedAt) {
@@ -132,7 +133,7 @@ router.patch('/releases/:id', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/releases/:id/publish
  */
-router.post('/releases/:id/publish', authenticateAdmin, async (req, res) => {
+router.post('/releases/:id/publish', authenticateAdmin, requirePermission('releases.publish'), async (req, res) => {
     try {
         const existing = await releaseStore.readReleaseById(req.params.id);
         if (!existing || existing.deletedAt) {
@@ -164,7 +165,7 @@ router.post('/releases/:id/publish', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/releases/:id/schedule
  */
-router.post('/releases/:id/schedule', authenticateAdmin, async (req, res) => {
+router.post('/releases/:id/schedule', authenticateAdmin, requirePermission('releases.publish'), async (req, res) => {
     try {
         const existing = await releaseStore.readReleaseById(req.params.id);
         if (!existing || existing.deletedAt) {
@@ -203,7 +204,7 @@ router.post('/releases/:id/schedule', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/releases/:id/archive
  */
-router.post('/releases/:id/archive', authenticateAdmin, async (req, res) => {
+router.post('/releases/:id/archive', authenticateAdmin, requirePermission('releases.archive'), async (req, res) => {
     try {
         const existing = await releaseStore.readReleaseById(req.params.id);
         if (!existing || existing.deletedAt) {
@@ -228,7 +229,7 @@ router.post('/releases/:id/archive', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/releases/:id/read
  */
-router.post('/releases/:id/read', authenticateAdmin, async (req, res) => {
+router.post('/releases/:id/read', authenticateAdmin, requirePermission('releases.view'), async (req, res) => {
     try {
         const existing = await releaseStore.readReleaseById(req.params.id);
         if (!existing) {
@@ -247,7 +248,7 @@ router.post('/releases/:id/read', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/releases/read-all
  */
-router.post('/releases/read-all', authenticateAdmin, async (req, res) => {
+router.post('/releases/read-all', authenticateAdmin, requirePermission('releases.view'), async (req, res) => {
     try {
         const docs = await releaseStore.livePublished({
             surface: 'admin',
@@ -269,7 +270,7 @@ router.post('/releases/read-all', authenticateAdmin, async (req, res) => {
  * POST /api/admin/releases/:id/dismiss
  * body: { kind: 'popup' | 'banner' }
  */
-router.post('/releases/:id/dismiss', authenticateAdmin, async (req, res) => {
+router.post('/releases/:id/dismiss', authenticateAdmin, requirePermission('releases.view'), async (req, res) => {
     try {
         const existing = await releaseStore.readReleaseById(req.params.id);
         if (!existing) {
@@ -289,7 +290,7 @@ router.post('/releases/:id/dismiss', authenticateAdmin, async (req, res) => {
 /**
  * DELETE /api/admin/releases/:id
  */
-router.delete('/releases/:id', authenticateAdmin, async (req, res) => {
+router.delete('/releases/:id', authenticateAdmin, requirePermission('releases.archive'), async (req, res) => {
     try {
         const existing = await releaseStore.readReleaseById(req.params.id);
         if (!existing || existing.deletedAt) {

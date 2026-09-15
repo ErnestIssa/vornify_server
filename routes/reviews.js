@@ -9,6 +9,8 @@ const reviewsCatalogCache = require('../services/reviewsCatalogCache');
 const purchasableProductsCache = require('../services/purchasableProductsCache');
 const reviewFormService = require('../services/reviewFormService');
 const responseCache = require('../core/cache/responseCache');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 // Helper function to generate unique Review ID
 async function generateUniqueReviewId() {
@@ -485,7 +487,7 @@ router.get('/', async (req, res) => {
 });
 
 // GET /api/reviews/analytics - Get comprehensive review analytics
-router.get('/analytics', async (req, res) => {
+router.get('/analytics', authenticateAdmin, requirePermission('reviews.view'), async (req, res) => {
     try {
         // Get all reviews
         const reviewsResult = await db.executeOperation({
@@ -945,7 +947,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/reviews/:id - Update review
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticateAdmin, requirePermission('reviews.moderate'), async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
@@ -984,7 +986,7 @@ router.put('/:id', async (req, res) => {
 
 // POST /api/reviews/:id/approve - Approve review
 // Returns full review document (including images) so frontend does not lose images after approve
-router.post('/:id/approve', async (req, res) => {
+router.post('/:id/approve', authenticateAdmin, requirePermission('reviews.moderate'), async (req, res) => {
     try {
         const { id } = req.params;
         const { moderationNotes, moderatedBy } = req.body;
@@ -1028,7 +1030,7 @@ router.post('/:id/approve', async (req, res) => {
 
 // POST /api/reviews/:id/reject - Reject review
 // Returns full review document (including images) so frontend does not lose images after reject
-router.post('/:id/reject', async (req, res) => {
+router.post('/:id/reject', authenticateAdmin, requirePermission('reviews.moderate'), async (req, res) => {
     try {
         const { id } = req.params;
         const { moderationNotes, moderatedBy } = req.body;
@@ -1071,7 +1073,7 @@ router.post('/:id/reject', async (req, res) => {
 });
 
 // POST /api/reviews/:id/flag - Flag review
-router.post('/:id/flag', async (req, res) => {
+router.post('/:id/flag', authenticateAdmin, requirePermission('reviews.moderate'), async (req, res) => {
     try {
         const { id } = req.params;
         const { flaggedReason, moderatedBy } = req.body;
@@ -1120,7 +1122,7 @@ router.post('/:id/flag', async (req, res) => {
 });
 
 // POST /api/reviews/:id/response - Add business response
-router.post('/:id/response', async (req, res) => {
+router.post('/:id/response', authenticateAdmin, requirePermission('reviews.moderate'), async (req, res) => {
     try {
         const { id } = req.params;
         const { response, respondedBy } = req.body;
@@ -1215,7 +1217,7 @@ router.put('/:id/helpful', async (req, res) => {
 });
 
 // DELETE /api/reviews/:id - Delete review
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticateAdmin, requirePermission('reviews.moderate'), async (req, res) => {
     try {
         const { id } = req.params;
         

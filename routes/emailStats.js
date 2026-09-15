@@ -1,11 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 const db = getDBInstance();
 
 // Get email statistics
-router.get('/stats', async (req, res) => {
+router.get('/stats', authenticateAdmin, requirePermission('email.view'), async (req, res) => {
     try {
         // Get all email logs
         const result = await db.executeOperation({

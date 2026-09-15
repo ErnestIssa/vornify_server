@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
+const { vornifydbAccessMiddleware } = require('../services/vornifydbAccess');
 
 const db = getDBInstance();
 
@@ -44,7 +45,7 @@ function ensureReadData(body) {
     return body;
 }
 
-router.post('/', async (req, res) => {
+router.post('/', vornifydbAccessMiddleware, async (req, res) => {
     try {
         console.log('🔍 [VORNIFYDB] Request received:', {
             database_name: req.body?.database_name,

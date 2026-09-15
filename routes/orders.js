@@ -4,6 +4,7 @@ const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const currencyService = require('../services/currencyService');
 const {
     CANONICAL_STATUSES,
@@ -1488,7 +1489,7 @@ router.get('/all', async (req, res) => {
 });
 
 // GET /api/orders/list - Admin orders dashboard: list with filters, sorting, pagination
-router.get('/list', authenticateAdmin, async (req, res) => {
+router.get('/list', authenticateAdmin, requirePermission('orders.view'), async (req, res) => {
     try {
         const {
             status,
@@ -1577,7 +1578,7 @@ router.get('/list', authenticateAdmin, async (req, res) => {
 });
 
 // POST /api/orders/bulk-action - Admin bulk actions
-router.post('/bulk-action', authenticateAdmin, async (req, res) => {
+router.post('/bulk-action', authenticateAdmin, requirePermission('orders.edit'), async (req, res) => {
     try {
         const { action, orderIds, trackingNumber, carrier } = req.body;
         if (!action || !Array.isArray(orderIds) || orderIds.length === 0) {
@@ -1629,7 +1630,7 @@ router.post('/bulk-action', authenticateAdmin, async (req, res) => {
 });
 
 // POST /api/orders/generate-labels - Bulk label generation (stub; integrate carrier APIs later)
-router.post('/generate-labels', authenticateAdmin, async (req, res) => {
+router.post('/generate-labels', authenticateAdmin, requirePermission('orders.edit'), async (req, res) => {
     try {
         const { orderIds } = req.body || {};
         const ids = Array.isArray(orderIds) ? orderIds : [];
@@ -1668,7 +1669,7 @@ router.get('/customer/:email', async (req, res) => {
 });
 
 // PUT /api/orders/:orderId - Update order (admin); 404 if order is soft-deleted
-router.put('/:orderId', async (req, res) => {
+router.put('/:orderId', authenticateAdmin, requirePermission('orders.edit'), async (req, res) => {
     try {
         const { orderId } = req.params;
         const updateData = req.body;
@@ -1999,7 +2000,7 @@ router.post('/:orderId/notify', async (req, res) => {
 const SHIPMENTS_COLL = 'shipments';
 
 // GET /api/orders/:orderId/shipments - List shipments for an order (split shipments)
-router.get('/:orderId/shipments', authenticateAdmin, async (req, res) => {
+router.get('/:orderId/shipments', authenticateAdmin, requirePermission('orders.view'), async (req, res) => {
     try {
         const { orderId } = req.params;
         const result = await db.executeOperation({
@@ -2017,7 +2018,7 @@ router.get('/:orderId/shipments', authenticateAdmin, async (req, res) => {
 });
 
 // POST /api/orders/:orderId/shipments - Create a shipment (split shipment)
-router.post('/:orderId/shipments', authenticateAdmin, async (req, res) => {
+router.post('/:orderId/shipments', authenticateAdmin, requirePermission('orders.edit'), async (req, res) => {
     try {
         const { orderId } = req.params;
         const { carrier, trackingNumber, warehouseId, status, estimatedDelivery, items } = req.body || {};
@@ -2046,7 +2047,7 @@ router.post('/:orderId/shipments', authenticateAdmin, async (req, res) => {
 });
 
 // PUT /api/orders/:orderId/shipments/:shipmentId - Update a shipment
-router.put('/:orderId/shipments/:shipmentId', authenticateAdmin, async (req, res) => {
+router.put('/:orderId/shipments/:shipmentId', authenticateAdmin, requirePermission('orders.edit'), async (req, res) => {
     try {
         const { orderId, shipmentId } = req.params;
         const { carrier, trackingNumber, warehouseId, status, estimatedDelivery, labelUrl, items } = req.body || {};
@@ -2074,7 +2075,7 @@ router.put('/:orderId/shipments/:shipmentId', authenticateAdmin, async (req, res
 });
 
 // GET /api/orders/:orderId/receipt - Download PDF receipt (admin)
-router.get('/:orderId/receipt', authenticateAdmin, async (req, res) => {
+router.get('/:orderId/receipt', authenticateAdmin, requirePermission('orders.view'), async (req, res) => {
     try {
         const { orderId } = req.params;
         const findResult = await db.executeOperation({
@@ -2105,7 +2106,7 @@ router.get('/:orderId/receipt', authenticateAdmin, async (req, res) => {
 });
 
 // POST /api/orders/:orderId/receipt/email - Resend receipt PDF by email (admin)
-router.post('/:orderId/receipt/email', authenticateAdmin, async (req, res) => {
+router.post('/:orderId/receipt/email', authenticateAdmin, requirePermission('orders.edit'), async (req, res) => {
     try {
         const { orderId } = req.params;
         const findResult = await db.executeOperation({
@@ -2154,7 +2155,7 @@ router.post('/:orderId/receipt/email', authenticateAdmin, async (req, res) => {
 });
 
 // POST /api/orders/:orderId/generate-label - Create shipment via SHIPIT and get label (logistics automation)
-router.post('/:orderId/generate-label', authenticateAdmin, async (req, res) => {
+router.post('/:orderId/generate-label', authenticateAdmin, requirePermission('orders.edit'), async (req, res) => {
     try {
         const { orderId } = req.params;
         const shipitService = require('../services/shipping/shipitService');
@@ -2194,7 +2195,7 @@ router.post('/:orderId/generate-label', authenticateAdmin, async (req, res) => {
 });
 
 // GET /api/orders/:orderId - Get single order by business `orderId` (e.g. PM…) or (optional) _id; admin only; 404 if soft-deleted
-router.get('/:orderId', authenticateAdmin, async (req, res) => {
+router.get('/:orderId', authenticateAdmin, requirePermission('orders.view'), async (req, res) => {
     try {
         const { orderId } = req.params;
         

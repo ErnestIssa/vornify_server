@@ -1,6 +1,7 @@
 const express = require('express');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const socialPostService = require('../services/socialPostService');
 const instagramSyncService = require('../services/instagramSyncService');
 const cacheInvalidation = require('../services/cacheInvalidation');
@@ -15,7 +16,7 @@ function bustCache() {
 /**
  * GET /api/admin/social/posts
  */
-router.get('/social/posts', authenticateAdmin, async (req, res) => {
+router.get('/social/posts', authenticateAdmin, requirePermission('hub.view'), async (req, res) => {
     try {
         const rows = await socialPostService.readAllPosts(db);
         const includeHidden = req.query.includeHidden === 'true';
@@ -41,7 +42,7 @@ router.get('/social/posts', authenticateAdmin, async (req, res) => {
 /**
  * GET /api/admin/social/posts/:id
  */
-router.get('/social/posts/:id', authenticateAdmin, async (req, res) => {
+router.get('/social/posts/:id', authenticateAdmin, requirePermission('hub.view'), async (req, res) => {
     try {
         const row = await socialPostService.readPostById(db, req.params.id);
         if (!row) return res.status(404).json({ success: false, error: 'Post not found' });
@@ -54,7 +55,7 @@ router.get('/social/posts/:id', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/social/posts — admin upload metadata (after Cloudinary upload)
  */
-router.post('/social/posts', authenticateAdmin, async (req, res) => {
+router.post('/social/posts', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const result = await socialPostService.createPost(db, {
             ...req.body,
@@ -74,7 +75,7 @@ router.post('/social/posts', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/social/tiktok — shortcut for TikTok embed entries
  */
-router.post('/social/tiktok', authenticateAdmin, async (req, res) => {
+router.post('/social/tiktok', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const result = await socialPostService.createPost(db, {
             ...req.body,
@@ -95,7 +96,7 @@ router.post('/social/tiktok', authenticateAdmin, async (req, res) => {
 /**
  * PUT /api/admin/social/posts/:id
  */
-router.put('/social/posts/:id', authenticateAdmin, async (req, res) => {
+router.put('/social/posts/:id', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const result = await socialPostService.updatePost(db, req.params.id, req.body);
         if (!result.ok) {
@@ -111,7 +112,7 @@ router.put('/social/posts/:id', authenticateAdmin, async (req, res) => {
 /**
  * DELETE /api/admin/social/posts/:id — soft delete
  */
-router.delete('/social/posts/:id', authenticateAdmin, async (req, res) => {
+router.delete('/social/posts/:id', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const result = await socialPostService.deletePost(db, req.params.id);
         if (!result.ok) {
@@ -127,7 +128,7 @@ router.delete('/social/posts/:id', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/social/posts/reorder — body: { ids: string[] }
  */
-router.post('/social/posts/reorder', authenticateAdmin, async (req, res) => {
+router.post('/social/posts/reorder', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const result = await socialPostService.reorderPosts(db, req.body?.ids);
         if (!result.ok) {
@@ -143,7 +144,7 @@ router.post('/social/posts/reorder', authenticateAdmin, async (req, res) => {
 /**
  * POST /api/admin/social/sync-instagram — manual Instagram sync
  */
-router.post('/social/sync-instagram', authenticateAdmin, async (req, res) => {
+router.post('/social/sync-instagram', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const result = await instagramSyncService.syncInstagramPosts(db, {
             limit: req.body?.limit
@@ -165,7 +166,7 @@ router.post('/social/sync-instagram', authenticateAdmin, async (req, res) => {
 /**
  * GET /api/admin/social/sync-status
  */
-router.get('/social/sync-status', authenticateAdmin, async (req, res) => {
+router.get('/social/sync-status', authenticateAdmin, requirePermission('hub.view'), async (req, res) => {
     try {
         const state = await socialPostService.getSyncState(db);
         res.json({

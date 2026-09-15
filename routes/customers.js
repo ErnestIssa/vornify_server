@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 const db = getDBInstance();
 
@@ -122,7 +124,7 @@ async function updateCustomerAnalytics(customerId) {
 }
 
 // GET /api/customers - Get all customers with analytics
-router.get('/', async (req, res) => {
+router.get('/', authenticateAdmin, requirePermission('customers.view'), async (req, res) => {
     try {
         const { page = 1, limit = 50, status, customerType, search } = req.query;
         
@@ -185,7 +187,7 @@ router.get('/', async (req, res) => {
 });
 
 // GET /api/customers/analytics - Get customer analytics dashboard
-router.get('/analytics', async (req, res) => {
+router.get('/analytics', authenticateAdmin, requirePermission('customers.view'), async (req, res) => {
     try {
         // Get all customers
         const customersResult = await db.executeOperation({
@@ -277,7 +279,7 @@ router.get('/analytics', async (req, res) => {
 });
 
 // GET /api/customers/:id - Get single customer by ID
-router.get('/:id', async (req, res) => {
+router.get('/:id', authenticateAdmin, requirePermission('customers.view'), async (req, res) => {
     try {
         const { id } = req.params;
         
@@ -309,7 +311,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // GET /api/customers/:id/orders - Get customer's order history
-router.get('/:id/orders', async (req, res) => {
+router.get('/:id/orders', authenticateAdmin, requirePermission('customers.view'), async (req, res) => {
     try {
         const { id } = req.params;
         
@@ -349,7 +351,7 @@ router.get('/:id/orders', async (req, res) => {
 });
 
 // POST /api/customers - Create new customer
-router.post('/', async (req, res) => {
+router.post('/', authenticateAdmin, requirePermission('customers.edit'), async (req, res) => {
     try {
         const customerData = req.body;
         
@@ -424,7 +426,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/customers/:id - Update customer
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticateAdmin, requirePermission('customers.edit'), async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
@@ -461,7 +463,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // POST /api/customers/:id/communication - Add communication log entry
-router.post('/:id/communication', async (req, res) => {
+router.post('/:id/communication', authenticateAdmin, requirePermission('customers.edit'), async (req, res) => {
     try {
         const { id } = req.params;
         const { type, subject, content, status = 'sent', adminNotes } = req.body;
@@ -540,7 +542,7 @@ router.post('/:id/communication', async (req, res) => {
 });
 
 // POST /api/customers/:id/analytics - Update customer analytics
-router.post('/:id/analytics', async (req, res) => {
+router.post('/:id/analytics', authenticateAdmin, requirePermission('customers.edit'), async (req, res) => {
     try {
         const { id } = req.params;
         
@@ -568,7 +570,7 @@ router.post('/:id/analytics', async (req, res) => {
 });
 
 // DELETE /api/customers/:id - Delete customer
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticateAdmin, requirePermission('customers.edit'), async (req, res) => {
     try {
         const { id } = req.params;
         

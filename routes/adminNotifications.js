@@ -2,6 +2,7 @@ const express = require('express');
 const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -32,7 +33,7 @@ function normalizeDoc(doc) {
  * Query: recipientId (required) – admin user id who receives the notifications.
  * Response: Array of notification documents, newest first (createdAt desc).
  */
-router.get('/notifications', authenticateAdmin, async (req, res) => {
+router.get('/notifications', authenticateAdmin, requirePermission('notifications.view'), async (req, res) => {
     try {
         const recipientId = req.query.recipientId;
         if (!recipientId || typeof recipientId !== 'string' || !recipientId.trim()) {
@@ -154,7 +155,7 @@ router.post('/notifications/on-login', async (req, res) => {
  * createdAt: optional ISO string; defaults to now.
  * Response: The created document (with _id / id).
  */
-router.post('/notifications', authenticateAdmin, async (req, res) => {
+router.post('/notifications', authenticateAdmin, requirePermission('notifications.view'), async (req, res) => {
     try {
         const { recipientId, type, message, fullMessage, createdAt } = req.body;
 
@@ -246,7 +247,7 @@ router.post('/notifications', authenticateAdmin, async (req, res) => {
  * Delete one notification by id (_id).
  * Response: success and deletedCount or acknowledged so frontend can treat as success.
  */
-router.delete('/notifications/:id', authenticateAdmin, async (req, res) => {
+router.delete('/notifications/:id', authenticateAdmin, requirePermission('notifications.view'), async (req, res) => {
     try {
         const id = req.params.id;
         if (!id) {

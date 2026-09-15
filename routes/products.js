@@ -10,6 +10,7 @@ const variantService = require('../services/variantService');
 const vatService = require('../services/vatService');
 const currencySelectionService = require('../services/currencySelectionService');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 const { logger } = require('../core/logging/logger');
 const featuredProduct = require('../utils/featuredProduct');
@@ -1130,7 +1131,7 @@ function productWriteFilter(product, fallbackId) {
 const PRODUCT_BULK_MAX = 100;
 
 // POST /api/products/bulk-action — admin bulk publish / draft / delete. Backend is SSOT.
-router.post('/bulk-action', authenticateAdmin, async (req, res) => {
+router.post('/bulk-action', authenticateAdmin, requirePermission('products.edit'), async (req, res) => {
     try {
         const { action, productIds } = req.body || {};
         const allowed = new Set(['publish', 'unpublish', 'delete']);
@@ -1220,7 +1221,7 @@ router.post('/bulk-action', authenticateAdmin, async (req, res) => {
 });
 
 // POST /api/products - Create new product (admin)
-router.post('/', authenticateAdmin, async (req, res) => {
+router.post('/', authenticateAdmin, requirePermission('products.create'), async (req, res) => {
     try {
         const productData = req.body;
         
@@ -1388,7 +1389,7 @@ router.post('/', authenticateAdmin, async (req, res) => {
 });
 
 // PUT /api/products/:id - Update product (admin)
-router.put('/:id', authenticateAdmin, async (req, res) => {
+router.put('/:id', authenticateAdmin, requirePermission('products.edit'), async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
@@ -1563,7 +1564,7 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
  * Body (optional):
  * - mode: 'missing' | 'all' (default 'missing')
  */
-router.post('/:id/seed-color-media', authenticateAdmin, async (req, res) => {
+router.post('/:id/seed-color-media', authenticateAdmin, requirePermission('products.edit'), async (req, res) => {
     try {
         const { id } = req.params;
         const mode = (req.body && typeof req.body.mode === 'string') ? req.body.mode : 'missing';
@@ -1692,7 +1693,7 @@ router.post('/:id/seed-color-media', authenticateAdmin, async (req, res) => {
 });
 
 // DELETE /api/products/:id - Delete product (admin)
-router.delete('/:id', authenticateAdmin, async (req, res) => {
+router.delete('/:id', authenticateAdmin, requirePermission('products.delete'), async (req, res) => {
     try {
         const { id } = req.params;
         

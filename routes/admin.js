@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -17,7 +18,7 @@ const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET;
  * WARNING: This will permanently delete all records in newsletter_subscribers collection
  * Only use this after verifying all data has been migrated to 'subscribers' collection
  */
-router.delete('/cleanup-newsletter-subscribers', authenticateAdmin, async (req, res) => {
+router.delete('/cleanup-newsletter-subscribers', authenticateAdmin, requirePermission('security.manage'), async (req, res) => {
     try {
         console.log('🧹 [ADMIN] Starting cleanup of newsletter_subscribers collection...');
         
@@ -81,7 +82,7 @@ router.delete('/cleanup-newsletter-subscribers', authenticateAdmin, async (req, 
  * GET /api/admin/check-newsletter-subscribers
  * Check if newsletter_subscribers collection exists and has records
  */
-router.get('/check-newsletter-subscribers', authenticateAdmin, async (req, res) => {
+router.get('/check-newsletter-subscribers', authenticateAdmin, requirePermission('security.manage'), async (req, res) => {
     try {
         const checkResult = await db.executeOperation({
             database_name: 'peakmode',
@@ -124,7 +125,7 @@ router.get('/check-newsletter-subscribers', authenticateAdmin, async (req, res) 
  *
  * Body: { orderId: string, to: string, includePdf?: boolean }
  */
-router.post('/test-receipt-email', authenticateAdmin, async (req, res) => {
+router.post('/test-receipt-email', authenticateAdmin, requirePermission('email.manage'), async (req, res) => {
     try {
         const { orderId, to, includePdf } = req.body || {};
         if (!orderId || !to) {
@@ -189,16 +190,25 @@ function adminIdString(admin) {
 /** Build profile payload for GET /me and PATCH /me responses */
 function toProfileData(admin) {
     if (!admin) return null;
+    const role = admin.role || 'admin';
+    const { getPermissionsForRole, mfaRequiredForRole } = require('../services/staffAccessPolicy');
+    const { resolveAccountStatus } = require('../services/adminAccountState');
     return {
         id: adminIdString(admin),
         name: admin.name || admin.username || admin.email,
         email: admin.email,
-        role: admin.role || 'admin',
-        status: admin.status || 'active',
+        role,
+        status: resolveAccountStatus(admin),
         avatar: admin.avatar || null,
         timezone: admin.timezone || null,
         notificationPreference: admin.notificationPreference || null,
-        theme: admin.theme || null
+        theme: admin.theme || null,
+        permissions: getPermissionsForRole(role),
+        mfa: {
+            enrolled: Boolean(admin.mfa && admin.mfa.enabled),
+            required: mfaRequiredForRole(role)
+        },
+        lastLoginAt: admin.lastLoginAt || null
     };
 }
 
@@ -449,7 +459,7 @@ router.post('/me/activity', authenticateAdmin, async (req, res) => {
  * Returns all shipments from DB, latest first. Admin auth required.
  * Query: limit (default 50), offset (default 0).
  */
-router.get('/shipments', authenticateAdmin, async (req, res) => {
+router.get('/shipments', authenticateAdmin, requirePermission('shipping.view'), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
         const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);

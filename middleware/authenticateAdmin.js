@@ -1,21 +1,51 @@
 const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
+const {
+    canAuthenticate,
+    denialForStatus,
+    resolveAccountStatus,
+    unwrapRead
+} = require('../services/adminAccountState');
+const { getPermissionsForRole, normalizeRole } = require('../services/staffAccessPolicy');
 
 const db = getDBInstance();
-
-// JWT secret from environment variable
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET;
 
+function attachAdmin(req, admin) {
+    const role = normalizeRole(admin.role);
+    req.admin = {
+        id: admin._id || admin.id,
+        username: admin.username,
+        email: admin.email || admin.username || null,
+        role,
+        name: admin.name || admin.username || admin.email,
+        status: resolveAccountStatus(admin),
+        permissions: getPermissionsForRole(role),
+        mfaEnabled: Boolean(admin.mfa && admin.mfa.enabled)
+    };
+}
+
+async function loadAdminFromDecoded(decoded) {
+    const lookup = (decoded && decoded.adminId && ObjectId.isValid(decoded.adminId))
+        ? { _id: new ObjectId(decoded.adminId) }
+        : { username: decoded.username };
+    const adminResult = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'admins',
+        command: '--read',
+        data: lookup
+    });
+    return unwrapRead(adminResult);
+}
+
 /**
- * Middleware to authenticate admin requests
- * Verifies JWT token from Authorization header
- * Attaches admin info to req.admin if valid
- * Returns 401 if token is missing, invalid, or expired
+ * Middleware to authenticate admin requests.
+ * Verifies JWT, then re-loads current account status/role from Mongo.
+ * Status is authoritative — a still-valid access token cannot bypass suspension.
  */
 async function authenticateAdmin(req, res, next) {
     try {
-        // Get token from Authorization header
         const authHeader = req.headers.authorization;
 
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -34,9 +64,8 @@ async function authenticateAdmin(req, res, next) {
             });
         }
 
-        const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+        const token = authHeader.substring(7);
 
-        // Verify token
         let decoded;
         try {
             decoded = jwt.verify(token, JWT_SECRET);
@@ -47,34 +76,28 @@ async function authenticateAdmin(req, res, next) {
                     error: 'Token expired. Please login again.',
                     code: 'TOKEN_EXPIRED'
                 });
-            } else if (jwtError.name === 'JsonWebTokenError') {
+            }
+            if (jwtError.name === 'JsonWebTokenError') {
                 return res.status(401).json({
                     success: false,
                     error: 'Invalid token. Please login again.',
                     code: 'INVALID_TOKEN'
                 });
-            } else {
-                throw jwtError;
             }
+            throw jwtError;
         }
 
-        // Verify admin still exists and is active
-        const adminLookup = (decoded && decoded.adminId && ObjectId.isValid(decoded.adminId))
-            ? { _id: new ObjectId(decoded.adminId), active: { $ne: false } }
-            : { username: decoded.username, active: { $ne: false } };
+        if (decoded && decoded.type && decoded.type !== 'access') {
+            return res.status(401).json({
+                success: false,
+                error: 'Invalid token type',
+                code: 'INVALID_TOKEN'
+            });
+        }
 
-        const adminResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--read',
-            // VortexDB expects the query directly (NOT { filter: ... })
-            data: adminLookup
-        });
+        const admin = await loadAdminFromDecoded(decoded);
 
-        const adminData = adminResult && adminResult.success ? adminResult.data : null;
-        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
-
-        if (!adminResult.success || !admin) {
+        if (!admin) {
             return res.status(401).json({
                 success: false,
                 error: 'Admin account not found or disabled',
@@ -82,17 +105,17 @@ async function authenticateAdmin(req, res, next) {
             });
         }
 
-        // Attach admin info to request object
-        req.admin = {
-            id: admin._id || admin.id,
-            username: admin.username,
-            role: admin.role || 'admin',
-            name: admin.name || admin.username
-        };
+        if (!canAuthenticate(admin)) {
+            const denial = denialForStatus(resolveAccountStatus(admin));
+            return res.status(denial.httpStatus).json({
+                success: false,
+                error: denial.message,
+                code: denial.code
+            });
+        }
 
-        // Continue to next middleware/route
+        attachAdmin(req, admin);
         next();
-
     } catch (error) {
         console.error('❌ [AUTH MIDDLEWARE] Authentication error:', error);
         res.status(500).json({
@@ -103,8 +126,7 @@ async function authenticateAdmin(req, res, next) {
 }
 
 /**
- * Optional admin auth: does not 401. If valid Bearer token, sets req.admin and req.isAdminRequest = true.
- * Use on storefront product endpoints so admin requests (with token) can see all products including drafts.
+ * Optional admin auth: does not 401. Suspended/pending accounts are treated as unauthenticated.
  */
 async function optionalAuthenticateAdmin(req, res, next) {
     req.isAdminRequest = false;
@@ -120,24 +142,12 @@ async function optionalAuthenticateAdmin(req, res, next) {
         } catch (_) {
             return next();
         }
-        const adminLookup = (decoded && decoded.adminId && ObjectId.isValid(decoded.adminId))
-            ? { _id: new ObjectId(decoded.adminId), active: { $ne: false } }
-            : { username: decoded.username, active: { $ne: false } };
-        const adminResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--read',
-            data: adminLookup
-        });
-        const adminData = adminResult && adminResult.success ? adminResult.data : null;
-        const admin = Array.isArray(adminData) ? adminData[0] : adminData;
-        if (!admin) return next();
-        req.admin = {
-            id: admin._id || admin.id,
-            username: admin.username,
-            role: admin.role || 'admin',
-            name: admin.name || admin.username
-        };
+        if (decoded && decoded.type && decoded.type !== 'access') {
+            return next();
+        }
+        const admin = await loadAdminFromDecoded(decoded);
+        if (!admin || !canAuthenticate(admin)) return next();
+        attachAdmin(req, admin);
         req.isAdminRequest = true;
     } catch (_) {
         // ignore
@@ -147,4 +157,3 @@ async function optionalAuthenticateAdmin(req, res, next) {
 
 module.exports = authenticateAdmin;
 module.exports.optionalAuthenticateAdmin = optionalAuthenticateAdmin;
-

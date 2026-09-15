@@ -13,6 +13,7 @@ const {
   cleanupUnusedSupportImages
 } = require('../controllers/uploadController');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const { logger } = require('../core/logging/logger');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 
@@ -137,7 +138,7 @@ const handleMulterError = (err, req, res, next) => {
 // Product image upload - ADMIN ONLY
 router.post(
   '/product-image',
-  authenticateAdmin,
+  authenticateAdmin, requirePermission('media.upload'),
   uploadProductImage.single('image'),
   handleMulterError,
   uploadController
@@ -168,7 +169,7 @@ router.post('/support/multiple', uploadSupport.array('attachments', 10), handleM
 // POST /api/uploads/social — Admin community media (images + videos)
 router.post(
   '/social',
-  authenticateAdmin,
+  authenticateAdmin, requirePermission('media.upload'),
   requireCloudinaryConfig,
   uploadSocial.array('media', 10),
   handleMulterError,
@@ -176,7 +177,7 @@ router.post(
 );
 router.post(
   '/social/single',
-  authenticateAdmin,
+  authenticateAdmin, requirePermission('media.upload'),
   requireCloudinaryConfig,
   uploadSocial.single('media'),
   handleMulterError,
@@ -186,19 +187,19 @@ router.post(
 // POST /api/uploads/cleanup-products
 // Admin-only endpoint to cleanup unused Cloudinary product images
 // WARNING: Only deletes images that are NOT referenced in MongoDB products
-router.post('/cleanup-products', authenticateAdmin, cleanupUnusedProductImages);
+router.post('/cleanup-products', authenticateAdmin, requirePermission('media.upload'), cleanupUnusedProductImages);
 
 // POST /api/uploads/cleanup-reviews
 // Admin-only endpoint to cleanup unused Cloudinary review images
-router.post('/cleanup-reviews', authenticateAdmin, cleanupUnusedReviewImages);
+router.post('/cleanup-reviews', authenticateAdmin, requirePermission('media.upload'), cleanupUnusedReviewImages);
 
 // POST /api/uploads/cleanup-messages
 // Admin-only endpoint to cleanup unused Cloudinary message attachments
-router.post('/cleanup-messages', authenticateAdmin, cleanupUnusedMessageImages);
+router.post('/cleanup-messages', authenticateAdmin, requirePermission('media.upload'), cleanupUnusedMessageImages);
 
 // POST /api/uploads/cleanup-support
 // Admin-only endpoint to cleanup unused Cloudinary support attachments
-router.post('/cleanup-support', authenticateAdmin, cleanupUnusedSupportImages);
+router.post('/cleanup-support', authenticateAdmin, requirePermission('media.upload'), cleanupUnusedSupportImages);
 
 module.exports = router;
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -90,7 +91,7 @@ router.get('/content', async (req, res) => {
  * Accepts: { section: "hero"|"newsletter"|"about", data: {...} }
  * OR: { hero: {...}, newsletter: {...}, about: {...} } (update all)
  */
-router.put('/content', authenticateAdmin, async (req, res) => {
+router.put('/content', authenticateAdmin, requirePermission('hub.edit'), async (req, res) => {
     try {
         const { section, data, hero, newsletter, about } = req.body;
 

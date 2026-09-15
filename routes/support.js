@@ -3,6 +3,8 @@ const router = express.Router();
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 const { ObjectId } = require('mongodb');
+const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 
 const db = getDBInstance();
 const { devLog } = require('../core/logging/devConsole');
@@ -847,7 +849,7 @@ router.post('/contact', async (req, res) => {
  * GET /api/support/messages
  * Get all support messages (admin only)
  */
-router.get('/messages', async (req, res) => {
+router.get('/messages', authenticateAdmin, requirePermission('messages.view'), async (req, res) => {
     try {
         const pagination = parsePagination(req.query);
         const filters = parseFilters(req.query);
@@ -1006,7 +1008,7 @@ const replyHandler = async (req, res) => {
  * POST /api/support/messages/compose
  * Compose and send a new email from support@peakmode.se (not a reply)
  */
-router.post('/messages/compose', async (req, res) => {
+router.post('/messages/compose', authenticateAdmin, requirePermission('messages.reply'), async (req, res) => {
     devLog('support_compose_email_request');
     try {
         const { recipients, subject, message, attachments = [], cc = [], bcc = [] } = req.body;
@@ -1096,8 +1098,8 @@ router.options('/messages/:id/reply', (req, res) => {
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.status(200).end();
 });
-router.post('/messages/:id/reply', replyHandler);
-router.put('/messages/:id/reply', replyHandler);
+router.post('/messages/:id/reply', authenticateAdmin, requirePermission('messages.reply'), replyHandler);
+router.put('/messages/:id/reply', authenticateAdmin, requirePermission('messages.reply'), replyHandler);
 
 // Register PATCH route (must come before GET /messages/:id to avoid conflicts)
 // Add OPTIONS handler for CORS preflight (covers GET, PATCH, DELETE)
@@ -1106,7 +1108,7 @@ router.options('/messages/:id', (req, res) => {
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.status(200).end();
 });
-router.patch('/messages/:id', async (req, res) => {
+router.patch('/messages/:id', authenticateAdmin, requirePermission('messages.reply'), async (req, res) => {
     devLog('support_message_patch', { id: req.params.id, keys: Object.keys(req.body || {}) });
     try {
         const { id } = req.params;
@@ -1160,7 +1162,7 @@ router.patch('/messages/:id', async (req, res) => {
  * GET /api/support/messages/:id
  * Get a specific support message with full thread history
  */
-router.get('/messages/:id', async (req, res) => {
+router.get('/messages/:id', authenticateAdmin, requirePermission('messages.view'), async (req, res) => {
     try {
         const { id } = req.params;
         const recordInfo = await findConversationRecordById(id);
@@ -1189,7 +1191,7 @@ router.get('/messages/:id', async (req, res) => {
  * DELETE /api/support/messages/:id
  * Permanently delete a support message
  */
-router.delete('/messages/:id', async (req, res) => {
+router.delete('/messages/:id', authenticateAdmin, requirePermission('messages.reply'), async (req, res) => {
     devLog('support_message_delete', { id: req.params.id });
     try {
         const { id } = req.params;
@@ -1243,7 +1245,7 @@ router.delete('/messages/:id', async (req, res) => {
     }
 });
 
-router.post('/messages/:id/archive', async (req, res) => {
+router.post('/messages/:id/archive', authenticateAdmin, requirePermission('messages.reply'), async (req, res) => {
     try {
         const result = await applyConversationUpdates(req.params.id, { status: 'archived' });
 
@@ -1272,7 +1274,7 @@ router.post('/messages/:id/archive', async (req, res) => {
     }
 });
 
-router.post('/messages/:id/resolve', async (req, res) => {
+router.post('/messages/:id/resolve', authenticateAdmin, requirePermission('messages.reply'), async (req, res) => {
     try {
         const result = await applyConversationUpdates(req.params.id, { status: 'resolved' });
 
@@ -1301,7 +1303,7 @@ router.post('/messages/:id/resolve', async (req, res) => {
     }
 });
 
-router.post('/messages/:id/assign', async (req, res) => {
+router.post('/messages/:id/assign', authenticateAdmin, requirePermission('messages.reply'), async (req, res) => {
     try {
         const { agentId, agentName, agentEmail } = req.body || {};
         const result = await applyConversationUpdates(req.params.id, {

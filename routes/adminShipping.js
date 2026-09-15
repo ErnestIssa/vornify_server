@@ -8,7 +8,13 @@ const express = require('express');
 const router = express.Router();
 const { ObjectId } = require('mongodb');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const getDBInstance = require('../vornifydb/dbInstance');
+
+function shippingGate(req, res, next) {
+    const perm = req.method === 'GET' || req.method === 'HEAD' ? 'shipping.view' : 'shipping.edit';
+    return requirePermission(perm)(req, res, next);
+}
 const { DATABASE_NAME, COLLECTIONS } = require('../services/shippingConfigService');
 
 const db = getDBInstance();
@@ -20,7 +26,7 @@ function toIdFilter(id) {
 
 // ---------- Zones ----------
 
-router.get('/zones', authenticateAdmin, async (req, res) => {
+router.get('/zones', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -39,7 +45,7 @@ router.get('/zones', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/zones', authenticateAdmin, async (req, res) => {
+router.post('/zones', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { name, countries, currency, active } = req.body;
         if (!name || !Array.isArray(countries)) {
@@ -68,7 +74,7 @@ router.post('/zones', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/zones/:id', authenticateAdmin, async (req, res) => {
+router.put('/zones/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid zone id' });
@@ -98,7 +104,7 @@ router.put('/zones/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.delete('/zones/:id', authenticateAdmin, async (req, res) => {
+router.delete('/zones/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid zone id' });
@@ -118,7 +124,7 @@ router.delete('/zones/:id', authenticateAdmin, async (req, res) => {
 
 // ---------- Methods ----------
 
-router.get('/methods', authenticateAdmin, async (req, res) => {
+router.get('/methods', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -137,7 +143,7 @@ router.get('/methods', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/methods', authenticateAdmin, async (req, res) => {
+router.post('/methods', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { id, name, type, carrier, active, estimatedDays, description, supportsServicePoints, supportsHomeDelivery } = req.body;
         if (!name || !type) {
@@ -172,7 +178,7 @@ router.post('/methods', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/methods/:id', authenticateAdmin, async (req, res) => {
+router.put('/methods/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid method id' });
@@ -206,7 +212,7 @@ router.put('/methods/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.delete('/methods/:id', authenticateAdmin, async (req, res) => {
+router.delete('/methods/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid method id' });
@@ -226,7 +232,7 @@ router.delete('/methods/:id', authenticateAdmin, async (req, res) => {
 
 // ---------- Prices ----------
 
-router.get('/prices', authenticateAdmin, async (req, res) => {
+router.get('/prices', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -245,7 +251,7 @@ router.get('/prices', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/prices', authenticateAdmin, async (req, res) => {
+router.post('/prices', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { zoneId, methodId, basePrice, currency, active } = req.body;
         if (zoneId == null || methodId == null || typeof basePrice !== 'number') {
@@ -275,7 +281,7 @@ router.post('/prices', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/prices/:id', authenticateAdmin, async (req, res) => {
+router.put('/prices/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid price id' });
@@ -306,7 +312,7 @@ router.put('/prices/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.delete('/prices/:id', authenticateAdmin, async (req, res) => {
+router.delete('/prices/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid price id' });
@@ -326,7 +332,7 @@ router.delete('/prices/:id', authenticateAdmin, async (req, res) => {
 
 // ---------- Free areas ----------
 
-router.get('/free-areas', authenticateAdmin, async (req, res) => {
+router.get('/free-areas', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -345,7 +351,7 @@ router.get('/free-areas', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/free-areas', authenticateAdmin, async (req, res) => {
+router.post('/free-areas', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { country, municipality, active } = req.body;
         if (!country || !municipality) {
@@ -373,7 +379,7 @@ router.post('/free-areas', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/free-areas/:id', authenticateAdmin, async (req, res) => {
+router.put('/free-areas/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid free area id' });
@@ -402,7 +408,7 @@ router.put('/free-areas/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.delete('/free-areas/:id', authenticateAdmin, async (req, res) => {
+router.delete('/free-areas/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid free area id' });
@@ -423,7 +429,7 @@ router.delete('/free-areas/:id', authenticateAdmin, async (req, res) => {
 // ---------- Warehouses ----------
 const WAREHOUSES_COLL = 'warehouses';
 
-router.get('/warehouses', authenticateAdmin, async (req, res) => {
+router.get('/warehouses', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -439,7 +445,7 @@ router.get('/warehouses', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/warehouses', authenticateAdmin, async (req, res) => {
+router.post('/warehouses', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { name, address, city, country, postal_code, postalCode, processingTimeDays, processing_time, carriers, supported_carriers, priorityLevel, priority_level, active } = req.body;
         if (!name || !country) {
@@ -482,7 +488,7 @@ router.post('/warehouses', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/warehouses/:id', authenticateAdmin, async (req, res) => {
+router.put('/warehouses/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid warehouse id' });
@@ -520,7 +526,7 @@ router.put('/warehouses/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.delete('/warehouses/:id', authenticateAdmin, async (req, res) => {
+router.delete('/warehouses/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid warehouse id' });
@@ -541,7 +547,7 @@ router.delete('/warehouses/:id', authenticateAdmin, async (req, res) => {
 // ---------- Package presets ----------
 const PACKAGES_COLL = 'package_presets';
 
-router.get('/packages', authenticateAdmin, async (req, res) => {
+router.get('/packages', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -557,7 +563,7 @@ router.get('/packages', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/packages', authenticateAdmin, async (req, res) => {
+router.post('/packages', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { name, type, weightKg, lengthCm, widthCm, heightCm, maxCapacity, active } = req.body;
         if (!name || !type) {
@@ -588,7 +594,7 @@ router.post('/packages', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/packages/:id', authenticateAdmin, async (req, res) => {
+router.put('/packages/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid package id' });
@@ -617,7 +623,7 @@ router.put('/packages/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.delete('/packages/:id', authenticateAdmin, async (req, res) => {
+router.delete('/packages/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid package id' });
@@ -638,7 +644,7 @@ router.delete('/packages/:id', authenticateAdmin, async (req, res) => {
 // ---------- Global shipping settings (single document) ----------
 const GLOBAL_SETTINGS_COLL = 'global_shipping_settings';
 
-router.get('/settings', authenticateAdmin, async (req, res) => {
+router.get('/settings', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -654,7 +660,7 @@ router.get('/settings', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/settings', authenticateAdmin, async (req, res) => {
+router.put('/settings', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const body = req.body || {};
         const collection = await db.getCollection(DATABASE_NAME, GLOBAL_SETTINGS_COLL);
@@ -684,7 +690,7 @@ router.put('/settings', authenticateAdmin, async (req, res) => {
 // ---------- Warehouse selection (for admin / order assignment) ----------
 const warehouseSelectionService = require('../services/warehouseSelectionService');
 
-router.get('/warehouse-select', authenticateAdmin, async (req, res) => {
+router.get('/warehouse-select', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { destinationCountry, productIds, preferSingleShipment, allowSplit } = req.query;
         const ids = (productIds || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -712,7 +718,7 @@ function maskCredential(v) {
     return s.length <= 4 ? MASK : s.slice(0, 2) + MASK + s.slice(-2);
 }
 
-router.get('/carriers', authenticateAdmin, async (req, res) => {
+router.get('/carriers', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await db.executeOperation({
             database_name: DATABASE_NAME,
@@ -740,7 +746,7 @@ router.get('/carriers', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/carriers', authenticateAdmin, async (req, res) => {
+router.post('/carriers', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { carrier_name, api_key, api_secret, account_number, environment, active, supported_services } = req.body || {};
         if (!carrier_name) {
@@ -771,7 +777,7 @@ router.post('/carriers', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.put('/carriers/:id', authenticateAdmin, async (req, res) => {
+router.put('/carriers/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid carrier id' });
@@ -799,7 +805,7 @@ router.put('/carriers/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.delete('/carriers/:id', authenticateAdmin, async (req, res) => {
+router.delete('/carriers/:id', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid carrier id' });
@@ -818,7 +824,7 @@ router.delete('/carriers/:id', authenticateAdmin, async (req, res) => {
 });
 
 // POST /api/admin/shipping/carriers/:id/verify - Test carrier connection (stub)
-router.post('/carriers/:id/verify', authenticateAdmin, async (req, res) => {
+router.post('/carriers/:id/verify', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const filter = toIdFilter(req.params.id);
         if (!filter) return res.status(400).json({ success: false, error: 'Invalid carrier id' });
@@ -844,7 +850,7 @@ router.post('/carriers/:id/verify', authenticateAdmin, async (req, res) => {
 // ---------- SHIPIT logistics (admin only; no pricing – pricing is DB) ----------
 const shipitService = require('../services/shipping/shipitService');
 
-router.post('/shipit/sync-methods', authenticateAdmin, async (req, res) => {
+router.post('/shipit/sync-methods', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const result = await shipitService.syncCarrierServices();
         if (!result.success) {
@@ -861,7 +867,7 @@ router.post('/shipit/sync-methods', authenticateAdmin, async (req, res) => {
     }
 });
 
-router.post('/shipit/sync-tracking', authenticateAdmin, async (req, res) => {
+router.post('/shipit/sync-tracking', authenticateAdmin, shippingGate, async (req, res) => {
     try {
         const { trackingNumber } = req.body || {};
         if (trackingNumber) {

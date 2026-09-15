@@ -6,11 +6,35 @@ const rateLimit = require('express-rate-limit');
 const { ObjectId } = require('mongodb');
 const getDBInstance = require('../vornifydb/dbInstance');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
-const requireSuperAdmin = require('../middleware/requireSuperAdmin');
+const { requirePermission } = require('../middleware/requirePermission');
 const logAdminActivity = require('../utils/auditLogger');
 const emailService = require('../services/emailService');
 const { devLog, devWarn } = require('../core/logging/devConsole');
 const { logger } = require('../core/logging/logger');
+const { isAllowedStaffEmail, isInvitableRole, getStaffEmailDomain } = require('../services/staffAccessPolicy');
+const {
+    canAuthenticate,
+    resolveAccountStatus,
+    denialForStatus,
+    adminIdString,
+    updateAdmin,
+    unwrapRead
+} = require('../services/adminAccountState');
+const {
+    findSession,
+    revokeMatchingSession,
+    revokeAllSessions,
+    pruneSessions,
+    signMfaPendingToken,
+    signAccessToken,
+    signRefreshToken,
+    buildSessionRecord,
+    setRefreshCookie,
+    clearRefreshCookie
+} = require('../services/adminSessions');
+const { decryptSecret, verifyTotp, consumeRecoveryCode } = require('../services/totp');
+const { issueAdminSession, publicAdmin } = require('../services/issueAdminSession');
+const { writeAuditLog } = require('../services/adminAudit');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -111,8 +135,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
             });
         }
 
-        // Email domain validation: Only @peakmode.se emails allowed
-        if (!normalizedEmail.endsWith('@peakmode.se')) {
+        if (!isAllowedStaffEmail(normalizedEmail)) {
             logger.warn('admin_login_invalid_domain_attempt', {});
             devLog('[ADMIN AUTH LOGIN] Invalid email domain:', normalizedEmail);
             return res.status(401).json({
@@ -281,10 +304,115 @@ router.post('/login', loginRateLimit, async (req, res) => {
             });
         }
 
-        // Check if admin status is active
-        if (admin.status && admin.status !== 'active') {
-            logger.warn('admin_login_disabled', { status: admin.status, origin: req.get('origin') || undefined });
-            devLog('[ADMIN AUTH LOGIN] 403 ADMIN_DISABLED status:', admin.status);
+        if (!canAuthenticate(admin)) {
+            const denial = denialForStatus(resolveAccountStatus(admin));
+            logger.warn('admin_login_disabled', { status: resolveAccountStatus(admin), origin: req.get('origin') || undefined });
+            return res.status(denial.httpStatus).json({
+                success: false,
+                message: denial.message,
+                errorCode: denial.code
+            });
+        }
+
+        const adminId = admin._id || admin.id;
+
+        if (admin.mfa && admin.mfa.enabled && admin.mfa.secret) {
+            const mfaToken = signMfaPendingToken(admin);
+            await logAdminActivity({
+                adminId,
+                adminEmail: admin.email || normalizedEmail,
+                action: 'login_mfa_challenge',
+                details: { role: admin.role || 'admin' },
+                ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+                userAgent: req.get('user-agent') || 'unknown',
+                success: true
+            });
+            return res.json({
+                success: true,
+                data: {
+                    mfaRequired: true,
+                    mfaToken
+                }
+            });
+        }
+
+        const session = await issueAdminSession(admin, req, res);
+        await writeAuditLog({
+            actorId: adminId,
+            actorEmail: admin.email || normalizedEmail,
+            action: 'login',
+            resource: 'auth',
+            metadata: { role: admin.role || 'admin' },
+            req,
+            success: true
+        });
+
+        res.json({
+            success: true,
+            data: session
+        });
+    } catch (error) {
+        logger.error('admin_login_error', { message: error.message, name: error.name });
+        devLog('[ADMIN AUTH LOGIN] Stack:', error.stack);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error during login',
+            errorCode: 'INTERNAL_SERVER_ERROR'
+        });
+    }
+});
+
+/**
+ * POST /api/admin/auth/mfa/verify
+ * Complete login after TOTP (or a one-time recovery code).
+ */
+router.post('/mfa/verify', loginRateLimit, async (req, res) => {
+    try {
+        const { mfaToken, code } = req.body || {};
+        if (!mfaToken || !code) {
+            return res.status(400).json({
+                success: false,
+                message: 'Authenticator code is required',
+                errorCode: 'VALIDATION_ERROR'
+            });
+        }
+        if (!JWT_SECRET) {
+            return res.status(500).json({
+                success: false,
+                message: 'Server configuration error: JWT_SECRET not set',
+                errorCode: 'SERVER_CONFIG_ERROR'
+            });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(String(mfaToken).trim(), JWT_SECRET);
+        } catch (_) {
+            return res.status(401).json({
+                success: false,
+                message: 'MFA session expired. Please sign in again.',
+                errorCode: 'MFA_TOKEN_EXPIRED'
+            });
+        }
+        if (decoded.type !== 'mfa_pending') {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid MFA session',
+                errorCode: 'INVALID_MFA_TOKEN'
+            });
+        }
+
+        const adminLookup = ObjectId.isValid(decoded.adminId)
+            ? { _id: new ObjectId(decoded.adminId) }
+            : { _id: decoded.adminId };
+        const adminResult = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admins',
+            command: '--read',
+            data: adminLookup
+        });
+        const admin = unwrapRead(adminResult);
+        if (!admin || !canAuthenticate(admin)) {
             return res.status(403).json({
                 success: false,
                 message: 'Admin account is not active',
@@ -292,118 +420,47 @@ router.post('/login', loginRateLimit, async (req, res) => {
             });
         }
 
-        // Also check legacy 'active' field for backward compatibility
-        if (admin.active === false) {
-            logger.warn('admin_login_disabled_legacy', { origin: req.get('origin') || undefined });
-            devLog('[ADMIN AUTH LOGIN] 403 ADMIN_DISABLED (legacy active=false)');
-            return res.status(403).json({
+        const mfa = admin.mfa || {};
+        let verified = false;
+        if (mfa.secret) {
+            const secret = decryptSecret(mfa.secret);
+            verified = secret ? verifyTotp(secret, code) : false;
+        }
+        let remainingHashes = mfa.recoveryHashes || [];
+        if (!verified && remainingHashes.length) {
+            const consumed = consumeRecoveryCode(remainingHashes, code);
+            if (consumed.ok) {
+                verified = true;
+                remainingHashes = consumed.remaining;
+                await updateAdmin(adminIdString(admin), {
+                    mfa: { ...mfa, recoveryHashes: remainingHashes }
+                });
+            }
+        }
+        if (!verified) {
+            return res.status(401).json({
                 success: false,
-                message: 'Admin account is disabled',
-                errorCode: 'ADMIN_DISABLED'
+                message: 'Invalid authenticator code',
+                errorCode: 'INVALID_MFA_CODE'
             });
         }
 
-        // Login successful - reset failed attempts and clear lock
-        const adminId = admin._id || admin.id;
-        const updateFilter = ObjectId.isValid(adminId)
-            ? { _id: new ObjectId(adminId) }
-            : { email: normalizedEmail };
-
-        // Generate access token (15 minutes)
-        const accessTokenPayload = {
-            adminId: adminId,
-            email: admin.email || normalizedEmail,
-            role: admin.role || 'admin'
-        };
-        const accessToken = jwt.sign(accessTokenPayload, JWT_SECRET, {
-            expiresIn: JWT_EXPIRES_IN
-        });
-
-        // Generate refresh token (7 days)
-        const refreshTokenPayload = {
-            adminId: adminId,
-            email: admin.email || normalizedEmail,
-            role: admin.role || 'admin',
-            type: 'refresh'
-        };
-        const refreshToken = jwt.sign(refreshTokenPayload, JWT_SECRET, {
-            expiresIn: JWT_REFRESH_EXPIRES_IN
-        });
-
-        // Store refresh token in database
-        const refreshTokens = admin.refreshTokens || [];
-        refreshTokens.push({
-            token: refreshToken,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days
-            revoked: false,
-            revokedAt: null
-        });
-
-        // Update admin: clear failed attempts, update last login, store refresh token
-        await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--update',
-            data: {
-                filter: updateFilter,
-                update: {
-                    failedLoginAttempts: 0,
-                    lockedUntil: null,
-                    lastLoginAt: new Date().toISOString(),
-                    refreshTokens: refreshTokens,
-                    updatedAt: new Date().toISOString()
-                }
-            }
-        });
-
-        devLog('[ADMIN AUTH LOGIN] Login successful, tokens generated');
-        
-        // Log successful login
-        await logAdminActivity({
-            adminId: adminId,
-            adminEmail: admin.email || normalizedEmail,
+        const session = await issueAdminSession({ ...admin, mfa: { ...mfa, recoveryHashes: remainingHashes } }, req, res);
+        await writeAuditLog({
+            actorId: adminIdString(admin),
+            actorEmail: admin.email,
             action: 'login',
-            details: { role: admin.role || 'admin' },
-            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
-            userAgent: req.get('user-agent') || 'unknown',
+            resource: 'auth',
+            metadata: { role: admin.role, mfa: true },
+            req,
             success: true
         });
-        
-        // Set refresh token in httpOnly cookie (secure, not accessible via JavaScript)
-        // Cross-origin: admin app (e.g. peakmode-admin.onrender.com) and API (vornify-server.onrender.com)
-        // are different origins, so cookie must use sameSite: 'none' and secure: true to be sent.
-        const isProduction = process.env.NODE_ENV === 'production';
-        res.cookie('refreshToken', refreshToken, {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax', // 'none' required for cross-origin (deployed admin → API)
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-            path: '/api/admin/auth'
-        });
-        
-        // Return success response (access token only, refresh token in cookie)
-        res.json({
-            success: true,
-            data: {
-                admin: {
-                    id: adminId,
-                    name: admin.name || admin.email || normalizedEmail,
-                    email: admin.email || normalizedEmail,
-                    role: admin.role || 'admin',
-                    status: admin.status || 'active'
-                },
-                token: accessToken
-                // refreshToken is in httpOnly cookie, not in response
-            }
-        });
-
+        res.json({ success: true, data: session });
     } catch (error) {
-        logger.error('admin_login_error', { message: error.message, name: error.name });
-        devLog('[ADMIN AUTH LOGIN] Stack:', error.stack);
+        logger.error('admin_mfa_verify_error', { message: error.message });
         res.status(500).json({
             success: false,
-            message: 'Internal server error during login',
+            message: 'Internal server error during MFA verification',
             errorCode: 'INTERNAL_SERVER_ERROR'
         });
     }
@@ -465,8 +522,8 @@ router.post('/verify', async (req, res) => {
 
         // Verify admin still exists and is active
         const adminLookup = (decoded && decoded.adminId && ObjectId.isValid(decoded.adminId))
-            ? { _id: new ObjectId(decoded.adminId), active: { $ne: false } }
-            : { username: decoded.username, active: { $ne: false } };
+            ? { _id: new ObjectId(decoded.adminId) }
+            : { username: decoded.username };
 
         const adminResult = await db.executeOperation({
             database_name: 'peakmode',
@@ -478,7 +535,7 @@ router.post('/verify', async (req, res) => {
         const adminData = adminResult && adminResult.success ? adminResult.data : null;
         const admin = Array.isArray(adminData) ? adminData[0] : adminData;
 
-        if (!adminResult.success || !admin) {
+        if (!adminResult.success || !admin || !canAuthenticate(admin)) {
             return res.status(401).json({
                 success: false,
                 valid: false,
@@ -487,16 +544,10 @@ router.post('/verify', async (req, res) => {
             });
         }
 
-        // Return valid response
         res.json({
             success: true,
             valid: true,
-            admin: {
-                id: admin._id || admin.id,
-                username: admin.username,
-                role: admin.role || 'admin',
-                name: admin.name || admin.username
-            }
+            admin: publicAdmin(admin)
         });
 
     } catch (error) {
@@ -570,63 +621,26 @@ router.post('/logout', async (req, res) => {
         const admin = Array.isArray(adminData) ? adminData[0] : adminData;
 
         if (admin && admin.refreshTokens) {
-            // Revoke the refresh token
-            const updatedRefreshTokens = admin.refreshTokens.map(t => {
-                if (t.token === tokenToRevoke.trim() && !t.revoked) {
-                    return {
-                        ...t,
-                        revoked: true,
-                        revokedAt: new Date().toISOString()
-                    };
-                }
-                return t;
-            });
+            const updatedRefreshTokens = pruneSessions(
+                revokeMatchingSession(admin.refreshTokens, tokenToRevoke.trim())
+            );
 
-            // Update admin with revoked token
-            const updateFilter = ObjectId.isValid(adminId)
-                ? { _id: new ObjectId(adminId) }
-                : { _id: adminId };
-
-            await db.executeOperation({
-                database_name: 'peakmode',
-                collection_name: 'admins',
-                command: '--update',
-                data: {
-                    filter: updateFilter,
-                    update: {
-                        refreshTokens: updatedRefreshTokens,
-                        updatedAt: new Date().toISOString()
-                    }
-                }
-            });
-
-            devLog('[LOGOUT] Refresh token revoked for admin:', decoded.email || decoded.username);
-        }
-
-        // Log logout if we have admin info
-        if (decoded && decoded.adminId) {
-            await logAdminActivity({
-                adminId: decoded.adminId,
-                adminEmail: decoded.email,
+            await updateAdmin(adminId, { refreshTokens: updatedRefreshTokens });
+            await writeAuditLog({
+                actorId: adminId,
+                actorEmail: admin.email,
                 action: 'logout',
-                ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
-                userAgent: req.get('user-agent') || 'unknown',
+                resource: 'auth',
+                req,
                 success: true
             });
         }
 
-        // Clear refresh token cookie (same options as when it was set)
-        const isProduction = process.env.NODE_ENV === 'production';
-        res.clearCookie('refreshToken', {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax',
-            path: '/api/admin/auth'
-        });
+        clearRefreshCookie(res);
 
         res.json({
             success: true,
-            message: 'Logged out successfully. Refresh token has been revoked.'
+            message: 'Logout successful. Please remove tokens from client storage.'
         });
 
     } catch (error) {
@@ -710,7 +724,8 @@ router.post('/init', async (req, res) => {
             email: defaultUsername,
             password: hashedPassword,
             name: adminName,
-            role: 'admin',
+            role: 'super_admin',
+            status: 'active',
             active: true,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
@@ -761,7 +776,7 @@ router.post('/init', async (req, res) => {
  * Diagnostic endpoint to check admin database state
  * Returns admin count, admin list (without passwords), and password info
  */
-router.get('/diagnostic', async (req, res) => {
+router.get('/diagnostic', authenticateAdmin, requirePermission('staff.view'), async (req, res) => {
     try {
         devLog('[ADMIN AUTH DIAGNOSTIC] Request received');
 
@@ -785,9 +800,6 @@ router.get('/diagnostic', async (req, res) => {
             const sampleAdmin = allAdminsData[0];
             passwordInfo = {
                 hasPassword: !!sampleAdmin.password,
-                passwordLength: sampleAdmin.password ? sampleAdmin.password.length : 0,
-                passwordType: typeof sampleAdmin.password,
-                passwordStartsWith: sampleAdmin.password ? sampleAdmin.password.substring(0, 10) : null,
                 isBcryptHash: sampleAdmin.password ? (
                     sampleAdmin.password.startsWith('$2b$') ||
                     sampleAdmin.password.startsWith('$2a$') ||
@@ -925,6 +937,7 @@ router.post('/reset-password', async (req, res) => {
                         resetPasswordExpires: null,
                         failedLoginAttempts: 0,
                         lockedUntil: null,
+                        refreshTokens: pruneSessions(revokeAllSessions(admin.refreshTokens || [])),
                         updatedAt: new Date().toISOString()
                     }
                 }
@@ -1043,18 +1056,18 @@ router.post('/reset-password', async (req, res) => {
 
 /**
  * POST /api/admin/invite
- * Create invite for new admin (super_admin only)
- * Authentication: Requires JWT token with super_admin role
- * Request Body: { name: string, email: string }
- * Returns: { success: true, data: { inviteToken, expiresAt, inviteLink } }
+ * Create invite for new staff (permission: staff.invite)
+ * Request Body: { name: string, email: string, role?: 'admin' | 'manager' | 'support' }
+ * Super Admin is never created through this flow.
  */
-router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) => {
+router.post('/invite', authenticateAdmin, requirePermission('staff.invite'), async (req, res) => {
     try {
-        const { name, email } = req.body;
+        const { name, email, role: requestedRole } = req.body;
 
         devLog('[ADMIN INVITE] Request received', {
             name,
             email,
+            role: requestedRole,
             requester: req.admin.email || req.admin.username
         });
 
@@ -1077,12 +1090,20 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
 
         const normalizedEmail = String(email).toLowerCase().trim();
 
-        // Email domain validation: Only @peakmode.se emails allowed
-        if (!normalizedEmail.endsWith('@peakmode.se')) {
+        if (!isAllowedStaffEmail(normalizedEmail)) {
             return res.status(400).json({
                 success: false,
-                message: 'Email must end with @peakmode.se',
+                message: `Email must end with @${getStaffEmailDomain()}`,
                 errorCode: 'INVALID_EMAIL_DOMAIN'
+            });
+        }
+
+        const inviteRole = String(requestedRole || 'admin').toLowerCase().trim();
+        if (!isInvitableRole(inviteRole)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invited staff must be admin, manager, or support. Super Admin is not created via invite.',
+                errorCode: 'INVALID_ROLE'
             });
         }
 
@@ -1098,30 +1119,14 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
         const existingAdmin = Array.isArray(existingAdminData) ? existingAdminData[0] : existingAdminData;
 
         if (existingAdmin) {
-            return res.status(409).json({
-                success: false,
-                message: 'An admin with this email already exists',
-                errorCode: 'ADMIN_EXISTS'
-            });
-        }
-
-        // Check total admin count (max 2 admins: 1 super_admin + 1 admin)
-        const allAdminsResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--read',
-            data: {}
-        });
-
-        const allAdminsData = allAdminsResult && allAdminsResult.success ? allAdminsResult.data : null;
-        const allAdmins = Array.isArray(allAdminsData) ? allAdminsData : (allAdminsData ? [allAdminsData] : []);
-
-        if (allAdmins.length >= 2) {
-            return res.status(400).json({
-                success: false,
-                message: 'Maximum admin limit reached (2 admins)',
-                errorCode: 'MAX_ADMINS_REACHED'
-            });
+            const existingStatus = resolveAccountStatus(existingAdmin);
+            if (existingStatus !== 'removed') {
+                return res.status(409).json({
+                    success: false,
+                    message: 'A staff account with this email already exists',
+                    errorCode: 'ADMIN_EXISTS'
+                });
+            }
         }
 
         // Generate secure invite token (32 bytes = 64 hex characters)
@@ -1134,9 +1139,10 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
         const newAdmin = {
             name: name.trim(),
             email: normalizedEmail,
-            password: null, // Will be set when invite is accepted
-            role: 'admin', // New admins are always 'admin', not 'super_admin'
-            status: 'pending', // Will be set to 'active' when invite is accepted
+            password: null,
+            role: inviteRole,
+            status: 'pending',
+            active: true,
             inviteToken: inviteToken,
             inviteExpiresAt: expiresAt.toISOString(),
             invitedByEmail,
@@ -1145,6 +1151,7 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
             lockedUntil: null,
             lastLoginAt: null,
             refreshTokens: [],
+            mfa: { enabled: false },
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
@@ -1161,7 +1168,7 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
             const isDup = errMsg.includes('E11000') || errMsg.toLowerCase().includes('duplicate key');
             return res.status(isDup ? 409 : 500).json({
                 success: false,
-                message: isDup ? 'An admin with this email already exists' : 'Failed to create invite',
+                message: isDup ? 'A staff account with this email already exists' : 'Failed to create invite',
                 errorCode: isDup ? 'ADMIN_EXISTS' : 'INTERNAL_SERVER_ERROR'
             });
         }
@@ -1193,19 +1200,19 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
             logger.warn('admin_invite_email_send_failed', { message: emailErr.message });
         }
 
-        // Log invite sent
-        await logAdminActivity({
-            adminId: req.admin.id,
-            adminEmail: req.admin.email,
-            action: 'invite_sent',
-            details: { invitedEmail: normalizedEmail, invitedName: name.trim() },
-            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
-            userAgent: req.get('user-agent') || 'unknown',
+        await writeAuditLog({
+            actorId: req.admin.id,
+            actorEmail: req.admin.email,
+            action: 'admin.invited',
+            resource: 'staff',
+            metadata: { invitedEmail: normalizedEmail, invitedName: name.trim(), role: inviteRole },
+            req,
             success: true
         });
 
         devLog('[ADMIN INVITE] Invite created successfully', {
             email: normalizedEmail,
+            role: inviteRole,
             expiresAt: expiresAt.toISOString()
         });
 
@@ -1214,7 +1221,8 @@ router.post('/invite', authenticateAdmin, requireSuperAdmin, async (req, res) =>
             data: {
                 inviteToken: inviteToken,
                 expiresAt: expiresAt.toISOString(),
-                inviteLink: inviteLink
+                inviteLink: inviteLink,
+                role: inviteRole
             }
         });
 
@@ -1324,39 +1332,12 @@ router.post('/accept-invite', async (req, res) => {
             inviteExpiresAt: admin.inviteExpiresAt
         });
 
-        // Email domain validation: Only @peakmode.se emails allowed
-        if (!admin.email || !admin.email.endsWith('@peakmode.se')) {
+        if (!isAllowedStaffEmail(admin.email)) {
             devWarn('[ACCEPT INVITE] Invalid email domain:', admin.email);
             return res.status(400).json({
                 success: false,
-                message: 'Invalid email domain. Only @peakmode.se emails are allowed.',
+                message: `Invalid email domain. Only @${getStaffEmailDomain()} emails are allowed.`,
                 errorCode: 'INVALID_EMAIL_DOMAIN'
-            });
-        }
-
-        // Check max admin limit before accepting invite
-        const allAdminsResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--read',
-            data: {}
-        });
-
-        const allAdminsData = allAdminsResult && allAdminsResult.success ? allAdminsResult.data : null;
-        const allAdmins = Array.isArray(allAdminsData) ? allAdminsData : (allAdminsData ? [allAdminsData] : []);
-
-        // Count active and pending admins (exclude this pending invite)
-        const activeAdmins = allAdmins.filter(a => 
-            (a.status === 'active' || a.status === 'pending') && 
-            (a._id?.toString() !== (admin._id || admin.id)?.toString())
-        );
-
-        if (activeAdmins.length >= 2) {
-            devWarn('[ACCEPT INVITE] Max admin limit reached');
-            return res.status(400).json({
-                success: false,
-                message: 'Maximum admin limit reached (2 admins)',
-                errorCode: 'MAX_ADMINS_REACHED'
             });
         }
 
@@ -1385,75 +1366,17 @@ router.post('/accept-invite', async (req, res) => {
             });
         }
 
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
-
-        // Update admin: set password, clear invite fields, set status to active
         const adminId = admin._id || admin.id;
-        const updateFilter = ObjectId.isValid(adminId)
-            ? { _id: new ObjectId(adminId) }
-            : { inviteToken: token.trim() };
 
-        // Generate access token (15 minutes)
-        const accessTokenPayload = {
-            adminId: adminId,
-            email: admin.email,
-            role: admin.role || 'admin'
-        };
-        const accessToken = jwt.sign(accessTokenPayload, JWT_SECRET, {
-            expiresIn: JWT_EXPIRES_IN
+        const session = await issueAdminSession(admin, req, res, {
+            password: hashedPassword,
+            status: 'active',
+            active: true,
+            inviteToken: null,
+            inviteExpiresAt: null
         });
 
-        // Generate refresh token (7 days)
-        const refreshTokenPayload = {
-            adminId: adminId,
-            email: admin.email,
-            role: admin.role || 'admin',
-            type: 'refresh'
-        };
-        const refreshToken = jwt.sign(refreshTokenPayload, JWT_SECRET, {
-            expiresIn: JWT_REFRESH_EXPIRES_IN
-        });
-
-        // Store refresh token in database
-        const refreshTokens = [{
-            token: refreshToken,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days
-            revoked: false,
-            revokedAt: null
-        }];
-
-        // Update admin record
-        const updateResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--update',
-            data: {
-                filter: updateFilter,
-                update: {
-                    password: hashedPassword,
-                    status: 'active',
-                    inviteToken: null,
-                    inviteExpiresAt: null,
-                    refreshTokens: refreshTokens,
-                    updatedAt: new Date().toISOString()
-                }
-            }
-        });
-
-        if (!updateResult.success) {
-            logger.error('accept_invite_update_failed', {
-                message: updateResult.error || updateResult.message || 'unknown'
-            });
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to accept invite',
-                errorCode: 'UPDATE_FAILED'
-            });
-        }
-
-        // Send "Admin Account Activated" email to the activated admin and to the super admin who invited
         const activatedAt = new Date();
         const activatedAtFormatted = activatedAt.toLocaleString('en-GB', {
             day: '2-digit',
@@ -1478,14 +1401,14 @@ router.post('/accept-invite', async (req, res) => {
             logger.warn('accept_invite_activation_email_failed', { message: emailErr.message });
         }
 
-        // Log invite accepted
-        await logAdminActivity({
-            adminId: adminId,
-            adminEmail: admin.email,
-            action: 'invite_accepted',
-            details: { role: admin.role || 'admin' },
-            ipAddress: req.ip || req.headers['x-forwarded-for'] || 'unknown',
-            userAgent: req.get('user-agent') || 'unknown',
+        await writeAuditLog({
+            actorId: adminId,
+            actorEmail: admin.email,
+            action: 'admin.invite_accepted',
+            resource: 'staff',
+            resourceId: adminId,
+            metadata: { role: admin.role || 'admin' },
+            req,
             success: true
         });
 
@@ -1494,30 +1417,9 @@ router.post('/accept-invite', async (req, res) => {
             role: admin.role
         });
 
-        // Set refresh token in httpOnly cookie (sameSite: 'none' in prod for cross-origin)
-        const isProduction = process.env.NODE_ENV === 'production';
-        res.cookie('refreshToken', refreshToken, {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax',
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-            path: '/api/admin/auth'
-        });
-
-        // Return success response (access token only, refresh token in cookie)
         res.json({
             success: true,
-            data: {
-                admin: {
-                    id: adminId,
-                    name: admin.name,
-                    email: admin.email,
-                    role: admin.role || 'admin',
-                    status: 'active'
-                },
-                token: accessToken
-                // refreshToken is in httpOnly cookie, not in response
-            }
+            data: session
         });
 
     } catch (error) {
@@ -1618,20 +1520,20 @@ router.post('/refresh', async (req, res) => {
             });
         }
 
-        // Check if admin is active
-        if (admin.status && admin.status !== 'active') {
-            return res.status(403).json({
+        if (!canAuthenticate(admin)) {
+            const denial = denialForStatus(resolveAccountStatus(admin));
+            clearRefreshCookie(res);
+            return res.status(denial.httpStatus).json({
                 success: false,
-                message: 'Admin account is not active',
-                errorCode: 'ADMIN_DISABLED'
+                message: denial.message,
+                errorCode: denial.code
             });
         }
 
-        // Check if refresh token exists in database and is not revoked
         const refreshTokens = admin.refreshTokens || [];
-        const tokenRecord = refreshTokens.find(t => t.token === refreshToken.trim());
+        const tokenRecord = findSession(refreshTokens, refreshToken.trim());
 
-        if (!tokenRecord) {
+        if (!tokenRecord || tokenRecord.revoked) {
             return res.status(401).json({
                 success: false,
                 message: 'Refresh token not found or has been revoked',
@@ -1639,15 +1541,6 @@ router.post('/refresh', async (req, res) => {
             });
         }
 
-        if (tokenRecord.revoked) {
-            return res.status(401).json({
-                success: false,
-                message: 'Refresh token has been revoked',
-                errorCode: 'REFRESH_TOKEN_REVOKED'
-            });
-        }
-
-        // Check if token is expired (database expiry check)
         if (tokenRecord.expiresAt && new Date(tokenRecord.expiresAt) <= new Date()) {
             return res.status(401).json({
                 success: false,
@@ -1656,87 +1549,29 @@ router.post('/refresh', async (req, res) => {
             });
         }
 
-        // Generate new access token (15 minutes)
-        const accessTokenPayload = {
-            adminId: adminId,
-            email: admin.email || decoded.email,
-            role: admin.role || decoded.role || 'admin'
-        };
-        const newAccessToken = jwt.sign(accessTokenPayload, JWT_SECRET, {
-            expiresIn: JWT_EXPIRES_IN
-        });
+        const newAccessToken = signAccessToken(admin);
+        const newRefreshToken = signRefreshToken(admin);
+        const rotated = buildSessionRecord(newRefreshToken, req);
+        if (tokenRecord.id) rotated.id = tokenRecord.id;
 
-        // Generate new refresh token (token rotation for security)
-        const newRefreshTokenPayload = {
-            adminId: adminId,
-            email: admin.email || decoded.email,
-            role: admin.role || decoded.role || 'admin',
-            type: 'refresh'
-        };
-        const newRefreshToken = jwt.sign(newRefreshTokenPayload, JWT_SECRET, {
-            expiresIn: JWT_REFRESH_EXPIRES_IN
-        });
+        const updatedRefreshTokens = pruneSessions(
+            revokeMatchingSession(refreshTokens, refreshToken.trim()).concat(rotated)
+        );
 
-        // Revoke old refresh token and add new one
-        const updatedRefreshTokens = refreshTokens.map(t => {
-            if (t.token === refreshToken.trim()) {
-                return {
-                    ...t,
-                    revoked: true,
-                    revokedAt: new Date().toISOString()
-                };
-            }
-            return t;
-        });
-
-        // Add new refresh token
-        updatedRefreshTokens.push({
-            token: newRefreshToken,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days
-            revoked: false,
-            revokedAt: null
-        });
-
-        // Update admin with new refresh tokens
-        const updateFilter = ObjectId.isValid(adminId)
-            ? { _id: new ObjectId(adminId) }
-            : { _id: adminId };
-
-        await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'admins',
-            command: '--update',
-            data: {
-                filter: updateFilter,
-                update: {
-                    refreshTokens: updatedRefreshTokens,
-                    updatedAt: new Date().toISOString()
-                }
-            }
-        });
+        await updateAdmin(adminId, { refreshTokens: updatedRefreshTokens });
 
         devLog('[REFRESH TOKEN] Tokens refreshed successfully', {
             adminId: adminId,
             email: admin.email
         });
 
-        // Set new refresh token in httpOnly cookie (sameSite: 'none' in prod for cross-origin)
-        const isProduction = process.env.NODE_ENV === 'production';
-        res.cookie('refreshToken', newRefreshToken, {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax',
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-            path: '/api/admin/auth'
-        });
+        setRefreshCookie(res, newRefreshToken);
 
-        // Return new access token (refresh token in cookie)
         res.json({
             success: true,
             data: {
-                token: newAccessToken
-                // refreshToken is in httpOnly cookie, not in response
+                token: newAccessToken,
+                admin: publicAdmin(admin)
             }
         });
 
@@ -1775,9 +1610,7 @@ router.post('/forgot-password', async (req, res) => {
             });
         }
 
-        // Email domain validation: Only @peakmode.se emails allowed
-        if (!normalizedEmail.endsWith('@peakmode.se')) {
-            // Return generic message to prevent email enumeration
+        if (!isAllowedStaffEmail(normalizedEmail)) {
             return res.json({
                 success: true,
                 message: 'If an account exists with this email, a password reset link has been sent.'

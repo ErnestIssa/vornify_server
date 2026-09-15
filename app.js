@@ -41,6 +41,8 @@ const adminNoticeBarsRoutes = require('./routes/adminNoticeBars');
 const adminSocialRoutes = require('./routes/adminSocial');
 const publicNoticeBarsRoutes = require('./routes/publicNoticeBars');
 const adminReleasesRoutes = require('./routes/adminReleases');
+const adminStaffRoutes = require('./routes/adminStaff');
+const adminSecurityRoutes = require('./routes/adminSecurity');
 const publicReleasesRoutes = require('./routes/publicReleases');
 const releaseStore = require('./services/releaseStore');
 const releaseService = require('./services/releaseService');
@@ -484,6 +486,8 @@ app.use('/api/admin', adminReleasesRoutes); // Release notes CMS (admin)
 app.use('/api/public', publicReleasesRoutes); // Published release notes for storefront
 app.use('/api/admin', adminNotificationsRoutes); // Admin notifications (list, create, delete, on-login)
 app.use('/api/admin/shipping', adminShippingRoutes); // Admin shipping config (zones, methods, prices, free-areas)
+app.use('/api/admin/staff', adminStaffRoutes); // Staff access management
+app.use('/api/admin', adminSecurityRoutes); // MFA, sessions, audit
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 
 // Documentation routes
