@@ -50,6 +50,7 @@ const CACHE_RULES = [
     { test: (p) => p === '/api/settings/currencies', namespace: 'currency:settings', ttl: 3600 },
     { test: (p) => p === '/api/admin/content', namespace: 'admin:content', ttl: 120 },
     { test: (p) => p === '/api/public/notice-bars/active', namespace: 'notice-bars:active', ttl: 60 },
+    { test: (p) => p === '/api/public/releases', namespace: 'releases:list', ttl: 60 },
     { test: (p) => p === '/api/products/filter-options', namespace: 'products:filter-options', ttl: 180 },
     { test: (p) => p === '/api/products/count', namespace: 'products:count', ttl: 90 },
     { test: (p) => p === '/api/products/categories', namespace: 'products:categories', ttl: 300 },

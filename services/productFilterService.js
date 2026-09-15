@@ -731,8 +731,11 @@ function extractFacets(products, ctx) {
     };
 }
 
-function filterAndSortProducts(products, filters, ctx) {
-    const scoped = products.filter(isListableOnStorefront);
+function filterAndSortProducts(products, filters, ctx, options = {}) {
+    const list = Array.isArray(products) ? products : [];
+    const scoped = options.includeUnlisted
+        ? list.filter((p) => p && p.active !== false)
+        : list.filter(isListableOnStorefront);
     const withPrices = scoped.map((p) => {
         const copy = p;
         attachDisplayPrice(copy, ctx);

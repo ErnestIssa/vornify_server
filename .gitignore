@@ -2,6 +2,9 @@
 node_modules/
 *.log
 
+# Git backup from PeakMode workspace
+.git-independent-backup/
+
 # Build and deployment folders
 .vercel
 

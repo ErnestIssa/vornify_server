@@ -40,6 +40,9 @@ const adminShippingRoutes = require('./routes/adminShipping');
 const adminNoticeBarsRoutes = require('./routes/adminNoticeBars');
 const adminSocialRoutes = require('./routes/adminSocial');
 const publicNoticeBarsRoutes = require('./routes/publicNoticeBars');
+const adminReleasesRoutes = require('./routes/adminReleases');
+const publicReleasesRoutes = require('./routes/publicReleases');
+const releaseStore = require('./services/releaseStore');
 const socialRoutes = require('./routes/social');
 const metaFeedRoutes = require('./routes/metaFeed');
 const vatRoutes = require('./routes/vat');
@@ -476,6 +479,8 @@ app.use('/api/admin', adminContentRoutes); // Admin content management (public r
 app.use('/api/admin', adminNoticeBarsRoutes); // Notice bars CMS (draft / publish; admin only)
 app.use('/api/admin', adminSocialRoutes); // Social / community media CMS
 app.use('/api/public', publicNoticeBarsRoutes); // Published notice bars for storefront
+app.use('/api/admin', adminReleasesRoutes); // Release notes CMS (admin)
+app.use('/api/public', publicReleasesRoutes); // Published release notes for storefront
 app.use('/api/admin', adminNotificationsRoutes); // Admin notifications (list, create, delete, on-login)
 app.use('/api/admin/shipping', adminShippingRoutes); // Admin shipping config (zones, methods, prices, free-areas)
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
@@ -625,6 +630,17 @@ if (process.env.NODE_ENV !== 'test') {
         } else {
             devLog('📸 [INSTAGRAM SYNC] disabled (ENABLE_INSTAGRAM_SYNC=false)');
         }
+
+        if (process.env.ENABLE_RELEASE_PUBLISH !== 'false') {
+            const publishDue = () => {
+                releaseStore.publishDueScheduled().catch((err) => {
+                    console.error('❌ [RELEASES] scheduled publish error:', err);
+                });
+            };
+            trackTimeout(setTimeout(publishDue, 20 * 1000));
+            trackInterval(setInterval(publishDue, 60 * 1000));
+            devLog('✨ [RELEASES] scheduled publish enabled — every 60s');
+        }
         
         // DISABLED: Weekly product views reset was destroying trending system
         // The weekly reset hard-reset viewsLast7Days to 0 every Monday, which made
@@ -643,6 +659,7 @@ if (process.env.NODE_ENV !== 'test') {
             if (process.env.ENABLE_ABANDONED_CHECKOUT !== 'false') jobsOn.push('abandonedCheckout');
             if (process.env.ENABLE_DISCOUNT_REMINDER !== 'false') jobsOn.push('discountReminder');
             if (process.env.ENABLE_INSTAGRAM_SYNC !== 'false') jobsOn.push('instagramSync');
+            if (process.env.ENABLE_RELEASE_PUBLISH !== 'false') jobsOn.push('releasePublish');
             if (jobsOn.length) console.log(`Background jobs active: ${jobsOn.join(', ')}`);
         }
     });

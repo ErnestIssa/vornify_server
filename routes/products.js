@@ -1022,12 +1022,31 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
                 products = products.filter(productFilterService.isListableOnStorefront);
             }
 
-            if (hasActiveProductFilters(listFilters)) {
-                products = products
-                    .filter(productFilterService.isListableOnStorefront)
-                    .filter((p) => productFilterService.productMatchesFilters(p, listFilters, priceCtx));
-                if (listFilters.sort) {
-                    products = productFilterService.sortProducts(products, listFilters.sort);
+            const adminStatus = req.isAdminRequest ? String(req.query.status || 'all').trim().toLowerCase() : '';
+            const adminStatusActive = req.isAdminRequest && adminStatus && adminStatus !== 'all';
+
+            if (hasActiveProductFilters(listFilters) || adminStatusActive) {
+                if (req.isAdminRequest) {
+                    products = productFilterService.filterAndSortProducts(
+                        products,
+                        listFilters,
+                        priceCtx,
+                        { includeUnlisted: true }
+                    );
+                    if (adminStatus === 'live') {
+                        products = products.filter((p) => p.published !== false && !p.creationIncomplete);
+                    } else if (adminStatus === 'draft') {
+                        products = products.filter((p) => p.published === false && !p.creationIncomplete);
+                    } else if (adminStatus === 'incomplete') {
+                        products = products.filter((p) => p.creationIncomplete);
+                    }
+                } else {
+                    products = products
+                        .filter(productFilterService.isListableOnStorefront)
+                        .filter((p) => productFilterService.productMatchesFilters(p, listFilters, priceCtx));
+                    if (listFilters.sort) {
+                        products = productFilterService.sortProducts(products, listFilters.sort);
+                    }
                 }
             }
         }
