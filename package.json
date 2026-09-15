@@ -6,7 +6,11 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "vercel-build": "echo 'Building...'"
+    "vercel-build": "echo 'Building...'",
+    "version:show": "npm pkg get version",
+    "release:patch": "npm version patch --no-git-tag-version",
+    "release:minor": "npm version minor --no-git-tag-version",
+    "release:major": "npm version major --no-git-tag-version"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -302,17 +302,25 @@ function comparePublishedDesc(a, b) {
     return bt - at;
 }
 
+/**
+ * Deployed application versions (not editorial release-note versions).
+ *
+ * Backend: BACKEND_APP_VERSION, else this package.json.
+ * Shop/Admin on this payload: optional SHOP_APP_VERSION / ADMIN_APP_VERSION so Admin can
+ * display sibling apps. Unset means unknown (empty) — do not invent a version.
+ * Do not put secrets, commit SHAs, or infrastructure details here.
+ */
 function appVersions() {
-    let backend = '1.0.0';
+    let backend = '';
     try {
-        backend = require('../package.json').version || '1.0.0';
+        backend = require('../package.json').version || '';
     } catch {
         /* ignore */
     }
     return {
-        shop: process.env.SHOP_APP_VERSION || '1.0.0',
-        admin: process.env.ADMIN_APP_VERSION || '1.0.0',
-        backend: process.env.BACKEND_APP_VERSION || backend
+        shop: String(process.env.SHOP_APP_VERSION || '').trim(),
+        admin: String(process.env.ADMIN_APP_VERSION || '').trim(),
+        backend: String(process.env.BACKEND_APP_VERSION || backend).trim()
     };
 }
 

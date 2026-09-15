@@ -1107,6 +1107,118 @@ router.get('/', optionalAuthenticateAdmin, async (req, res) => {
     }
 });
 
+async function resolveProductRecord(id) {
+    const query = buildProductLookupQuery(id);
+    const result = await db.executeOperation({
+        database_name: 'peakmode',
+        collection_name: 'products',
+        command: '--read',
+        data: query
+    });
+    if (!result.success || !result.data) return null;
+    return Array.isArray(result.data) ? result.data[0] : result.data;
+}
+
+function productWriteFilter(product, fallbackId) {
+    if (product && product._id) {
+        return { _id: typeof product._id === 'string' ? product._id : product._id };
+    }
+    if (product && product.id) return { id: product.id };
+    return { id: fallbackId };
+}
+
+const PRODUCT_BULK_MAX = 100;
+
+// POST /api/products/bulk-action — admin bulk publish / draft / delete. Backend is SSOT.
+router.post('/bulk-action', authenticateAdmin, async (req, res) => {
+    try {
+        const { action, productIds } = req.body || {};
+        const allowed = new Set(['publish', 'unpublish', 'delete']);
+        if (!allowed.has(action) || !Array.isArray(productIds) || productIds.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'action (publish|unpublish|delete) and productIds (array) are required'
+            });
+        }
+        const ids = [...new Set(productIds.map((id) => String(id || '').trim()).filter(Boolean))];
+        if (ids.length === 0) {
+            return res.status(400).json({ success: false, error: 'productIds (array) are required' });
+        }
+        if (ids.length > PRODUCT_BULK_MAX) {
+            return res.status(400).json({
+                success: false,
+                error: `At most ${PRODUCT_BULK_MAX} products can be managed at once`
+            });
+        }
+
+        const results = { processed: 0, updated: [], failed: [] };
+        const enforceOnDraft = process.env.ENFORCE_COLOR_IMAGES_ON_DRAFT === 'true';
+
+        for (const productId of ids) {
+            results.processed += 1;
+            try {
+                const existing = await resolveProductRecord(productId);
+                if (!existing) {
+                    results.failed.push({ productId, error: 'Product not found' });
+                    continue;
+                }
+                const filter = productWriteFilter(existing, productId);
+
+                if (action === 'delete') {
+                    const deleted = await db.executeOperation({
+                        database_name: 'peakmode',
+                        collection_name: 'products',
+                        command: '--delete',
+                        data: filter
+                    });
+                    if (deleted.success) results.updated.push(productId);
+                    else results.failed.push({ productId, error: deleted.error || 'Delete failed' });
+                    continue;
+                }
+
+                const published = action === 'publish';
+                if (published && existing.inventory) {
+                    const cmValidation = variantService.validateColorMediaPolicy({
+                        inventory: existing.inventory,
+                        published: true,
+                        enforceOnDraft
+                    });
+                    if (!cmValidation.valid) {
+                        results.failed.push({
+                            productId,
+                            error: cmValidation.error || 'Cannot publish this product'
+                        });
+                        continue;
+                    }
+                }
+
+                const updated = await db.executeOperation({
+                    database_name: 'peakmode',
+                    collection_name: 'products',
+                    command: '--update',
+                    data: {
+                        filter,
+                        update: {
+                            published,
+                            updatedAt: new Date().toISOString()
+                        }
+                    }
+                });
+                if (updated.success) results.updated.push(productId);
+                else results.failed.push({ productId, error: updated.error || 'Update failed' });
+            } catch (err) {
+                results.failed.push({ productId, error: err.message || 'Failed' });
+            }
+        }
+
+        if (results.updated.length > 0) bustProductCaches();
+        return res.json({ success: true, ...results });
+    } catch (error) {
+        logger.error('products_bulk_action_error', { message: error.message });
+        return res.status(500).json({ success: false, error: error.message || 'Bulk action failed' });
+    }
+});
+
 // POST /api/products - Create new product (admin)
 router.post('/', authenticateAdmin, async (req, res) => {
     try {

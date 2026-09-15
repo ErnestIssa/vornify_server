@@ -43,6 +43,7 @@ const publicNoticeBarsRoutes = require('./routes/publicNoticeBars');
 const adminReleasesRoutes = require('./routes/adminReleases');
 const publicReleasesRoutes = require('./routes/publicReleases');
 const releaseStore = require('./services/releaseStore');
+const releaseService = require('./services/releaseService');
 const socialRoutes = require('./routes/social');
 const metaFeedRoutes = require('./routes/metaFeed');
 const vatRoutes = require('./routes/vat');
@@ -432,7 +433,7 @@ app.use('/', metaFeedRoutes);
 app.get('/', (req, res) => {
     res.json({
         name: 'Vornify Server API',
-        version: '1.0.0',
+        version: releaseService.appVersions().backend,
         status: 'running',
         endpoints: {
             health: '/health',
