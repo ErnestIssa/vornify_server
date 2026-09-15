@@ -43,6 +43,7 @@ const adminSocialRoutes = require('./routes/adminSocial');
 const publicNoticeBarsRoutes = require('./routes/publicNoticeBars');
 const adminReleasesRoutes = require('./routes/adminReleases');
 const adminStaffRoutes = require('./routes/adminStaff');
+const adminTasksRoutes = require('./routes/adminTasks');
 const adminSecurityRoutes = require('./routes/adminSecurity');
 const publicReleasesRoutes = require('./routes/publicReleases');
 const releaseStore = require('./services/releaseStore');
@@ -487,6 +488,7 @@ app.use('/api/public', publicReleasesRoutes); // Published release notes for sto
 app.use('/api/admin', adminNotificationsRoutes); // Admin notifications (list, create, delete, on-login)
 app.use('/api/admin/shipping', adminShippingRoutes); // Admin shipping config (zones, methods, prices, free-areas)
 app.use('/api/admin/staff', adminStaffRoutes); // Staff access management
+app.use('/api/admin/tasks', adminTasksRoutes); // Internal tasks workspace
 app.use('/api/admin', adminSecurityRoutes); // MFA, sessions, audit
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 

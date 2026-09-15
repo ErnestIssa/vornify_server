@@ -52,7 +52,9 @@ const COLLECTION_PERMISSIONS = {
     hubstats: { view: 'hub.view', create: 'hub.edit', update: 'hub.edit', delete: 'hub.edit' },
     admin_notifications: { view: 'notifications.view', create: 'notifications.view', update: 'notifications.view', delete: 'notifications.view' },
     order_tracking: { view: 'orders.view', create: 'orders.edit', update: 'orders.edit', delete: 'orders.edit' },
-    tracking: { view: 'orders.view', create: 'orders.edit', update: 'orders.edit', delete: 'orders.edit' }
+    tracking: { view: 'orders.view', create: 'orders.edit', update: 'orders.edit', delete: 'orders.edit' },
+    admin_tasks: { view: 'tasks.view', create: 'tasks.create', update: 'tasks.edit', delete: 'tasks.delete' },
+    task_activity: { view: 'tasks.view', create: 'tasks.edit', update: 'tasks.edit', delete: 'tasks.delete' }
 };
 
 const PUBLIC_READ = new Set([

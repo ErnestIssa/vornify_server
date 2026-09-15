@@ -57,7 +57,14 @@ const PERMISSIONS = Object.freeze([
     'security.view',
     'security.manage',
     'audit.view',
-    'notifications.view'
+    'notifications.view',
+    'tasks.view',
+    'tasks.create',
+    'tasks.edit',
+    'tasks.assign',
+    'tasks.complete',
+    'tasks.delete',
+    'tasks.manage'
 ]);
 
 const ALL_PERMISSIONS = PERMISSIONS;
@@ -101,7 +108,13 @@ const ROLE_PERMISSIONS = Object.freeze({
         'hub.edit',
         'releases.view',
         'notifications.view',
-        'security.view'
+        'security.view',
+        'tasks.view',
+        'tasks.create',
+        'tasks.edit',
+        'tasks.assign',
+        'tasks.complete',
+        'tasks.delete'
     ]),
 
     support: Object.freeze([
@@ -113,7 +126,9 @@ const ROLE_PERMISSIONS = Object.freeze({
         'reviews.view',
         'releases.view',
         'notifications.view',
-        'security.view'
+        'security.view',
+        'tasks.view',
+        'tasks.complete'
     ])
 });
 
