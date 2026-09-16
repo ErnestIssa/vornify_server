@@ -47,7 +47,7 @@ const adminTasksRoutes = require('./routes/adminTasks');
 const adminSecurityRoutes = require('./routes/adminSecurity');
 const publicReleasesRoutes = require('./routes/publicReleases');
 const releaseStore = require('./services/releaseStore');
-const releaseService = require('./services/releaseService');
+const appBuild = require('./services/appBuild');
 const socialRoutes = require('./routes/social');
 const metaFeedRoutes = require('./routes/metaFeed');
 const vatRoutes = require('./routes/vat');
@@ -419,10 +419,13 @@ app.get('/api/apple-pay/verify', (req, res) => {
 
 // Health check (root + /api for clients that use .../api as API base)
 function sendHealthPayload(req, res) {
+    const build = appBuild.buildInfo();
     res.status(200).json({
         status: 'healthy',
         environment: process.env.NODE_ENV,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        version: build.version,
+        gitSha: build.gitSha || undefined
     });
 }
 app.get('/health', cors(apiCorsOptions), sendHealthPayload);
@@ -434,9 +437,11 @@ app.use('/', metaFeedRoutes);
 
 // API documentation endpoint
 app.get('/', (req, res) => {
+    const build = appBuild.buildInfo();
     res.json({
         name: 'Vornify Server API',
-        version: releaseService.appVersions().backend,
+        version: build.version,
+        gitSha: build.gitSha || undefined,
         status: 'running',
         endpoints: {
             health: '/health',

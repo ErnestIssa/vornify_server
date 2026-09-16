@@ -305,10 +305,13 @@ function comparePublishedDesc(a, b) {
 /**
  * Deployed application versions (not editorial release-note versions).
  *
- * Backend: BACKEND_APP_VERSION, else this package.json.
+ * Backend runtime version is this package.json (same as /health). BACKEND_APP_VERSION is
+ * ignored when it disagrees so a stale host env cannot hide a Git release.
  * Shop/Admin on this payload: optional SHOP_APP_VERSION / ADMIN_APP_VERSION so Admin can
  * display sibling apps. Unset means unknown (empty) — do not invent a version.
- * Do not put secrets, commit SHAs, or infrastructure details here.
+ * Those sibling fields are display-only and can lag Git if the env is not updated.
+ * Do not put secrets or infrastructure details here. The running backend Git SHA
+ * is exposed on /health and GET /, not on this sibling-version payload.
  */
 function appVersions() {
     let backend = '';
@@ -317,10 +320,16 @@ function appVersions() {
     } catch {
         /* ignore */
     }
+    const override = String(process.env.BACKEND_APP_VERSION || '').trim();
+    if (override && override !== String(backend).trim()) {
+        console.warn(
+            `[releases] Ignoring BACKEND_APP_VERSION=${override}; package.json version ${backend} is the application version`
+        );
+    }
     return {
         shop: String(process.env.SHOP_APP_VERSION || '').trim(),
         admin: String(process.env.ADMIN_APP_VERSION || '').trim(),
-        backend: String(process.env.BACKEND_APP_VERSION || backend).trim()
+        backend: String(backend).trim()
     };
 }
 
