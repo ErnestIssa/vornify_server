@@ -9,6 +9,7 @@ const taskStore = require('../services/taskStore');
 const taskImportService = require('../services/taskImportService');
 const taskExportService = require('../services/taskExportService');
 const taskFileService = require('../services/taskFileService');
+const taskAccess = require('../services/taskAccess');
 
 const router = express.Router();
 
@@ -49,6 +50,26 @@ function parseIds(value) {
         .map((id) => id.trim())
         .filter(Boolean)
         .slice(0, 200);
+}
+
+function parseIdList(value) {
+    if (Array.isArray(value)) {
+        return [...new Set(value.map((id) => String(id || '').trim()).filter(Boolean))].slice(0, 200);
+    }
+    return parseIds(value);
+}
+
+function denyAccess(res, decision) {
+    res.status(decision.code === 'not_found' ? 404 : 403).json({
+        success: false,
+        error: decision.error,
+        code: decision.code
+    });
+}
+
+async function purgeTaskDocument(doc) {
+    await taskStore.deleteActivityForTask(doc.id);
+    return taskStore.deleteTaskById(doc.id);
 }
 
 async function resolveAssignee(assigneeId) {
@@ -339,11 +360,19 @@ router.post('/files/:id/archive-tasks', authenticateAdmin, requireAnyPermission(
     try {
         const file = await loadFileOr404(req, res);
         if (!file) return;
+        const fileAccess = taskAccess.canChangeFile(req.admin, file);
+        if (!fileAccess.ok) return denyAccess(res, fileAccess);
         const documents = await taskStore.readTaskDocuments();
         const linked = taskFileService.countsForBatch(documents, file.importBatchId).tasks;
         let archived = 0;
+        let skipped = 0;
         for (const task of linked) {
             if (taskService.isArchived(task)) continue;
+            const access = taskAccess.canArchiveTask(req.admin, task);
+            if (!access.ok) {
+                skipped += 1;
+                continue;
+            }
             await taskStore.archiveTask(task.id);
             await taskStore.createActivity(taskService.activityEntry(task.id, actor(req), 'archived', {
                 filename: file.filename,
@@ -352,7 +381,7 @@ router.post('/files/:id/archive-tasks', authenticateAdmin, requireAnyPermission(
             archived += 1;
         }
         const next = await taskStore.readTaskDocuments();
-        res.json({ success: true, archived, data: fileWithCounts(file, next) });
+        res.json({ success: true, archived, skipped, data: fileWithCounts(file, next) });
     } catch (err) {
         console.error('[TASKS] archive file tasks error:', err);
         res.status(500).json({ success: false, error: 'Failed to archive tasks from this file' });
@@ -363,11 +392,19 @@ router.post('/files/:id/restore-tasks', authenticateAdmin, requireAnyPermission(
     try {
         const file = await loadFileOr404(req, res);
         if (!file) return;
+        const fileAccess = taskAccess.canChangeFile(req.admin, file);
+        if (!fileAccess.ok) return denyAccess(res, fileAccess);
         const documents = await taskStore.readTaskDocuments();
         const linked = taskFileService.countsForBatch(documents, file.importBatchId).tasks;
         let restored = 0;
+        let skipped = 0;
         for (const task of linked) {
             if (!taskService.isArchived(task)) continue;
+            const access = taskAccess.canRestoreTask(req.admin, task);
+            if (!access.ok) {
+                skipped += 1;
+                continue;
+            }
             await taskStore.restoreTask(task.id);
             await taskStore.createActivity(taskService.activityEntry(task.id, actor(req), 'restored', {
                 filename: file.filename,
@@ -376,7 +413,7 @@ router.post('/files/:id/restore-tasks', authenticateAdmin, requireAnyPermission(
             restored += 1;
         }
         const next = await taskStore.readTaskDocuments();
-        res.json({ success: true, restored, data: fileWithCounts(file, next) });
+        res.json({ success: true, restored, skipped, data: fileWithCounts(file, next) });
     } catch (err) {
         console.error('[TASKS] restore file tasks error:', err);
         res.status(500).json({ success: false, error: 'Failed to restore tasks from this file' });
@@ -387,23 +424,106 @@ router.delete('/files/:id', authenticateAdmin, requireAnyPermission('tasks.delet
     try {
         const file = await loadFileOr404(req, res);
         if (!file) return;
+        const fileAccess = taskAccess.canChangeFile(req.admin, file);
+        if (!fileAccess.ok) return denyAccess(res, fileAccess);
         const withTasks = req.query.withTasks === '1' || req.body?.withTasks === true;
         let deletedTasks = 0;
+        let skipped = 0;
         if (withTasks && file.importBatchId) {
             const documents = await taskStore.readTaskDocuments();
             const linked = taskFileService.countsForBatch(documents, file.importBatchId).tasks;
+            const blocked = linked.filter((task) => !taskAccess.canPurgeTask(req.admin, task).ok);
+            if (blocked.length && !taskAccess.isSuperAdmin(req.admin)) {
+                return res.status(403).json({
+                    success: false,
+                    code: 'not_owner',
+                    error: 'This file still has tasks created by someone else. Delete the file only, or ask Super Admin to remove those tasks.'
+                });
+            }
             for (const task of linked) {
-                await taskStore.deleteActivityForTask(task.id);
-                await taskStore.deleteTaskById(task.id);
+                const access = taskAccess.canPurgeTask(req.admin, task);
+                if (!access.ok) {
+                    skipped += 1;
+                    continue;
+                }
+                await purgeTaskDocument(task);
                 deletedTasks += 1;
             }
         }
         await taskFileService.destroyRaw(file.cloudinaryPublicId);
         await taskStore.deleteTaskFile(file.id);
-        res.json({ success: true, deletedTasks, fileDeleted: true });
+        res.json({ success: true, deletedTasks, skipped, fileDeleted: true });
     } catch (err) {
         console.error('[TASKS] delete file error:', err);
         res.status(500).json({ success: false, error: 'Failed to delete this file' });
+    }
+});
+
+router.post('/bulk-action', authenticateAdmin, requireAnyPermission('tasks.delete', 'tasks.manage'), async (req, res) => {
+    try {
+        const action = String(req.body?.action || '').trim();
+        if (!['archive', 'restore', 'delete'].includes(action)) {
+            return res.status(400).json({ success: false, error: 'action must be archive, restore, or delete' });
+        }
+        const ids = parseIdList(req.body?.ids);
+        if (!ids.length) {
+            return res.status(400).json({ success: false, error: 'Select at least one task' });
+        }
+        const updated = [];
+        const skipped = [];
+        const failed = [];
+        for (const id of ids) {
+            const existing = await taskStore.readTaskById(id);
+            if (!existing) {
+                failed.push({ id, error: 'Task not found' });
+                continue;
+            }
+            const access = action === 'restore'
+                ? taskAccess.canRestoreTask(req.admin, existing)
+                : action === 'archive'
+                    ? taskAccess.canArchiveTask(req.admin, existing)
+                    : taskAccess.canPurgeTask(req.admin, existing);
+            if (!access.ok) {
+                skipped.push({ id, title: existing.title, error: access.error, code: access.code });
+                continue;
+            }
+            try {
+                if (action === 'archive') {
+                    if (taskService.isArchived(existing)) {
+                        skipped.push({ id, title: existing.title, error: 'Already in Archives', code: 'already_archived' });
+                        continue;
+                    }
+                    await taskStore.archiveTask(existing.id);
+                    await taskStore.createActivity(taskService.activityEntry(existing.id, actor(req), 'archived', {}));
+                } else if (action === 'restore') {
+                    if (!taskService.isArchived(existing)) {
+                        skipped.push({ id, title: existing.title, error: 'This task is not in Archives', code: 'not_archived' });
+                        continue;
+                    }
+                    await taskStore.restoreTask(existing.id);
+                    await taskStore.createActivity(taskService.activityEntry(existing.id, actor(req), 'restored', {}));
+                } else {
+                    await purgeTaskDocument(existing);
+                }
+                updated.push(id);
+            } catch (error) {
+                failed.push({ id, title: existing.title, error: error.message || 'Could not update this task' });
+            }
+        }
+        res.json({
+            success: true,
+            action,
+            processed: ids.length,
+            updated: updated.length,
+            skipped: skipped.length,
+            failed: failed.length,
+            ids: updated,
+            skippedItems: skipped,
+            failedItems: failed
+        });
+    } catch (err) {
+        console.error('[TASKS] bulk action error:', err);
+        res.status(500).json({ success: false, error: 'Failed to update the selected tasks' });
     }
 });
 
@@ -522,6 +642,8 @@ router.post('/:id/restore', authenticateAdmin, requireAnyPermission('tasks.delet
     try {
         const existing = await taskStore.readTaskById(req.params.id);
         if (rejectIfMissing(existing, res)) return;
+        const access = taskAccess.canRestoreTask(req.admin, existing);
+        if (!access.ok) return denyAccess(res, access);
         if (!taskService.isArchived(existing)) {
             return res.status(400).json({ success: false, error: 'This task is not in Archives' });
         }
@@ -532,6 +654,20 @@ router.post('/:id/restore', authenticateAdmin, requireAnyPermission('tasks.delet
     } catch (err) {
         console.error('[TASKS] restore error:', err);
         res.status(500).json({ success: false, error: 'Failed to restore task' });
+    }
+});
+
+router.post('/:id/purge', authenticateAdmin, requireAnyPermission('tasks.delete', 'tasks.manage'), async (req, res) => {
+    try {
+        const existing = await taskStore.readTaskById(req.params.id);
+        if (rejectIfMissing(existing, res)) return;
+        const access = taskAccess.canPurgeTask(req.admin, existing);
+        if (!access.ok) return denyAccess(res, access);
+        await purgeTaskDocument(existing);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[TASKS] purge error:', err);
+        res.status(500).json({ success: false, error: 'Failed to delete task' });
     }
 });
 
@@ -615,6 +751,8 @@ router.delete('/:id', authenticateAdmin, requireAnyPermission('tasks.delete', 't
     try {
         const existing = await taskStore.readTaskById(req.params.id);
         if (rejectIfMissing(existing, res)) return;
+        const access = taskAccess.canArchiveTask(req.admin, existing);
+        if (!access.ok) return denyAccess(res, access);
         if (taskService.isArchived(existing)) {
             return res.status(400).json({ success: false, error: 'This task is already in Archives' });
         }
