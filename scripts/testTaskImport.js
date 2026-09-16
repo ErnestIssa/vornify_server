@@ -169,5 +169,43 @@ assert.match(taskService.activityLabel({ action: 'restored', actorName: 'Alex' }
 const publicTask = taskService.toPublic({ ...doc, archivedAt: '2026-09-15T00:00:00.000Z' });
 assert.strictEqual(publicTask.archived, true);
 assert.ok(publicTask.archivedAt);
+assert.strictEqual(taskService.toPublic({ ...doc, importBatchId: 'batch-1' }).importBatchId, 'batch-1');
+assert.strictEqual(
+    taskService.matchesFilters({ title: 'A', importBatchId: 'batch-1' }, { importBatchId: 'batch-1' }),
+    true
+);
+assert.strictEqual(
+    taskService.matchesFilters({ title: 'A', importBatchId: 'batch-1' }, { importBatchId: 'other' }),
+    false
+);
+
+const taskFileService = require('../services/taskFileService');
+assert.strictEqual(taskFileService.sanitizeFilename('tasks1.json'), 'tasks1.json');
+assert.strictEqual(taskFileService.sanitizeFilename('weird/name?.txt'), 'weird-name-.txt.json');
+const filePublic = taskFileService.toPublic(
+    {
+        id: 'f1',
+        filename: 'tasks1.json',
+        bytes: 1200,
+        importBatchId: 'batch-1',
+        cloudinaryPublicId: 'peakmode/tasks/import-batch-1',
+        created: 4,
+        skipped: 1,
+        failed: 0
+    },
+    { liveCount: 3, archivedCount: 1 }
+);
+assert.strictEqual(filePublic.storage, 'cloudinary');
+assert.strictEqual(filePublic.liveCount, 3);
+assert.strictEqual(filePublic.source, undefined);
+
+const counts = taskFileService.countsForBatch([
+    { importBatchId: 'batch-1', archivedAt: null },
+    { importBatchId: 'batch-1', archivedAt: '2026-09-16T00:00:00.000Z' },
+    { importBatchId: 'other' }
+], 'batch-1');
+assert.strictEqual(counts.liveCount, 1);
+assert.strictEqual(counts.archivedCount, 1);
+assert.strictEqual(counts.tasks.length, 2);
 
 console.log('task import/export tests passed');

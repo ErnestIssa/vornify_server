@@ -280,6 +280,7 @@ function matchesFilters(doc, query) {
     if (query.assigneeId && query.assigneeId !== 'unassigned' && doc.assignee?.id !== query.assigneeId) return false;
     if (query.createdById && doc.createdBy?.id !== query.createdById) return false;
     if (query.tag && !(doc.tags || []).includes(String(query.tag).toLowerCase())) return false;
+    if (query.importBatchId && String(doc.importBatchId || '') !== String(query.importBatchId)) return false;
     const q = String(query.q || '').trim().toLowerCase();
     if (q) {
         const hay = [
@@ -370,7 +371,8 @@ function toPublic(doc) {
         dueLabel: due.dueLabel,
         dueState: due.dueState,
         archivedAt: doc.archivedAt || null,
-        archived: isArchived(doc)
+        archived: isArchived(doc),
+        importBatchId: doc.importBatchId || null
     };
 }
 

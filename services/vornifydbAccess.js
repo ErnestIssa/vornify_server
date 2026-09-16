@@ -22,6 +22,7 @@ const WRITE_COMMANDS = new Set([
     '--createmany',
     '--updatemany',
     '--deletemany',
+    '--delete-many',
     '--append',
     '--update-field',
     '--delete-field',
@@ -54,7 +55,8 @@ const COLLECTION_PERMISSIONS = {
     order_tracking: { view: 'orders.view', create: 'orders.edit', update: 'orders.edit', delete: 'orders.edit' },
     tracking: { view: 'orders.view', create: 'orders.edit', update: 'orders.edit', delete: 'orders.edit' },
     admin_tasks: { view: 'tasks.view', create: 'tasks.create', update: 'tasks.edit', delete: 'tasks.delete' },
-    task_activity: { view: 'tasks.view', create: 'tasks.edit', update: 'tasks.edit', delete: 'tasks.delete' }
+    task_activity: { view: 'tasks.view', create: 'tasks.edit', update: 'tasks.edit', delete: 'tasks.delete' },
+    admin_task_files: { view: 'tasks.view', create: 'tasks.create', update: 'tasks.edit', delete: 'tasks.delete' }
 };
 
 const PUBLIC_READ = new Set([
@@ -98,7 +100,7 @@ function isWriteCommand(command) {
 function writeKind(command) {
     const cmd = normalizeCommand(command);
     if (cmd === '--create' || cmd === '--createmany') return 'create';
-    if (cmd === '--delete' || cmd === '--deletemany') return 'delete';
+    if (cmd === '--delete' || cmd === '--deletemany' || cmd === '--delete-many') return 'delete';
     return 'update';
 }
 

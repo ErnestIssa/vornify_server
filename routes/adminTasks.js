@@ -8,6 +8,7 @@ const taskService = require('../services/taskService');
 const taskStore = require('../services/taskStore');
 const taskImportService = require('../services/taskImportService');
 const taskExportService = require('../services/taskExportService');
+const taskFileService = require('../services/taskFileService');
 
 const router = express.Router();
 
@@ -25,6 +26,7 @@ function queryOf(req) {
         assigneeId: String(req.query.assigneeId || '').trim(),
         createdById: String(req.query.createdById || '').trim(),
         tag: String(req.query.tag || '').trim(),
+        importBatchId: String(req.query.importBatchId || '').trim(),
         sort: String(req.query.sort || 'recent')
     };
 }
@@ -255,6 +257,25 @@ router.post('/import', authenticateAdmin, requireAnyPermission('tasks.create', '
             created.push(taskService.toPublic(saved.data));
         }
 
+        let storedFile = null;
+        try {
+            const fileDoc = await taskFileService.persistImport({
+                source,
+                filename,
+                importBatchId,
+                actor: actor(req),
+                format: plan.format,
+                version: plan.version,
+                created: created.length,
+                skipped: plan.summary.skipped,
+                failed: failed.length
+            });
+            const savedFile = await taskStore.createTaskFile(fileDoc);
+            if (savedFile.success) storedFile = taskFileService.toPublic(savedFile.data || fileDoc);
+        } catch (fileError) {
+            console.warn('[TASKS] Could not store import file:', fileError.message);
+        }
+
         res.status(created.length ? 201 : 200).json({
             success: true,
             importBatchId,
@@ -263,11 +284,126 @@ router.post('/import', authenticateAdmin, requireAnyPermission('tasks.create', '
             failed: failed.length,
             errors: failed,
             items: created,
-            summary: plan.summary
+            summary: plan.summary,
+            file: storedFile
         });
     } catch (err) {
         console.error('[TASKS] import error:', err);
         res.status(500).json({ success: false, error: 'Failed to import tasks' });
+    }
+});
+
+function fileWithCounts(file, documents) {
+    const counts = taskFileService.countsForBatch(documents, file.importBatchId);
+    return taskFileService.toPublic(file, counts);
+}
+
+async function loadFileOr404(req, res) {
+    const file = await taskStore.readTaskFileById(req.params.id);
+    if (!file) {
+        res.status(404).json({ success: false, error: 'File not found' });
+        return null;
+    }
+    return file;
+}
+
+router.get('/files', authenticateAdmin, requirePermission('tasks.view'), async (_req, res) => {
+    try {
+        const [files, documents] = await Promise.all([taskStore.readTaskFiles(), taskStore.readTaskDocuments()]);
+        res.json({
+            success: true,
+            items: files.map((file) => fileWithCounts(file, documents))
+        });
+    } catch (err) {
+        console.error('[TASKS] files list error:', err);
+        res.status(500).json({ success: false, error: 'Failed to list uploaded files' });
+    }
+});
+
+router.get('/files/:id/download', authenticateAdmin, requirePermission('tasks.view'), async (req, res) => {
+    try {
+        const file = await loadFileOr404(req, res);
+        if (!file) return;
+        const body = await taskFileService.readFileBody(file);
+        const filename = taskFileService.sanitizeFilename(file.filename);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        return res.send(body);
+    } catch (err) {
+        console.error('[TASKS] file download error:', err);
+        res.status(500).json({ success: false, error: err.message || 'Failed to download file' });
+    }
+});
+
+router.post('/files/:id/archive-tasks', authenticateAdmin, requireAnyPermission('tasks.delete', 'tasks.manage'), async (req, res) => {
+    try {
+        const file = await loadFileOr404(req, res);
+        if (!file) return;
+        const documents = await taskStore.readTaskDocuments();
+        const linked = taskFileService.countsForBatch(documents, file.importBatchId).tasks;
+        let archived = 0;
+        for (const task of linked) {
+            if (taskService.isArchived(task)) continue;
+            await taskStore.archiveTask(task.id);
+            await taskStore.createActivity(taskService.activityEntry(task.id, actor(req), 'archived', {
+                filename: file.filename,
+                importBatchId: file.importBatchId
+            }));
+            archived += 1;
+        }
+        const next = await taskStore.readTaskDocuments();
+        res.json({ success: true, archived, data: fileWithCounts(file, next) });
+    } catch (err) {
+        console.error('[TASKS] archive file tasks error:', err);
+        res.status(500).json({ success: false, error: 'Failed to archive tasks from this file' });
+    }
+});
+
+router.post('/files/:id/restore-tasks', authenticateAdmin, requireAnyPermission('tasks.delete', 'tasks.manage'), async (req, res) => {
+    try {
+        const file = await loadFileOr404(req, res);
+        if (!file) return;
+        const documents = await taskStore.readTaskDocuments();
+        const linked = taskFileService.countsForBatch(documents, file.importBatchId).tasks;
+        let restored = 0;
+        for (const task of linked) {
+            if (!taskService.isArchived(task)) continue;
+            await taskStore.restoreTask(task.id);
+            await taskStore.createActivity(taskService.activityEntry(task.id, actor(req), 'restored', {
+                filename: file.filename,
+                importBatchId: file.importBatchId
+            }));
+            restored += 1;
+        }
+        const next = await taskStore.readTaskDocuments();
+        res.json({ success: true, restored, data: fileWithCounts(file, next) });
+    } catch (err) {
+        console.error('[TASKS] restore file tasks error:', err);
+        res.status(500).json({ success: false, error: 'Failed to restore tasks from this file' });
+    }
+});
+
+router.delete('/files/:id', authenticateAdmin, requireAnyPermission('tasks.delete', 'tasks.manage'), async (req, res) => {
+    try {
+        const file = await loadFileOr404(req, res);
+        if (!file) return;
+        const withTasks = req.query.withTasks === '1' || req.body?.withTasks === true;
+        let deletedTasks = 0;
+        if (withTasks && file.importBatchId) {
+            const documents = await taskStore.readTaskDocuments();
+            const linked = taskFileService.countsForBatch(documents, file.importBatchId).tasks;
+            for (const task of linked) {
+                await taskStore.deleteActivityForTask(task.id);
+                await taskStore.deleteTaskById(task.id);
+                deletedTasks += 1;
+            }
+        }
+        await taskFileService.destroyRaw(file.cloudinaryPublicId);
+        await taskStore.deleteTaskFile(file.id);
+        res.json({ success: true, deletedTasks, fileDeleted: true });
+    } catch (err) {
+        console.error('[TASKS] delete file error:', err);
+        res.status(500).json({ success: false, error: 'Failed to delete this file' });
     }
 });
 
