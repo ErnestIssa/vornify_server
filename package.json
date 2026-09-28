@@ -13,6 +13,7 @@
     "release:minor": "npm version minor --no-git-tag-version",
     "release:major": "npm version major --no-git-tag-version"
   },
+  
   "engines": {
     "node": ">=18.0.0"
   },
