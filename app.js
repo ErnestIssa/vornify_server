@@ -19,6 +19,7 @@ const newsletterRoutes = require('./routes/newsletter');
 const subscriberRoutes = require('./routes/subscribers');
 const waitlistRoutes = require('./routes/waitlist');
 const authRoutes = require('./routes/auth');
+const googleAuthRoutes = require('./routes/googleAuth');
 const hubRoutes = require('./routes/hub');
 const emailStatsRoutes = require('./routes/emailStats');
 const emailVerificationRoutes = require('./routes/emailVerification');
@@ -466,6 +467,7 @@ app.use('/api/newsletter', newsletterRoutes); // Legacy newsletter endpoints (no
 app.use('/api/subscribers', subscriberRoutes); // New unified subscriber system
 app.use('/api/waitlist', waitlistRoutes); // Waitlist system
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', googleAuthRoutes);
 app.use('/api/hub', hubRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
 app.use('/api/email/verify', emailVerificationRoutes); // Email verification and testing
