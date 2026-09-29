@@ -3,6 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
+const hubIdentity = require('../services/hub/hubIdentityService');
 
 const db = getDBInstance();
 
@@ -33,12 +34,18 @@ function generateAuthToken(userId, email) {
 router.post('/register', async (req, res) => {
     try {
         const { email, password, name, phone } = req.body;
+        const displayName =
+            (name && String(name).trim()) ||
+            String(email || '')
+                .split('@')[0]
+                .trim() ||
+            'Member';
 
         // Validate required fields
-        if (!email || !password || !name) {
+        if (!email || !password) {
             return res.status(400).json({
                 success: false,
-                error: 'Email, password, and name are required'
+                error: 'Email and password are required'
             });
         }
 
@@ -65,7 +72,7 @@ router.post('/register', async (req, res) => {
         const newUser = {
             email: email.toLowerCase(),
             password: hashPassword(password),
-            name,
+            name: displayName,
             phone: phone || '',
             isVerified: false,
             verificationToken,
@@ -87,6 +94,14 @@ router.post('/register', async (req, res) => {
                 error: 'Failed to create user account'
             });
         }
+
+        await hubIdentity.ensureCustomer({ email, name: displayName });
+        await hubIdentity.ensureMember({
+            email,
+            userId: null,
+            customerId: hubIdentity.normalizeEmail(email),
+            name: displayName,
+        });
 
         // Send email verification email
         try {
@@ -268,17 +283,22 @@ router.post('/login', async (req, res) => {
 
         // Generate auth token
         const authToken = generateAuthToken(user._id || user.email, user.email);
+        const hubSession = await hubIdentity.provisionForAuthenticatedUser(user);
 
         res.json({
             success: true,
             message: 'Login successful',
             authToken,
+            token: authToken,
             user: {
                 email: user.email,
                 name: user.name,
                 phone: user.phone,
                 isVerified: user.isVerified
-            }
+            },
+            member: hubSession.member,
+            profile: hubSession.profile,
+            onboardingComplete: hubSession.onboardingComplete,
         });
 
     } catch (error) {
