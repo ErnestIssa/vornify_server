@@ -1,6 +1,47 @@
 const sgMail = require('@sendgrid/mail');
 require('dotenv').config();
 
+/** Prefer Hub-specific Render env names, then legacy SENDGRID_* keys. */
+function resolveTemplateId(envKeys, legacyKey, fallback) {
+    const keys = Array.isArray(envKeys) ? envKeys : [envKeys];
+    for (const key of keys) {
+        const value = process.env[key];
+        if (value && String(value).trim()) {
+            return String(value).trim();
+        }
+    }
+    const legacy = process.env[legacyKey];
+    if (legacy && String(legacy).trim()) {
+        return String(legacy).trim();
+    }
+    return fallback;
+}
+
+function getHubAuthTemplateIds() {
+    return {
+        emailVerification: resolveTemplateId(
+            'EMAIL_VERIFICATION_HUB_ACCOUNT',
+            'SENDGRID_EMAIL_VERIFICATION_TEMPLATE_ID',
+            'd-email_verification_template_id'
+        ),
+        passwordReset: resolveTemplateId(
+            'HUB_ACCOUNT_PASSWORD_RESET',
+            'SENDGRID_PASSWORD_RESET_TEMPLATE_ID',
+            'd-password_reset_template_id'
+        ),
+        passwordResetSuccess: resolveTemplateId(
+            'HUB_ACCOUNT_PASSWORD_RESET_SUCCESS',
+            'SENDGRID_PASSWORD_RESET_SUCCESS_TEMPLATE_ID',
+            'd-password_reset_success_template_id'
+        ),
+        hubWelcome: resolveTemplateId(
+            'HUB_WELCOME_EMAIL',
+            'SENDGRID_ACCOUNT_SETUP_TEMPLATE_ID',
+            'd-account_setup_template_id'
+        ),
+    };
+}
+
 /**
  * Clean SendGrid Email Service
  * Provides reusable email functions using SendGrid dynamic templates
@@ -500,11 +541,11 @@ class EmailService {
      */
     async sendPasswordResetEmail(to, resetLink) {
         try {
-            const templateId = process.env.SENDGRID_PASSWORD_RESET_TEMPLATE_ID || 'd-password_reset_template_id';
+            const templateId = getHubAuthTemplateIds().passwordReset;
             
             const dynamicData = {
                 reset_link: resetLink,
-                expiry_hours: 24,
+                expiry_hours: 1,
                 website_url: 'https://peakmode.se',
                 year: new Date().getFullYear()
             };
@@ -766,7 +807,7 @@ class EmailService {
      */
     async sendAccountSetupEmail(to, name, hubUrl) {
         try {
-            const templateId = process.env.SENDGRID_ACCOUNT_SETUP_TEMPLATE_ID || 'd-account_setup_template_id';
+            const templateId = getHubAuthTemplateIds().hubWelcome;
             
             const dynamicData = {
                 customer_name: name || 'Valued Customer',
@@ -801,7 +842,7 @@ class EmailService {
      */
     async sendEmailVerificationEmail(to, name, verificationLink) {
         try {
-            const templateId = process.env.SENDGRID_EMAIL_VERIFICATION_TEMPLATE_ID || 'd-email_verification_template_id';
+            const templateId = getHubAuthTemplateIds().emailVerification;
             
             const dynamicData = {
                 customer_name: name || 'Valued Customer',
@@ -835,7 +876,7 @@ class EmailService {
      */
     async sendPasswordResetSuccessEmail(to, name) {
         try {
-            const templateId = process.env.SENDGRID_PASSWORD_RESET_SUCCESS_TEMPLATE_ID || 'd-password_reset_success_template_id';
+            const templateId = getHubAuthTemplateIds().passwordResetSuccess;
             
             const dynamicData = {
                 customer_name: name || 'Valued Customer',
@@ -1887,4 +1928,5 @@ class EmailService {
 
 // Export singleton instance
 module.exports = new EmailService();
+module.exports.getHubAuthTemplateIds = getHubAuthTemplateIds;
 

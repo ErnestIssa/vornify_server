@@ -142,14 +142,14 @@ router.get('/status', async (req, res) => {
                 sv: process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_SV || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID
             },
             newsletterWelcome: process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID,
-            passwordReset: process.env.SENDGRID_PASSWORD_RESET_TEMPLATE_ID,
+            passwordReset: emailService.getHubAuthTemplateIds().passwordReset,
             orderProcessing: process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID,
             shippingNotification: process.env.SENDGRID_SHIPPING_NOTIFICATION_TEMPLATE_ID,
             deliveryConfirmation: process.env.SENDGRID_DELIVERY_CONFIRMATION_TEMPLATE_ID,
             reviewRequest: process.env.SENDGRID_REVIEW_REQUEST_TEMPLATE_ID,
-            accountSetup: process.env.SENDGRID_ACCOUNT_SETUP_TEMPLATE_ID,
-            emailVerification: process.env.SENDGRID_EMAIL_VERIFICATION_TEMPLATE_ID,
-            passwordResetSuccess: process.env.SENDGRID_PASSWORD_RESET_SUCCESS_TEMPLATE_ID,
+            accountSetup: emailService.getHubAuthTemplateIds().hubWelcome,
+            emailVerification: emailService.getHubAuthTemplateIds().emailVerification,
+            passwordResetSuccess: emailService.getHubAuthTemplateIds().passwordResetSuccess,
             supportConfirmation: process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID
         };
 
