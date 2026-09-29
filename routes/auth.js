@@ -4,6 +4,12 @@ const crypto = require('crypto');
 const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 const hubIdentity = require('../services/hub/hubIdentityService');
+const { normalizeEmail, authFail, authOk, CODES } = require('../lib/authResponse');
+const {
+    isAccountLocked,
+    buildFailedLoginUpdate,
+    buildSuccessfulLoginUpdate,
+} = require('../lib/authSecurity');
 
 const db = getDBInstance();
 
@@ -58,10 +64,12 @@ router.post('/register', async (req, res) => {
         });
 
         if (existingUser.success && existingUser.data) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email already registered'
-            });
+            return authFail(
+                res,
+                409,
+                CODES.ACCOUNT_EXISTS,
+                'You already have a Peak Mode account. Sign in to continue.'
+            );
         }
 
         // Generate verification token
@@ -162,13 +170,19 @@ router.post('/verify-email', async (req, res) => {
         });
 
         if (!userResult.success || !userResult.data) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid or expired verification token'
-            });
+            return authFail(
+                res,
+                400,
+                CODES.VALIDATION_ERROR,
+                'This verification link is no longer valid.'
+            );
         }
 
         const user = userResult.data;
+
+        if (user.isVerified) {
+            return authOk(res, { message: 'Your email is already verified.', alreadyVerified: true });
+        }
 
         // Check if token is expired
         if (new Date() > new Date(user.verificationExpiry)) {
@@ -237,56 +251,101 @@ router.post('/verify-email', async (req, res) => {
  */
 router.post('/login', async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const email = normalizeEmail(req.body.email);
+        const password = req.body.password;
 
-        if (!email || !password) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email and password are required'
-            });
+        if (!email) {
+            return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter your email address.');
+        }
+        if (!password) {
+            return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter your password.');
         }
 
-        // Find user
         const userResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'users',
             command: '--read',
-            data: { filter: { email: email.toLowerCase() } }
+            data: { filter: { email } }
         });
 
+        const genericFail = () =>
+            authFail(
+                res,
+                401,
+                CODES.AUTHENTICATION_FAILED,
+                "We couldn't sign you in with those details."
+            );
+
         if (!userResult.success || !userResult.data) {
-            return res.status(401).json({
-                success: false,
-                error: 'Invalid email or password'
-            });
+            return genericFail();
         }
 
         const user = userResult.data;
+        const lockState = isAccountLocked(user);
+        if (lockState.reason === 'banned') {
+            return authFail(
+                res,
+                403,
+                CODES.ACCOUNT_BANNED,
+                'This account is not currently eligible to access Peak Mode Hub.'
+            );
+        }
+        if (lockState.reason === 'suspended') {
+            return authFail(
+                res,
+                403,
+                CODES.ACCOUNT_SUSPENDED,
+                'Your Peak Mode account currently has limited access.'
+            );
+        }
+        if (lockState.locked && lockState.reason === 'throttle') {
+            return authFail(
+                res,
+                429,
+                CODES.RATE_LIMITED,
+                'Too many sign-in attempts. Please wait and try again, or reset your password.',
+                { needsVerification: false }
+            );
+        }
 
-        // Verify password
         const hashedPassword = hashPassword(password);
         if (user.password !== hashedPassword) {
-            return res.status(401).json({
-                success: false,
-                error: 'Invalid email or password'
+            await db.executeOperation({
+                database_name: 'peakmode',
+                collection_name: 'users',
+                command: '--update',
+                data: {
+                    filter: { email },
+                    update: buildFailedLoginUpdate(user)
+                }
             });
+            return genericFail();
         }
 
-        // Check if email is verified
         if (!user.isVerified) {
-            return res.status(403).json({
-                success: false,
-                error: 'Please verify your email before logging in',
-                needsVerification: true
-            });
+            return authFail(
+                res,
+                403,
+                CODES.EMAIL_VERIFICATION_REQUIRED,
+                'Please verify your email before signing in.',
+                { needsVerification: true }
+            );
         }
 
-        // Generate auth token
+        await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'users',
+            command: '--update',
+            data: {
+                filter: { email },
+                update: buildSuccessfulLoginUpdate(user)
+            }
+        });
+
         const authToken = generateAuthToken(user._id || user.email, user.email);
         const hubSession = await hubIdentity.provisionForAuthenticatedUser(user);
 
-        res.json({
-            success: true,
+        return authOk(res, {
             message: 'Login successful',
             authToken,
             token: authToken,
@@ -300,13 +359,14 @@ router.post('/login', async (req, res) => {
             profile: hubSession.profile,
             onboardingComplete: hubSession.onboardingComplete,
         });
-
     } catch (error) {
         console.error('Login error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Internal server error'
-        });
+        return authFail(
+            res,
+            500,
+            CODES.INTERNAL_ERROR,
+            'Something went wrong while signing you in. Please try again.'
+        );
     }
 });
 
@@ -314,79 +374,69 @@ router.post('/login', async (req, res) => {
  * POST /api/auth/request-password-reset
  * Request password reset
  */
+const GENERIC_RESET_SENT =
+    "If an account exists for this email, we'll send you a password reset link.";
+
 router.post('/request-password-reset', async (req, res) => {
     try {
-        const { email } = req.body;
+        const email = normalizeEmail(req.body.email);
 
         if (!email) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email is required'
-            });
+            return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter a valid email address.');
         }
 
-        // Find user
         const userResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'users',
             command: '--read',
-            data: { filter: { email: email.toLowerCase() } }
+            data: { filter: { email } }
         });
 
-        // Always return success even if user not found (security best practice)
         if (!userResult.success || !userResult.data) {
-            return res.json({
-                success: true,
-                message: 'If an account exists with this email, a password reset link has been sent'
-            });
+            return authOk(res, { message: GENERIC_RESET_SENT });
         }
 
         const user = userResult.data;
+        const lastSent = user.lastPasswordResetSentAt ? new Date(user.lastPasswordResetSentAt) : null;
+        if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) {
+            return authOk(res, { message: GENERIC_RESET_SENT });
+        }
 
-        // Generate reset token
         const resetToken = generateToken();
-        const resetExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+        const resetExpiry = new Date(Date.now() + 60 * 60 * 1000);
 
-        // Update user with reset token
         await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'users',
             command: '--update',
             data: {
-                filter: { email: email.toLowerCase() },
+                filter: { email },
                 update: {
                     resetToken,
                     resetExpiry: resetExpiry.toISOString(),
+                    lastPasswordResetSentAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString()
                 }
             }
         });
 
-        // Send password reset email
         try {
             const resetLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
-            
-            await emailService.sendPasswordResetEmail(
-                email,
-                resetLink
-            );
-            
+            await emailService.sendPasswordResetEmail(email, resetLink);
             console.log(`✅ Password reset email sent to ${email}`);
         } catch (emailError) {
             console.error('⚠️ Failed to send password reset email:', emailError);
         }
 
-        res.json({
-            success: true,
-            message: 'If an account exists with this email, a password reset link has been sent'
-        });
-
+        return authOk(res, { message: GENERIC_RESET_SENT });
     } catch (error) {
         console.error('Password reset request error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Internal server error'
-        });
+        return authFail(
+            res,
+            500,
+            CODES.INTERNAL_ERROR,
+            'Something went wrong. Please try again.'
+        );
     }
 });
 
@@ -398,57 +448,65 @@ router.post('/reset-password', async (req, res) => {
     try {
         const { token, email, newPassword } = req.body;
 
-        if (!token || !email || !newPassword) {
-            return res.status(400).json({
-                success: false,
-                error: 'Token, email, and new password are required'
-            });
+        const normalizedEmail = normalizeEmail(email);
+        if (!token || !normalizedEmail || !newPassword) {
+            return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter a valid reset link and password.');
         }
 
-        // Validate password strength
         if (newPassword.length < 8) {
-            return res.status(400).json({
-                success: false,
-                error: 'Password must be at least 8 characters long'
-            });
+            return authFail(
+                res,
+                400,
+                CODES.VALIDATION_ERROR,
+                'Password must be at least 8 characters long.'
+            );
         }
 
-        // Find user with reset token
         const userResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'users',
             command: '--read',
-            data: { filter: { email: email.toLowerCase(), resetToken: token } }
+            data: { filter: { email: normalizedEmail, resetToken: token } }
         });
 
         if (!userResult.success || !userResult.data) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid or expired reset token'
-            });
+            return authFail(
+                res,
+                400,
+                CODES.VALIDATION_ERROR,
+                'This password reset link is no longer valid.'
+            );
         }
 
         const user = userResult.data;
 
-        // Check if token is expired
         if (new Date() > new Date(user.resetExpiry)) {
-            return res.status(400).json({
-                success: false,
-                error: 'Reset token has expired'
-            });
+            return authFail(
+                res,
+                400,
+                CODES.VALIDATION_ERROR,
+                'This password reset link has expired.'
+            );
         }
 
-        // Update password
+        const sec = user.security || {};
         const updateResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'users',
             command: '--update',
             data: {
-                filter: { email: email.toLowerCase() },
+                filter: { email: normalizedEmail },
                 update: {
                     password: hashPassword(newPassword),
                     resetToken: null,
                     resetExpiry: null,
+                    security: {
+                        ...sec,
+                        failedLoginCount: 0,
+                        lockedUntil: null,
+                        lockReason: null,
+                        passwordChangedAt: new Date().toISOString(),
+                    },
                     updatedAt: new Date().toISOString()
                 }
             }
@@ -474,17 +532,15 @@ router.post('/reset-password', async (req, res) => {
             // Don't fail password reset if email fails
         }
 
-        res.json({
-            success: true,
-            message: 'Password reset successfully'
-        });
-
+        return authOk(res, { message: 'Your password has been updated.' });
     } catch (error) {
         console.error('Password reset error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Internal server error'
-        });
+        return authFail(
+            res,
+            500,
+            CODES.INTERNAL_ERROR,
+            'Something went wrong. Please try again.'
+        );
     }
 });
 
@@ -494,78 +550,70 @@ router.post('/reset-password', async (req, res) => {
  */
 router.post('/resend-verification', async (req, res) => {
     try {
-        const { email } = req.body;
+        const email = normalizeEmail(req.body.email);
+        const genericSent = 'If this account needs verification, we sent a new link to that inbox.';
 
         if (!email) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email is required'
-            });
+            return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter a valid email address.');
         }
 
-        // Find user
         const userResult = await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'users',
             command: '--read',
-            data: { filter: { email: email.toLowerCase() } }
+            data: { filter: { email } }
         });
 
         if (!userResult.success || !userResult.data) {
-            return res.status(404).json({
-                success: false,
-                error: 'User not found'
-            });
+            return authOk(res, { message: genericSent });
         }
 
         const user = userResult.data;
 
         if (user.isVerified) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email is already verified'
-            });
+            return authOk(res, { message: 'Your email is already verified.', alreadyVerified: true });
         }
 
-        // Generate new verification token
-        const verificationToken = generateToken();
-        const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+        const lastSent = user.lastVerificationSentAt ? new Date(user.lastVerificationSentAt) : null;
+        if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) {
+            return authFail(
+                res,
+                429,
+                CODES.RATE_LIMITED,
+                'Please wait a moment before requesting another verification email.'
+            );
+        }
 
-        // Update user with new token
+        const verificationToken = generateToken();
+        const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
         await db.executeOperation({
             database_name: 'peakmode',
             collection_name: 'users',
             command: '--update',
             data: {
-                filter: { email: email.toLowerCase() },
+                filter: { email },
                 update: {
                     verificationToken,
                     verificationExpiry: verificationExpiry.toISOString(),
+                    lastVerificationSentAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString()
                 }
             }
         });
 
-        // Send verification email
         const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
-        
-        await emailService.sendEmailVerificationEmail(
-            email,
-            user.name,
-            verificationLink
-        );
+        await emailService.sendEmailVerificationEmail(email, user.name, verificationLink);
 
-        res.json({
-            success: true,
-            message: 'Verification email sent'
-        });
-
+        return authOk(res, { message: genericSent });
     } catch (error) {
         console.error('Resend verification error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Internal server error'
-        });
+        return authFail(
+            res,
+            500,
+            CODES.INTERNAL_ERROR,
+            'Something went wrong. Please try again.'
+        );
     }
 });
 
