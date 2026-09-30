@@ -980,7 +980,8 @@ const replyHandler = async (req, res) => {
                     name: updatedConversation.customer.name,
                     replyMessage: message.trim(),
                     subject: updatedConversation.subject,
-                    ticketId: updatedConversation.ticketId
+                    ticketId: updatedConversation.ticketId,
+                    messageId: replyEntry?.id,
                 });
 
                 if (!emailResult.success) {

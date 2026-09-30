@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const emailService = require('../services/emailService');
 
+/** Disabled in production unless EMAIL_ROUTES_PUBLIC or EMAIL_INTERNAL_API_KEY — see emailRouteGuard on mount. */
+
 /**
  * POST /api/email/send
  * Generic email sending endpoint using dynamic templates
@@ -15,47 +17,11 @@ const emailService = require('../services/emailService');
  * }
  */
 router.post('/send', async (req, res) => {
-    try {
-        const { to, subject, templateId, dynamicData } = req.body;
-
-        // Validate required fields
-        if (!to) {
-            return res.status(400).json({
-                success: false,
-                error: 'Recipient email address is required'
-            });
-        }
-
-        if (!templateId) {
-            return res.status(400).json({
-                success: false,
-                error: 'Template ID is required'
-            });
-        }
-
-        // Send email
-        const result = await emailService.sendCustomEmail(
-            to,
-            subject,
-            templateId,
-            dynamicData || {}
-        );
-
-        // Return response based on result
-        if (result.success) {
-            return res.status(200).json(result);
-        } else {
-            return res.status(500).json(result);
-        }
-
-    } catch (error) {
-        console.error('Email send error:', error);
-        return res.status(500).json({
-            success: false,
-            error: 'Internal server error',
-            details: error.message
-        });
-    }
+    return res.status(410).json({
+        success: false,
+        error: 'DEPRECATED_ENDPOINT',
+        message: 'Arbitrary template send is removed. Use domain APIs (auth, orders, support).',
+    });
 });
 
 /**

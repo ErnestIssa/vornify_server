@@ -961,11 +961,17 @@ router.post('/reset-password', async (req, res) => {
             }
 
             try {
+                const resetEventId = crypto
+                    .createHash('sha256')
+                    .update(String(resetToken))
+                    .digest('hex')
+                    .slice(0, 16);
                 await emailService.sendPasswordSetSuccessfullyAdminEmail(admin.email, {
                     admin_email: admin.email,
                     admin_name: (admin.name || admin.displayName || '').trim() || admin.email,
                     login_url: `${getAdminAppBaseUrl()}/login`,
-                    year: new Date().getFullYear()
+                    year: new Date().getFullYear(),
+                    resetEventId,
                 });
             } catch (emailErr) {
                 logger.warn('admin_reset_password_success_email_failed', { message: emailErr.message });

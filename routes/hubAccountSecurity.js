@@ -1,5 +1,5 @@
 /**
- * Hub member account & security actions (SSOT). Sends security emails immediately via SendGrid templates.
+ * Hub member account & security actions (SSOT). Security emails via communicationOrchestrator (no provider here).
  */
 const express = require('express');
 const crypto = require('crypto');
@@ -51,12 +51,13 @@ router.post('/change-password', authenticateMember, async (req, res) => {
       return authFail(res, 401, CODES.AUTHENTICATION_FAILED, 'Current password is incorrect.');
     }
 
+    const passwordChangedAt = new Date().toISOString();
     const result = await updateUserByEmail(email, {
       password: hashPassword(newPassword),
       passwordUserSet: true,
       security: {
         ...(user.security || {}),
-        passwordChangedAt: new Date().toISOString(),
+        passwordChangedAt,
         failedLoginCount: 0,
         lockedUntil: null,
         lockReason: null,
@@ -69,6 +70,7 @@ router.post('/change-password', authenticateMember, async (req, res) => {
 
     await hubAccountEmail.sendPasswordChangedEmail(email, user.name, {
       fallbackOrigin: req.headers.origin,
+      correlationId: passwordChangedAt,
     });
     return authOk(res, { message: 'Password updated.' });
   } catch (err) {
@@ -293,13 +295,16 @@ router.post('/google/disconnect', authenticateMember, async (req, res) => {
       );
     }
 
+    const disconnectedAt = new Date().toISOString();
     await updateUserByEmail(email, {
       googleId: null,
       authProviders: providers,
+      updatedAt: disconnectedAt,
     });
 
     await hubAccountEmail.sendGoogleDisconnectedEmail(email, user.name, {
       fallbackOrigin: req.headers.origin,
+      correlationId: disconnectedAt,
     });
     return authOk(res, { message: 'Google account disconnected.' });
   } catch (err) {

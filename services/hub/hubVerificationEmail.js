@@ -10,15 +10,10 @@ function generateToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+const { buildHubVerificationUrl } = require('../../email/emailUrls');
+
 function buildVerificationLink({ token, email, fallbackOrigin }) {
-  const base =
-    process.env.STOREFRONT_URL ||
-    process.env.FRONTEND_URL ||
-    process.env.PUBLIC_STORE_URL ||
-    fallbackOrigin ||
-    'https://peakmode.se';
-  const origin = String(base).trim().replace(/\/+$/, '') || 'https://peakmode.se';
-  return `${origin}/verify-email?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
+  return buildHubVerificationUrl({ token, email, fallbackOrigin });
 }
 
 function canSendVerificationNow(user) {
@@ -69,9 +64,9 @@ async function sendVerificationEmail({ email, user, fallbackOrigin, forceNewToke
     { fallbackOrigin },
   );
 
-  if (!mailResult.success) {
-    console.error('[hub-verification-email] SendGrid send failed:', mailResult.error, mailResult.details);
-    return { sent: false, reason: 'send_failed', error: mailResult.error };
+  if (!mailResult.success && !mailResult.providerAccepted) {
+    console.error('[hub-verification-email] Email job failed:', mailResult.error, mailResult.status);
+    return { sent: false, reason: 'send_failed', error: mailResult.error, status: mailResult.status };
   }
 
   await db.executeOperation({
@@ -89,7 +84,13 @@ async function sendVerificationEmail({ email, user, fallbackOrigin, forceNewToke
     },
   });
 
-  return { sent: true, messageId: mailResult.messageId };
+  return {
+    sent: true,
+    providerAccepted: Boolean(mailResult.providerAccepted ?? mailResult.success),
+    emailId: mailResult.emailId,
+    status: mailResult.status,
+    messageId: mailResult.providerMessageId,
+  };
 }
 
 module.exports = {

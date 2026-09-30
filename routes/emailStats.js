@@ -12,7 +12,7 @@ router.get('/stats', authenticateAdmin, requirePermission('email.view'), async (
         // Get all email logs
         const result = await db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'email_logs',
+            collection_name: 'communication_messages',
             command: '--read',
             data: {}
         });
@@ -40,16 +40,16 @@ router.get('/stats', authenticateAdmin, requirePermission('email.view'), async (
 
         // Calculate statistics
         const totalSent = logs.length;
-        const delivered = logs.filter(log => log.status === 'delivered' || log.status === 'sent').length;
-        const failed = logs.filter(log => log.status === 'failed').length;
-        const opened = logs.filter(log => log.status === 'opened').length;
+        const delivered = logs.filter(log => log.status === 'DELIVERED').length;
+        const failed = logs.filter(log => log.status === 'FAILED' || log.status === 'DEAD_LETTER').length;
+        const opened = logs.filter(log => log.status === 'OPENED').length;
+        const accepted = logs.filter(log => log.status === 'ACCEPTED').length;
 
-        // Count by type
         const byType = {
-            order: logs.filter(log => log.type === 'order').length,
-            newsletter: logs.filter(log => log.type === 'newsletter').length,
-            authentication: logs.filter(log => log.type === 'authentication').length,
-            customer: logs.filter(log => log.type === 'customer').length
+            order: logs.filter(log => log.emailType === 'ORDER_CONFIRMATION').length,
+            newsletter: logs.filter(log => String(log.emailType || '').includes('NEWSLETTER')).length,
+            authentication: logs.filter(log => String(log.emailType || '').startsWith('HUB_')).length,
+            customer: logs.filter(log => log.category === 'TRANSACTIONAL' && log.emailType === 'ORDER_CONFIRMATION').length,
         };
 
         res.json({
@@ -59,6 +59,7 @@ router.get('/stats', authenticateAdmin, requirePermission('email.view'), async (
                 delivered,
                 failed,
                 opened,
+                acceptedByProvider: accepted,
                 byType
             }
         });
@@ -73,16 +74,16 @@ router.get('/stats', authenticateAdmin, requirePermission('email.view'), async (
 });
 
 // Get email logs
-router.get('/logs', async (req, res) => {
+router.get('/logs', authenticateAdmin, requirePermission('email.view'), async (req, res) => {
     try {
         const { limit = 50, offset = 0, type = 'all' } = req.query;
 
         // Get all email logs
         const result = await db.executeOperation({
             database_name: 'peakmode',
-            collection_name: 'email_logs',
+            collection_name: 'communication_messages',
             command: '--read',
-            data: type !== 'all' ? { filter: { type } } : {}
+            data: type !== 'all' ? { filter: { emailType: type } } : {}
         });
 
         if (!result.success) {
@@ -120,33 +121,9 @@ router.get('/logs', async (req, res) => {
     }
 });
 
-// Log email send (internal utility)
-async function logEmail({ type, to, subject, template, status, error, orderId, customerId }) {
-    try {
-        const emailLog = {
-            type: type || 'other',
-            to,
-            subject: subject || 'No subject',
-            template: template || 'unknown',
-            status: status || 'sent',
-            error: error || null,
-            sentAt: new Date().toISOString(),
-            orderId: orderId || null,
-            customerId: customerId || null
-        };
-
-        await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'email_logs',
-            command: '--create',
-            data: emailLog
-        });
-
-        return { success: true };
-    } catch (error) {
-        console.error('Failed to log email:', error);
-        return { success: false, error: error.message };
-    }
+/** @deprecated Use email orchestrator (`email_messages`). Kept for backward-compatible imports. */
+async function logEmail() {
+    return { success: true, skipped: true, reason: 'email_messages_is_ssot' };
 }
 
 // Export the logging function for use in other modules

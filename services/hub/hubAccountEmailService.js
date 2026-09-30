@@ -1,115 +1,105 @@
 /**
- * Hub account & security emails — SendGrid dynamic templates only (SSOT: backend).
+ * Hub account emails → Peak Mode email orchestrator (outbox + SendGrid provider).
  */
-const emailService = require('../emailService');
-const { getHubTemplateId, isHubTemplateConfigured } = require('../../lib/hubAuthTemplates');
-const {
-  buildHubTemplatePayload,
-  expandActionLink,
-  getHubEmailSubject,
-} = require('../../lib/hubEmailPayload');
-
-async function sendHubTemplate(templateKey, to, dynamicExtra = {}, options = {}) {
-  const templateId = getHubTemplateId(templateKey);
-  if (!isHubTemplateConfigured(templateId)) {
-    console.error(`[hub-email] Missing SendGrid template env for "${templateKey}"`);
-    return { success: false, error: 'template_not_configured', templateKey };
-  }
-
-  const subject = getHubEmailSubject(templateKey);
-  const payload = buildHubTemplatePayload(templateKey, {
-    fallbackOrigin: options.fallbackOrigin,
-    extra: dynamicExtra,
-  });
-
-  const result = await emailService.sendHubDynamicTemplateEmail(to, subject, templateId, payload);
-  if (!result.success) {
-    console.error(`[hub-email] Send failed (${templateKey}) → ${to}:`, result.error || result.details);
-  }
-  return result;
-}
+const crypto = require('crypto');
+const orchestrator = require('../../communications/communicationOrchestrator');
 
 function customerName(name, email) {
   return (name && String(name).trim()) || String(email || '').split('@')[0] || 'Member';
 }
 
+function hashKey(part) {
+  return crypto.createHash('sha256').update(String(part)).digest('hex').slice(0, 16);
+}
+
+async function sendLegacy(legacyHubKey, to, payload, options = {}) {
+  const { emailTypeFromLegacyHubKey } = require('../../email/emailDefinitions');
+  const emailType = emailTypeFromLegacyHubKey(legacyHubKey);
+  if (!emailType) {
+    return { success: false, error: 'UNKNOWN_LEGACY_HUB_EMAIL', legacyHubKey };
+  }
+  return orchestrator.schedule({
+    communicationType: emailType,
+    channel: 'email',
+    recipient: to,
+    payload,
+    idempotencyKey: options.idempotencyKey,
+    correlationId: options.correlationId,
+    userId: options.userId,
+    processImmediately: options.processImmediately !== false,
+  });
+}
+
 async function sendAccountWelcomeEmail(to, name, options = {}) {
-  return sendHubTemplate(
+  return sendLegacy(
     'accountWelcome',
     to,
     { customer_name: customerName(name, to) },
-    options,
+    {
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-welcome-reg:${hashKey(to)}`,
+    },
   );
 }
 
 async function sendEmailVerificationEmail(to, name, verificationLink, options = {}) {
   const link = String(verificationLink || '').trim();
-  return sendHubTemplate(
+  return sendLegacy(
     'emailVerification',
     to,
     {
       customer_name: customerName(name, to),
-      ...expandActionLink(link, [
-        'verification_link',
-        'verification_url',
-        'verify_link',
-        'confirm_link',
-        'email_verification_link',
-        'verify_email_link',
-      ], options.fallbackOrigin),
+      verificationUrl: link,
     },
-    options,
+    {
+      ...options,
+      idempotencyKey:
+        options.idempotencyKey || `hub-verify:${hashKey(to)}:${hashKey(link)}`,
+    },
   );
 }
 
 async function sendPasswordResetEmail(to, resetLink, options = {}) {
   const link = String(resetLink || '').trim();
-  return sendHubTemplate(
+  return sendLegacy(
     'passwordReset',
     to,
+    { resetUrl: link, expiry_hours: 1 },
     {
-      expiry_hours: 1,
-      ...expandActionLink(link, [
-        'reset_link',
-        'reset_url',
-        'password_reset_link',
-        'password_reset_url',
-        'resetLink',
-      ], options.fallbackOrigin),
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-reset:${hashKey(to)}:${hashKey(link)}`,
     },
-    options,
   );
 }
 
 async function sendPasswordResetSuccessEmail(to, name, options = {}) {
-  return sendHubTemplate(
+  const eventPart = options.correlationId || options.securityEventId || hashKey(to);
+  return sendLegacy(
     'passwordResetSuccess',
     to,
+    { customer_name: customerName(name, to) },
     {
-      customer_name: customerName(name, to),
-      ...expandActionLink(`${buildHubTemplatePayload('passwordResetSuccess', options).login_url}`, [
-        'sign_in_link',
-      ], options.fallbackOrigin),
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-reset-ok:${hashKey(eventPart)}`,
     },
-    options,
   );
 }
 
 async function sendPasswordChangedEmail(to, name, options = {}) {
-  return sendHubTemplate(
+  const eventPart = options.correlationId || options.securityEventId || hashKey(to);
+  return sendLegacy(
     'passwordChanged',
     to,
+    { customer_name: customerName(name, to) },
     {
-      customer_name: customerName(name, to),
-      ...expandActionLink(buildHubTemplatePayload('passwordChanged', options).login_url, ['sign_in_link'], options.fallbackOrigin),
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-pwd-changed:${hashKey(to)}:${hashKey(eventPart)}`,
     },
-    options,
   );
 }
 
 async function sendNewLoginEmail(to, name, context, options = {}) {
-  const base = buildHubTemplatePayload('newLogin', options);
-  return sendHubTemplate(
+  return sendLegacy(
     'newLogin',
     to,
     {
@@ -117,15 +107,18 @@ async function sendNewLoginEmail(to, name, context, options = {}) {
       login_time: context?.at,
       login_ip: context?.ip,
       device_info: context?.userAgent,
-      ...expandActionLink(base.account_url, ['security_settings_url', 'account_security_url'], options.fallbackOrigin),
     },
-    options,
+    {
+      ...options,
+      idempotencyKey:
+        options.idempotencyKey ||
+        `hub-new-login:${hashKey(to)}:${hashKey(context?.sessionKey || context?.at || '')}`,
+    },
   );
 }
 
 async function sendSuspiciousLoginEmail(to, name, context, options = {}) {
-  const base = buildHubTemplatePayload('suspiciousLogin', options);
-  return sendHubTemplate(
+  return sendLegacy(
     'suspiciousLogin',
     to,
     {
@@ -133,128 +126,130 @@ async function sendSuspiciousLoginEmail(to, name, context, options = {}) {
       login_time: context?.at,
       login_ip: context?.ip,
       device_info: context?.userAgent,
-      ...expandActionLink(base.account_url, ['security_settings_url', 'reset_password_url'], options.fallbackOrigin),
     },
-    options,
+    {
+      ...options,
+      idempotencyKey:
+        options.idempotencyKey ||
+        `hub-suspicious:${hashKey(to)}:${hashKey(context?.sessionKey || context?.at || '')}`,
+    },
   );
 }
 
 async function sendLoginBlockedEmail(to, name, options = {}) {
-  const base = buildHubTemplatePayload('loginBlocked', options);
-  return sendHubTemplate(
+  const lockPart = options.correlationId || options.securityEventId || 'lock';
+  return sendLegacy(
     'loginBlocked',
     to,
+    { customer_name: customerName(name, to) },
     {
-      customer_name: customerName(name, to),
-      ...expandActionLink(base.login_url, ['sign_in_link'], options.fallbackOrigin),
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-blocked:${hashKey(to)}:${hashKey(lockPart)}`,
     },
-    options,
   );
 }
 
 async function sendEmailChangeConfirmationEmail(to, name, confirmLink, newEmail, options = {}) {
-  return sendHubTemplate(
+  return sendLegacy(
     'emailChangeConfirmation',
     to,
     {
       customer_name: customerName(name, to),
+      confirmationUrl: confirmLink,
       new_email: newEmail,
-      ...expandActionLink(confirmLink, [
-        'confirmation_link',
-        'confirm_link',
-        'email_change_link',
-        'verify_link',
-      ], options.fallbackOrigin),
     },
-    options,
+    {
+      ...options,
+      idempotencyKey:
+        options.idempotencyKey || `hub-email-change:${hashKey(newEmail)}:${hashKey(confirmLink)}`,
+    },
   );
 }
 
 async function sendEmailChangedEmail(to, name, newEmail, options = {}) {
-  const base = buildHubTemplatePayload('emailChanged', options);
-  return sendHubTemplate(
+  return sendLegacy(
     'emailChanged',
     to,
+    { customer_name: customerName(name, to), new_email: newEmail },
     {
-      customer_name: customerName(name, to),
-      new_email: newEmail,
-      ...expandActionLink(base.login_url, ['sign_in_link'], options.fallbackOrigin),
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-email-changed:${hashKey(to)}:${hashKey(newEmail)}`,
     },
-    options,
   );
 }
 
 async function sendGoogleConnectedEmail(to, name, options = {}) {
-  const base = buildHubTemplatePayload('googleConnected', options);
-  return sendHubTemplate(
+  return sendLegacy(
     'googleConnected',
     to,
-    {
-      customer_name: customerName(name, to),
-      ...expandActionLink(base.hub_url, ['dashboard_url'], options.fallbackOrigin),
-    },
-    options,
+    { customer_name: customerName(name, to) },
+    { ...options, idempotencyKey: options.idempotencyKey || `hub-google-on:${hashKey(to)}` },
   );
 }
 
 async function sendGoogleDisconnectedEmail(to, name, options = {}) {
-  return sendHubTemplate(
+  const eventPart = options.correlationId || options.securityEventId || hashKey(to);
+  return sendLegacy(
     'googleDisconnected',
     to,
     { customer_name: customerName(name, to) },
-    options,
+    {
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-google-off:${hashKey(to)}:${hashKey(eventPart)}`,
+    },
   );
 }
 
 async function sendMfaEnabledEmail(to, name, options = {}) {
-  return sendHubTemplate(
+  return sendLegacy(
     'mfaEnabled',
     to,
     { customer_name: customerName(name, to) },
-    options,
+    { ...options, idempotencyKey: options.idempotencyKey || `hub-mfa-on:${hashKey(to)}` },
   );
 }
 
 async function sendMfaDisabledEmail(to, name, options = {}) {
-  return sendHubTemplate(
+  return sendLegacy(
     'mfaDisabled',
     to,
     { customer_name: customerName(name, to) },
-    options,
+    { ...options, idempotencyKey: options.idempotencyKey || `hub-mfa-off:${hashKey(to)}` },
   );
 }
 
 async function sendAccountRecoveryEmail(to, name, recoveryLink, options = {}) {
-  return sendHubTemplate(
+  return sendLegacy(
     'accountRecovery',
     to,
+    { customer_name: customerName(name, to), recoveryUrl: recoveryLink },
     {
-      customer_name: customerName(name, to),
-      ...expandActionLink(recoveryLink, ['recovery_link', 'account_recovery_link'], options.fallbackOrigin),
+      ...options,
+      idempotencyKey:
+        options.idempotencyKey || `hub-recovery:${hashKey(to)}:${hashKey(recoveryLink)}`,
     },
-    options,
   );
 }
 
 async function sendAccountDeletedEmail(to, name, options = {}) {
-  return sendHubTemplate(
+  return sendLegacy(
     'accountDeleted',
     to,
     { customer_name: customerName(name, to) },
-    options,
+    { ...options, idempotencyKey: options.idempotencyKey || `hub-deleted:${hashKey(to)}` },
   );
 }
 
 async function sendHubWelcomePostVerifyEmail(to, name, hubUrl, options = {}) {
-  const link = String(hubUrl || '').trim() || buildHubTemplatePayload('hubWelcomePostVerify', options).hub_url;
-  return sendHubTemplate(
+  const link = String(hubUrl || '').trim();
+  return sendLegacy(
     'hubWelcomePostVerify',
     to,
+    { customer_name: customerName(name, to), hubUrl: link },
     {
-      customer_name: customerName(name, to),
-      ...expandActionLink(link, ['hub_url', 'hub_home_url', 'dashboard_url'], options.fallbackOrigin),
+      ...options,
+      idempotencyKey: options.idempotencyKey || `hub-welcome-verified:${hashKey(to)}`,
     },
-    options,
   );
 }
 

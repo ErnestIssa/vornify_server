@@ -1,5 +1,12 @@
 const fs = require('fs');
 const path = require('path');
+const { buildUnsubscribeUrl } = require('../email/emailUrls');
+const { signUnsubscribeToken } = require('../lib/unsubscribeToken');
+
+function unsubscribeUrlForEmail(email) {
+    if (!email) return buildUnsubscribeUrl({});
+    return buildUnsubscribeUrl({ token: signUnsubscribeToken(String(email).trim().toLowerCase()) });
+}
 
 class EmailTemplates {
     constructor() {
@@ -47,7 +54,7 @@ class EmailTemplates {
             website_url: 'https://peakmode.se',
             instagram_url: 'https://www.instagram.com/peakmode1',
             tiktok_url: 'https://www.tiktok.com/@peakmode.se',
-            unsubscribe_url: `https://peakmode.se/unsubscribe?email=${orderData.customer.email}`,
+            unsubscribe_url: unsubscribeUrlForEmail(orderData.customer.email),
             privacy_url: 'https://peakmode.se/privacy-policy',
             year: '2024'
         };
@@ -70,7 +77,7 @@ class EmailTemplates {
             website_url: 'https://peakmode.se',
             instagram_url: 'https://www.instagram.com/peakmode1',
             tiktok_url: 'https://www.tiktok.com/@peakmode.se',
-            unsubscribe_url: `https://peakmode.se/unsubscribe?email=${orderData.customer.email}`,
+            unsubscribe_url: unsubscribeUrlForEmail(orderData.customer.email),
             privacy_url: 'https://peakmode.se/privacy-policy',
             year: '2024'
         };
@@ -95,7 +102,7 @@ class EmailTemplates {
             website_url: 'https://peakmode.se',
             instagram_url: 'https://www.instagram.com/peakmode1',
             tiktok_url: 'https://www.tiktok.com/@peakmode.se',
-            unsubscribe_url: `https://peakmode.se/unsubscribe?email=${orderData.customer.email}`,
+            unsubscribe_url: unsubscribeUrlForEmail(orderData.customer.email),
             privacy_url: 'https://peakmode.se/privacy-policy',
             year: '2024'
         };
@@ -117,7 +124,7 @@ class EmailTemplates {
             website_url: 'https://peakmode.se',
             instagram_url: 'https://www.instagram.com/peakmode1',
             tiktok_url: 'https://www.tiktok.com/@peakmode.se',
-            unsubscribe_url: `https://peakmode.se/unsubscribe?email=${orderData.customer.email}`,
+            unsubscribe_url: unsubscribeUrlForEmail(orderData.customer.email),
             privacy_url: 'https://peakmode.se/privacy-policy',
             year: '2024'
         };

@@ -1,7 +1,12 @@
-const sgMail = require('@sendgrid/mail');
+/**
+ * Compatibility/domain facade — delivery is owned by communications/ + email/ provider.
+ * Do not add SendGrid or provider logic here.
+ */
 require('dotenv').config();
+const crypto = require('crypto');
 const { normalizeAuthLink } = require('../lib/authMailLinks');
-const { subjectFields } = require('../lib/hubEmailPayload');
+const { scheduleEmailCommunication } = require('../communications/emailBridge');
+const { buildOrderStatusUrl, buildBrandUrls } = require('../email/emailUrls');
 
 function escapeHtml(value) {
     return String(value || '')
@@ -73,380 +78,64 @@ function getHubAuthTemplateIds() {
     return getHubAuthTemplateIdsFromLib();
 }
 
-/**
- * Clean SendGrid Email Service
- * Provides reusable email functions using SendGrid dynamic templates
- */
 class EmailService {
     constructor() {
-        // Initialize SendGrid with API key from environment variables
-        const apiKey = process.env.SENDGRID_API_KEY;
-        if (!apiKey) {
-            console.warn('⚠️ SENDGRID_API_KEY not found in environment variables');
-        } else {
-            sgMail.setApiKey(apiKey);
-            console.log('✅ SendGrid API initialized');
-        }
-        
         this.fromEmail = (process.env.EMAIL_FROM || 'support@peakmode.se').trim();
         this.supportInboxEmail = process.env.SUPPORT_INBOX_EMAIL || 'support@peakmode.se';
         this.supportSenderName = process.env.SUPPORT_INBOX_NAME || 'Peak Mode Support';
         this.adminNotificationEmail = process.env.ADMIN_EMAIL || process.env.ADMIN_SUPPORT_EMAIL || null;
     }
 
-    /**
-     * SendGrid click-tracking rewrites links via a branded host (e.g. url6790.peakmode.se).
-     * If Link Branding DNS/SSL is wrong, buttons break. Disable tracking on transactional mail by default.
-     * Opt in: set SENDGRID_ENABLE_CLICK_TRACKING=true (only after Link Branding is verified in SendGrid).
-     */
-    applyTransactionalMailSettings(msg) {
-        if (process.env.SENDGRID_ENABLE_CLICK_TRACKING === 'true') return;
-        msg.trackingSettings = {
-            ...(msg.trackingSettings || {}),
-            clickTracking: { enable: false, enableText: false },
-            openTracking: { enable: process.env.SENDGRID_ENABLE_OPEN_TRACKING === 'true' },
-            subscriptionTracking: { enable: false },
+    _schedule(communicationType, recipient, payload, options = {}) {
+        return scheduleEmailCommunication({
+            communicationType,
+            recipient,
+            payload,
+            ...options,
+        });
+    }
+
+    /** @deprecated Arbitrary template sends are disabled — use domain methods → orchestrator. */
+    async sendCustomEmail() {
+        return {
+            success: false,
+            error: 'DEPRECATED_SEND_PATH',
+            details: 'Direct templateId sending is disabled. Use domain communication methods.',
         };
     }
 
-    /** Hub/account mail: bypass marketing suppressions, no SendGrid footer, reply-to support. */
-    applyHubAccountMailSettings(msg) {
-        this.applyTransactionalMailSettings(msg);
-        msg.mailSettings = {
-            ...(msg.mailSettings || {}),
-            bypassListManagement: { enable: true },
-            footer: { enable: false },
-            sandboxMode: { enable: false },
-        };
-        msg.replyTo = {
-            email: this.supportInboxEmail,
-            name: this.supportSenderName || 'Peak Mode Support',
-        };
-        msg.categories = ['peak-mode-hub-transactional'];
-    }
-
-    async deliverSendGridMessage(msg, meta = {}) {
-        const maxAttempts = 2;
-        let lastError;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                const response = await sgMail.send(msg);
-                return response;
-            } catch (error) {
-                lastError = error;
-                const status = error.response?.statusCode;
-                const retryable = !status || status >= 500 || status === 429;
-                if (!retryable || attempt === maxAttempts) {
-                    throw error;
-                }
-                await new Promise((r) => setTimeout(r, 400 * attempt));
-            }
-        }
-        throw lastError;
-    }
-
-    /**
-     * HTML + plain text (no dynamic template) — reliable clickable links for auth mail.
-     */
-    async sendTransactionalHtmlEmail(to, subject, html, text) {
-        try {
-            if (!process.env.SENDGRID_API_KEY) {
-                return {
-                    success: false,
-                    error: 'Email service not configured',
-                    details: 'SENDGRID_API_KEY is not configured in environment variables',
-                };
-            }
-            if (!to) {
-                throw new Error('Recipient email address is required');
-            }
-            const safeSubject =
-                subject && String(subject).trim() ? String(subject).trim() : 'Email from Peak Mode';
-            const msg = {
-                to,
-                from: {
-                    email: this.fromEmail,
-                    name: this.supportSenderName || 'Peak Mode',
-                },
-                subject: safeSubject,
+    async sendTransactionalHtmlEmail(to, subject, html, text, options = {}) {
+        const contentKey = crypto
+            .createHash('sha256')
+            .update(`${to}|${subject}|${html}|${text}`)
+            .digest('hex')
+            .slice(0, 16);
+        return this._schedule(
+            'SUPPORT_COMPOSED',
+            to,
+            {
+                customer_name: 'Customer',
                 html,
                 text,
-            };
-            this.applyTransactionalMailSettings(msg);
-            const response = await sgMail.send(msg);
-            return {
-                success: true,
-                message: 'Email sent successfully',
-                messageId: response[0]?.headers?.['x-message-id'],
-                timestamp: new Date().toISOString(),
-            };
-        } catch (error) {
-            console.error('❌ Transactional HTML email error:', error.response?.body || error.message);
-            return {
-                success: false,
-                error: 'Failed to send email',
-                details: error.response?.body || error.message,
-            };
-        }
+            },
+            {
+                idempotencyKey: options.idempotencyKey || `html-fallback:${String(to).toLowerCase()}:${contentKey}`,
+            },
+        );
     }
 
-    /**
-     * Send a generic email using SendGrid dynamic template
-     * @param {string} to - Recipient email address
-     * @param {string} subject - Email subject
-     * @param {string} templateId - SendGrid template ID
-     * @param {object} dynamicData - Dynamic template data
-     * @returns {Promise<object>} Result object with success status
-     */
-    async sendCustomEmail(to, subject, templateId, dynamicData) {
-        try {
-            // Check if SendGrid API key is configured
-            if (!process.env.SENDGRID_API_KEY) {
-                const errorMsg = 'SENDGRID_API_KEY is not configured in environment variables';
-                console.error('❌ SendGrid Error:', errorMsg);
-                return {
-                    success: false,
-                    error: 'Email service not configured',
-                    details: errorMsg
-                };
-            }
-
-            if (!to) {
-                throw new Error('Recipient email address is required');
-            }
-
-            const cleanedTemplateId = (templateId || '').trim();
-
-            // Check if template ID is a placeholder
-            const isPlaceholder = !cleanedTemplateId || (cleanedTemplateId.startsWith('d-') && cleanedTemplateId.includes('template_id'));
-            
-            const msg = {
-                to: to,
-                from: {
-                    email: this.fromEmail,
-                    name: this.supportSenderName || 'Peak Mode'
-                }
-            };
-
-            // Add subject (required for non-template emails)
-            const safeSubject = (subject && String(subject).trim()) ? String(subject).trim() : 'Email from Peak Mode';
-            msg.subject = safeSubject;
-
-            // If template ID is a placeholder, send plain content instead
-            if (isPlaceholder) {
-                console.warn(`⚠️ Warning: Using placeholder template ID: ${templateId}. Sending plain text email instead.`);
-                
-                // Generate plain text and HTML content from dynamic data
-                let textContent = '';
-                let htmlContent = '';
-                
-                // Add greeting based on dynamic data
-                if (dynamicData && dynamicData.customer_name) {
-                    textContent = `Hello ${dynamicData.customer_name},\n\n`;
-                    htmlContent = `<p>Hello ${dynamicData.customer_name},</p>`;
-                } else {
-                    textContent = 'Hello,\n\n';
-                    htmlContent = '<p>Hello,</p>';
-                }
-                
-                // Add main message based on subject/type
-                if (subject && subject.includes('Support Request')) {
-                    const ticketId = dynamicData?.ticket_id || 'N/A';
-                    textContent += `Thank you for contacting Peak Mode Support. We have received your support request.\n\n`;
-                    textContent += `Your ticket ID is: ${ticketId}\n\n`;
-                    textContent += `We will review your message and respond within 24 hours.\n\n`;
-                    
-                    htmlContent += `<p>Thank you for contacting Peak Mode Support. We have received your support request.</p>`;
-                    htmlContent += `<p><strong>Your ticket ID is:</strong> ${ticketId}</p>`;
-                    htmlContent += `<p>We will review your message and respond within 24 hours.</p>`;
-                } else {
-                    // Generic message
-                    textContent += subject || 'Thank you for contacting us.\n\n';
-                    htmlContent += `<p>${subject || 'Thank you for contacting us.'}</p>`;
-                }
-                
-                // Add additional dynamic data
-                if (dynamicData) {
-                    const excludeKeys = ['customer_name', 'ticket_id', 'subject', 'message'];
-                    Object.entries(dynamicData).forEach(([key, value]) => {
-                        if (!excludeKeys.includes(key) && value) {
-                            const label = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-                            textContent += `${label}: ${value}\n`;
-                            htmlContent += `<p><strong>${label}:</strong> ${value}</p>`;
-                        }
-                    });
-                }
-                
-                // Add footer
-                if (dynamicData?.support_url) {
-                    textContent += `\nYou can view your support request at: ${dynamicData.support_url}\n\n`;
-                    htmlContent += `<p><a href="${dynamicData.support_url}">View your support request</a></p>`;
-                }
-                
-                textContent += `\nBest regards,\nPeak Mode Team`;
-                htmlContent += `<p>Best regards,<br>Peak Mode Team</p>`;
-                
-                // Use plain text and HTML content instead of template
-                msg.text = textContent;
-                msg.html = htmlContent;
-            } else {
-                const mergedData = {
-                    ...(dynamicData || {}),
-                    ...subjectFields(safeSubject),
-                };
-                msg.templateId = cleanedTemplateId;
-                msg.personalizations = [
-                    {
-                        to: [{ email: to }],
-                        subject: safeSubject,
-                        dynamicTemplateData: mergedData,
-                    },
-                ];
-                delete msg.to;
-                delete msg.subject;
-                delete msg.dynamicTemplateData;
-                console.log(`📧 Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
-            }
-
-            this.applyTransactionalMailSettings(msg);
-            const response = await this.deliverSendGridMessage(msg);
-            
-            console.log(`✅ Email sent successfully to ${to}`, {
-                messageId: response[0]?.headers?.['x-message-id'],
-                statusCode: response[0]?.statusCode
-            });
-            
-            return {
-                success: true,
-                message: 'Email sent successfully',
-                messageId: response[0]?.headers?.['x-message-id'],
-                timestamp: new Date().toISOString()
-            };
-
-        } catch (error) {
-            const errorDetails = error.response?.body || error.message;
-            console.error('❌ SendGrid Error Details:', {
-                message: error.message,
-                code: error.code,
-                response: error.response?.body,
-                statusCode: error.response?.statusCode,
-                to: to,
-                templateId: templateId
-            });
-            
-            // Provide more helpful error messages
-            let userFriendlyError = 'Failed to send email';
-            if (error.response?.body?.errors) {
-                const firstError = error.response.body.errors[0];
-                userFriendlyError = firstError.message || userFriendlyError;
-                
-                // Handle specific SendGrid errors
-                if (firstError.field === 'template_id') {
-                    userFriendlyError = 'Invalid email template configuration. Please contact support.';
-                } else if (error.response.statusCode === 401) {
-                    userFriendlyError = 'Email service authentication failed. Please check API key configuration.';
-                } else if (error.response.statusCode === 403) {
-                    userFriendlyError = 'Email service authorization failed. Please check API permissions.';
-                }
-            }
-            
-            return {
-                success: false,
-                error: userFriendlyError,
-                details: errorDetails,
-                timestamp: new Date().toISOString()
-            };
-        }
+    async sendHubDynamicTemplateEmail() {
+        return {
+            success: false,
+            error: 'DEPRECATED_SEND_PATH',
+            details: 'Use hubAccountEmailService → communicationOrchestrator.',
+        };
     }
 
-    /**
-     * Hub account/security dynamic templates — full payload + deliverability settings.
-     */
-    async sendHubDynamicTemplateEmail(to, subject, templateId, dynamicData) {
-        try {
-            if (!process.env.SENDGRID_API_KEY) {
-                return {
-                    success: false,
-                    error: 'Email service not configured',
-                    details: 'SENDGRID_API_KEY missing',
-                };
-            }
-            if (!to) {
-                throw new Error('Recipient email address is required');
-            }
-
-            const cleanedTemplateId = (templateId || '').trim();
-            const isPlaceholder =
-                !cleanedTemplateId ||
-                (cleanedTemplateId.startsWith('d-') && cleanedTemplateId.includes('template_id'));
-            if (isPlaceholder) {
-                return {
-                    success: false,
-                    error: 'Invalid email template configuration',
-                    details: 'Template ID is not configured',
-                };
-            }
-
-            const safeSubject =
-                subject && String(subject).trim() ? String(subject).trim() : 'Peak Mode';
-            const mergedData = {
-                ...(dynamicData || {}),
-                ...subjectFields(safeSubject),
-            };
-
-            const msg = {
-                from: {
-                    email: this.fromEmail,
-                    name: this.supportSenderName || 'Peak Mode',
-                },
-                templateId: cleanedTemplateId,
-                personalizations: [
-                    {
-                        to: [{ email: to }],
-                        subject: safeSubject,
-                        dynamicTemplateData: mergedData,
-                    },
-                ],
-            };
-
-            this.applyHubAccountMailSettings(msg);
-            const response = await this.deliverSendGridMessage(msg, { hub: true });
-
-            return {
-                success: true,
-                message: 'Email sent successfully',
-                messageId: response[0]?.headers?.['x-message-id'],
-                timestamp: new Date().toISOString(),
-            };
-        } catch (error) {
-            const errorDetails = error.response?.body || error.message;
-            console.error('❌ Hub dynamic template send failed:', {
-                message: error.message,
-                response: error.response?.body,
-                to,
-                templateId,
-            });
-            return {
-                success: false,
-                error: 'Failed to send email',
-                details: errorDetails,
-                timestamp: new Date().toISOString(),
-            };
-        }
-    }
-
-    /**
-     * Verify SendGrid connection
-     * @returns {Promise<boolean>} True if connection is valid
-     */
     async verifyConnection() {
         try {
-            if (!process.env.SENDGRID_API_KEY) {
-                return false;
-            }
-            // Test connection by checking API key format (basic validation)
-            // In production, you might want to make a test API call
-            return !!process.env.SENDGRID_API_KEY && process.env.SENDGRID_API_KEY.length > 0;
+            const { verifyConfiguration } = require('../email/sendgridProvider');
+            return verifyConfiguration();
         } catch (error) {
             console.error('❌ SendGrid connection verification error:', error);
             return false;
@@ -461,21 +150,12 @@ class EmailService {
      */
     async sendWelcomeEmail(to, name) {
         try {
-            const templateId = process.env.SENDGRID_WELCOME_TEMPLATE_ID || 'd-welcome_template_id';
-            
-            const dynamicData = {
-                name: name || 'Valued Customer',
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'HUB_WELCOME_REGISTRATION',
                 to,
-                'Welcome to Peak Mode',
-                templateId,
-                dynamicData
+                { customer_name: name || 'Valued Customer' },
+                { idempotencyKey: `shop-welcome:${String(to).toLowerCase()}` },
             );
-
         } catch (error) {
             console.error('❌ Welcome email error:', error);
             return {
@@ -496,14 +176,9 @@ class EmailService {
      */
     async sendOrderConfirmationEmail(to, name, orderDetails, language = 'en') {
         try {
-            // Get language-specific template ID or fallback to default
-            const languageTemplates = {
-                'en': process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_EN || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id',
-                'sv': process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID_SV || process.env.SENDGRID_ORDER_CONFIRMATION_TEMPLATE_ID || 'd-order_confirmation_template_id'
-            };
-            
-            const templateId = languageTemplates[language] || languageTemplates['en'];
-            
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            const { buildOrderStatusUrl } = require('../email/emailUrls');
+
             // Calculate correct total from multiple possible sources
             const orderTotal = orderDetails.totals?.total || 
                               orderDetails.total || 
@@ -538,16 +213,12 @@ class EmailService {
             // Format address as plain text
             const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress || orderDetails.customer);
             
-            // Language-specific subject
-            const subjects = {
-                'en': `Order Confirmation - ${orderDetails.orderId}`,
-                'sv': `Orderbekräftelse - ${orderDetails.orderId}`
-            };
-            const subject = subjects[language] || subjects['en'];
-            
-            const dynamicData = {
+            const orderId = orderDetails.orderId || orderDetails.id || 'N/A';
+            const orderStatusUrl = buildOrderStatusUrl({ orderId });
+
+            const payload = {
                 customer_name: name || 'Valued Customer',
-                order_number: orderDetails.orderId || 'N/A',
+                order_number: orderId,
                 order_date: orderDetails.orderDate || orderDetails.createdAt || new Date().toISOString(),
                 order_total: `${orderTotal} ${currencySymbol}`,
                 order_currency: currency,
@@ -555,30 +226,39 @@ class EmailService {
                 order_items: formattedItems,
                 order_items_count: formattedItems.length,
                 shipping_address: formattedAddress,
-                order_status_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/track-order?orderId=${orderDetails.orderId}`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear(),
-                language: language
+                order_status_url: orderStatusUrl,
+                language,
             };
 
-            const result = await this.sendCustomEmail(
-                to,
-                subject,
-                templateId,
-                dynamicData
-            );
+            const result = await scheduleEmailCommunication({
+                communicationType: 'ORDER_CONFIRMATION',
+                recipient: to,
+                payload,
+                idempotencyKey: orderId && orderId !== 'N/A' ? `order-confirmation:${orderId}` : undefined,
+                correlationId: orderId !== 'N/A' ? String(orderId) : null,
+                processImmediately: true,
+            });
 
-            // Log communication if email was sent successfully
-            if (result.success && orderDetails.customer?.email) {
+            const legacyResult = {
+                success: Boolean(result.providerAccepted || result.success),
+                providerAccepted: result.providerAccepted,
+                status: result.status,
+                emailId: result.emailId,
+                duplicate: result.duplicate,
+                error: result.error,
+                details: result.error || result.details,
+            };
+
+            if (legacyResult.success && orderDetails.customer?.email) {
                 await this.logCommunication(orderDetails.customer.email, {
                     type: 'email',
-                    subject: `Order Confirmation - ${orderDetails.orderId}`,
-                    content: 'Order confirmation email sent',
-                    status: 'sent'
+                    subject: `Order Confirmation - ${orderId}`,
+                    content: 'Order confirmation email queued/sent',
+                    status: result.status || 'ACCEPTED',
                 });
             }
 
-            return result;
+            return legacyResult;
 
         } catch (error) {
             console.error('❌ Order confirmation email error:', error);
@@ -601,64 +281,40 @@ class EmailService {
      */
     async sendOrderReceiptEmail(to, name, order, language, pdfBuffer, filename) {
         try {
-            if (!process.env.SENDGRID_API_KEY) {
-                return { success: false, error: 'Email service not configured' };
-            }
             if (!to || !pdfBuffer || !Buffer.isBuffer(pdfBuffer)) {
                 return { success: false, error: 'Recipient and PDF buffer are required' };
             }
             const lang = (language || 'en').toLowerCase().startsWith('sv') ? 'sv' : 'en';
-            const subjects = {
-                en: `Your receipt — ${order.orderId || 'order'}`,
-                sv: `Ditt kvitto — ${order.orderId || 'order'}`
-            };
+            const orderId = order.orderId || 'order';
             const bodies = {
-                en: `<p>Hello ${name || 'customer'},</p>
-<p>Thank you for your purchase. Your <strong>PDF receipt</strong> is attached to this email.</p>
-<p>Order: <strong>${order.orderId || ''}</strong></p>
-<p>If you have questions, contact <a href="mailto:support@peakmode.se">support@peakmode.se</a>.</p>
-<p>Peak Mode — No Limits. Just Peaks.</p>`,
-                sv: `<p>Hej ${name || 'kund'},</p>
-<p>Tack för ditt köp. Ditt <strong>PDF-kvitto</strong> finns bifogat.</p>
-<p>Order: <strong>${order.orderId || ''}</strong></p>
-<p>Frågor? Kontakta <a href="mailto:support@peakmode.se">support@peakmode.se</a>.</p>
-<p>Peak Mode — No Limits. Just Peaks.</p>`
+                en: `<p>Hello ${name || 'customer'},</p><p>Thank you for your purchase. Your <strong>PDF receipt</strong> is attached.</p><p>Order: <strong>${orderId}</strong></p>`,
+                sv: `<p>Hej ${name || 'kund'},</p><p>Tack för ditt köp. Ditt <strong>PDF-kvitto</strong> är bifogat.</p><p>Order: <strong>${orderId}</strong></p>`,
             };
-            const msg = {
+            return this._schedule(
+                'ORDER_RECEIPT',
                 to,
-                from: {
-                    email: this.fromEmail,
-                    name: this.supportSenderName || 'Peak Mode'
+                {
+                    customer_name: name || 'customer',
+                    order_number: orderId,
+                    language: lang,
+                    html: bodies[lang],
+                    attachments: [{
+                        contentBase64: pdfBuffer.toString('base64'),
+                        filename: filename || `Receipt-${orderId}.pdf`,
+                        type: 'application/pdf',
+                    }],
                 },
-                subject: subjects[lang],
-                html: bodies[lang],
-                attachments: [{
-                    content: pdfBuffer.toString('base64'),
-                    filename: filename || `Receipt-${order.orderId}.pdf`,
-                    type: 'application/pdf',
-                    disposition: 'attachment'
-                }]
-            };
-            this.applyTransactionalMailSettings(msg);
-            const response = await sgMail.send(msg);
-            console.log(`✅ Receipt email sent to ${to}`, {
-                messageId: response[0]?.headers?.['x-message-id'],
-                statusCode: response[0]?.statusCode,
-                hasAttachment: true,
-                orderId: order?.orderId
-            });
-            return {
-                success: true,
-                messageId: response[0]?.headers?.['x-message-id'],
-                statusCode: response[0]?.statusCode,
-                timestamp: new Date().toISOString()
-            };
+                {
+                    idempotencyKey: `order-receipt:${orderId}`,
+                    correlationId: orderId,
+                },
+            );
         } catch (error) {
             console.error('❌ Order receipt email error:', error);
             return {
                 success: false,
                 error: error.message || 'Failed to send receipt email',
-                details: error.response?.body
+                details: error.message,
             };
         }
     }
@@ -668,61 +324,30 @@ class EmailService {
      */
     async sendOrderReceiptEmailNoAttachment(to, name, order, language) {
         try {
-            if (!process.env.SENDGRID_API_KEY) {
-                return { success: false, error: 'Email service not configured' };
-            }
-            if (!to) {
-                return { success: false, error: 'Recipient is required' };
-            }
+            if (!to) return { success: false, error: 'Recipient is required' };
             const lang = (language || 'en').toLowerCase().startsWith('sv') ? 'sv' : 'en';
-            const subjects = {
-                en: `Your receipt — ${order.orderId || 'order'}`,
-                sv: `Ditt kvitto — ${order.orderId || 'order'}`
-            };
+            const orderId = order.orderId || 'order';
             const bodies = {
-                en: `<p>Hello ${name || 'customer'},</p>
-<p>Thank you for your purchase.</p>
-<p><strong>Note:</strong> Our system could not generate the PDF receipt attachment at the moment, but your order is confirmed.</p>
-<p>Order: <strong>${order.orderId || ''}</strong></p>
-<p>If you need the PDF receipt, reply to this email or contact <a href="mailto:support@peakmode.se">support@peakmode.se</a> and we will resend it.</p>
-<p>Peak Mode — No Limits. Just Peaks.</p>`,
-                sv: `<p>Hej ${name || 'kund'},</p>
-<p>Tack för ditt köp.</p>
-<p><strong>Obs:</strong> Vi kunde inte skapa PDF-bilagan just nu, men din order är bekräftad.</p>
-<p>Order: <strong>${order.orderId || ''}</strong></p>
-<p>Behöver du PDF-kvittot? Svara på detta mail eller kontakta <a href="mailto:support@peakmode.se">support@peakmode.se</a> så skickar vi det igen.</p>
-<p>Peak Mode — No Limits. Just Peaks.</p>`
+                en: `<p>Hello ${name || 'customer'},</p><p>Your order is confirmed. PDF receipt generation failed temporarily — contact support if you need the PDF.</p><p>Order: <strong>${orderId}</strong></p>`,
+                sv: `<p>Hej ${name || 'kund'},</p><p>Din order är bekräftad. PDF-kvitto kunde inte skapas just nu — kontakta support om du behöver PDF.</p><p>Order: <strong>${orderId}</strong></p>`,
             };
-            const msg = {
+            return this._schedule(
+                'ORDER_RECEIPT_FALLBACK',
                 to,
-                from: {
-                    email: this.fromEmail,
-                    name: this.supportSenderName || 'Peak Mode'
+                {
+                    customer_name: name || 'customer',
+                    order_number: orderId,
+                    language: lang,
+                    html: bodies[lang],
                 },
-                subject: subjects[lang],
-                html: bodies[lang]
-            };
-            this.applyTransactionalMailSettings(msg);
-            const response = await sgMail.send(msg);
-            console.log(`✅ Receipt fallback email sent to ${to}`, {
-                messageId: response[0]?.headers?.['x-message-id'],
-                statusCode: response[0]?.statusCode,
-                hasAttachment: false,
-                orderId: order?.orderId
-            });
-            return {
-                success: true,
-                messageId: response[0]?.headers?.['x-message-id'],
-                statusCode: response[0]?.statusCode,
-                timestamp: new Date().toISOString()
-            };
+                {
+                    idempotencyKey: `order-receipt-fallback:${orderId}`,
+                    correlationId: orderId,
+                },
+            );
         } catch (error) {
             console.error('❌ Order receipt fallback email error:', error);
-            return {
-                success: false,
-                error: error.message || 'Failed to send receipt email',
-                details: error.response?.body
-            };
+            return { success: false, error: error.message || 'Failed to send receipt email' };
         }
     }
 
@@ -745,30 +370,25 @@ class EmailService {
      */
     async sendOrderProcessingEmail(to, orderDetails) {
         try {
-            const templateId = process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID || 'd-order_processing_template_id';
-            
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
             const orderCurrency = (orderDetails.currency || orderDetails.baseCurrency || 'SEK').toUpperCase();
             const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], orderCurrency);
             const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress || orderDetails.customer);
-            
-            const dynamicData = {
-                customer_name: orderDetails.customer?.name || 'Valued Customer',
-                order_number: orderDetails.orderId,
-                order_items: formattedItems,
-                order_items_count: formattedItems.length,
-                order_total: `${orderDetails.totals?.total || 0} ${orderCurrency}`,
-                shipping_address: formattedAddress,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                `Your Order ${orderDetails.orderId} is Being Processed`,
-                templateId,
-                dynamicData
-            );
-
+            const orderId = orderDetails.orderId;
+            return scheduleEmailCommunication({
+                communicationType: 'ORDER_PROCESSING',
+                recipient: to,
+                payload: {
+                    customer_name: orderDetails.customer?.name || 'Valued Customer',
+                    order_number: orderId,
+                    order_items: formattedItems,
+                    order_items_count: formattedItems.length,
+                    order_total: `${orderDetails.totals?.total || 0} ${orderCurrency}`,
+                    shipping_address: formattedAddress,
+                },
+                idempotencyKey: orderId ? `order-processing:${orderId}` : undefined,
+                correlationId: orderId,
+            });
         } catch (error) {
             console.error('❌ Order processing email error:', error);
             return {
@@ -787,31 +407,28 @@ class EmailService {
      */
     async sendShippingNotificationEmail(to, orderDetails) {
         try {
-            const templateId = process.env.SENDGRID_SHIPPING_NOTIFICATION_TEMPLATE_ID || 'd-shipping_notification_template_id';
-            
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            const { buildOrderStatusUrl } = require('../email/emailUrls');
             const orderCurrency = (orderDetails.currency || orderDetails.baseCurrency || 'SEK').toUpperCase();
             const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], orderCurrency);
             const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress || orderDetails.customer);
-            
-            const dynamicData = {
-                customer_name: orderDetails.customer?.name || 'Valued Customer',
-                order_number: orderDetails.orderId,
-                tracking_number: orderDetails.trackingNumber || 'N/A',
-                tracking_url: orderDetails.trackingUrl || '#',
-                order_items: formattedItems,
-                order_items_count: formattedItems.length,
-                shipping_address: formattedAddress,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                `Your Order ${orderDetails.orderId} Has Shipped`,
-                templateId,
-                dynamicData
-            );
-
+            const orderId = orderDetails.orderId;
+            const trackingUrl = orderDetails.trackingUrl || buildOrderStatusUrl({ orderId });
+            return scheduleEmailCommunication({
+                communicationType: 'SHIPMENT_DISPATCHED',
+                recipient: to,
+                payload: {
+                    customer_name: orderDetails.customer?.name || 'Valued Customer',
+                    order_number: orderId,
+                    tracking_number: orderDetails.trackingNumber || 'N/A',
+                    tracking_url: trackingUrl,
+                    order_items: formattedItems,
+                    order_items_count: formattedItems.length,
+                    shipping_address: formattedAddress,
+                },
+                idempotencyKey: orderId ? `shipment-dispatched:${orderId}` : undefined,
+                correlationId: orderId,
+            });
         } catch (error) {
             console.error('❌ Shipping notification email error:', error);
             return {
@@ -830,29 +447,24 @@ class EmailService {
      */
     async sendDeliveryConfirmationEmail(to, orderDetails) {
         try {
-            const templateId = process.env.SENDGRID_DELIVERY_CONFIRMATION_TEMPLATE_ID || 'd-delivery_confirmation_template_id';
-            
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
             const orderCurrency = (orderDetails.currency || orderDetails.baseCurrency || 'SEK').toUpperCase();
             const formattedItems = this.formatOrderItemsForEmail(orderDetails.items || [], orderCurrency);
             const formattedAddress = this.formatAddressForEmail(orderDetails.shippingAddress || orderDetails.customer);
-            
-            const dynamicData = {
-                customer_name: orderDetails.customer?.name || 'Valued Customer',
-                order_number: orderDetails.orderId,
-                order_items: formattedItems,
-                order_items_count: formattedItems.length,
-                shipping_address: formattedAddress,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                `Your Order ${orderDetails.orderId} Has Been Delivered`,
-                templateId,
-                dynamicData
-            );
-
+            const orderId = orderDetails.orderId;
+            return scheduleEmailCommunication({
+                communicationType: 'SHIPMENT_DELIVERED',
+                recipient: to,
+                payload: {
+                    customer_name: orderDetails.customer?.name || 'Valued Customer',
+                    order_number: orderId,
+                    order_items: formattedItems,
+                    order_items_count: formattedItems.length,
+                    shipping_address: formattedAddress,
+                },
+                idempotencyKey: orderId ? `shipment-delivered:${orderId}` : undefined,
+                correlationId: orderId,
+            });
         } catch (error) {
             console.error('❌ Delivery confirmation email error:', error);
             return {
@@ -871,23 +483,20 @@ class EmailService {
      */
     async sendReviewRequestEmail(to, orderDetails) {
         try {
-            const templateId = process.env.SENDGRID_REVIEW_REQUEST_TEMPLATE_ID || 'd-review_request_template_id';
-            
-            const dynamicData = {
-                customer_name: orderDetails.customer?.name || 'Valued Customer',
-                order_number: orderDetails.orderId,
-                review_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/review?orderId=${orderDetails.orderId}`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                `How Was Your Order?`,
-                templateId,
-                dynamicData
-            );
-
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            const { buildReviewUrl } = require('../email/emailUrls');
+            const orderId = orderDetails.orderId;
+            return scheduleEmailCommunication({
+                communicationType: 'REVIEW_REQUEST',
+                recipient: to,
+                payload: {
+                    customer_name: orderDetails.customer?.name || 'Valued Customer',
+                    order_number: orderId,
+                    review_url: buildReviewUrl({ orderId }),
+                },
+                idempotencyKey: orderId ? `review-request:${orderId}` : undefined,
+                correlationId: orderId,
+            });
         } catch (error) {
             console.error('❌ Review request email error:', error);
             return {
@@ -907,22 +516,17 @@ class EmailService {
      */
     async sendNewsletterWelcomeEmail(to, name, discountCode) {
         try {
-            const templateId = process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 'd-newsletter_welcome_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Peak Mode Member',
-                discount_code: discountCode,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                'Welcome to Peak Mode — Here\'s 10% OFF',
-                templateId,
-                dynamicData
-            );
-
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            return scheduleEmailCommunication({
+                communicationType: 'NEWSLETTER_WELCOME',
+                recipient: to,
+                payload: {
+                    customer_name: name || 'Peak Mode Member',
+                    discount_code: discountCode,
+                },
+                idempotencyKey: `newsletter-welcome:${String(to).toLowerCase()}`,
+                context: { marketingConsent: true },
+            });
         } catch (error) {
             console.error('❌ Newsletter welcome email error:', error);
             return {
@@ -942,22 +546,15 @@ class EmailService {
      */
     async sendDiscountReminderEmail(to, name, discountCode) {
         try {
-            const templateId = process.env.SENDGRID_DISCOUNT_REMINDER_TEMPLATE_ID || 'd-discount_reminder_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Peak Mode Member',
-                discount_code: discountCode,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'DISCOUNT_REMINDER',
                 to,
-                'Your Discount Code Awaits',
-                templateId,
-                dynamicData
+                { customer_name: name || 'Peak Mode Member', discount_code: discountCode },
+                {
+                    idempotencyKey: `discount-reminder:${String(to).toLowerCase()}`,
+                    context: { marketingConsent: true },
+                },
             );
-
         } catch (error) {
             console.error('❌ Discount reminder email error:', error);
             return {
@@ -1013,27 +610,18 @@ class EmailService {
      */
     async sendSupportConfirmationEmail(to, firstName, ticketId) {
         try {
-            // Check multiple possible environment variable names (handle typos/variations)
-            const templateId = process.env.SENDGRID_SUPPORT_CONFIRMATION_TEMPLATE_ID || 
-                               process.env.SENDGRID_SUPPORT_COMFIRMATION_TEMPLATE_ID || // Handle typo: COMFIRMATION
-                               process.env.SENDGRID_SUPPORT_CONFIRMATION_ID || // Handle missing _TEMPLATE
-                               'd-support_confirmation_template_id';
-            
-            const dynamicData = {
-                customer_name: firstName || 'Valued Customer',
-                ticket_id: ticketId || 'N/A',
-                support_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/support`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                `Support Request Received - ${ticketId}`,
-                templateId,
-                dynamicData
-            );
-
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            const tid = ticketId || 'N/A';
+            return scheduleEmailCommunication({
+                communicationType: 'SUPPORT_CONFIRMATION',
+                recipient: to,
+                payload: {
+                    customer_name: firstName || 'Valued Customer',
+                    ticket_id: tid,
+                },
+                idempotencyKey: tid !== 'N/A' ? `support-confirmation:${tid}` : undefined,
+                correlationId: tid,
+            });
         } catch (error) {
             console.error('❌ Support confirmation email error:', error);
             return {
@@ -1095,21 +683,14 @@ class EmailService {
      */
     async sendDropsConfirmationEmail(to, name) {
         try {
-            const templateId = process.env.SENDGRID_DROPS_CONFIRMATION_TEMPLATE_ID || 'd-drops_confirmation_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Peak Mode Member',
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                'You\'re Subscribed to New Drops!',
-                templateId,
-                dynamicData
-            );
-
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            return scheduleEmailCommunication({
+                communicationType: 'DROPS_CONFIRMATION',
+                recipient: to,
+                payload: { customer_name: name || 'Peak Mode Member' },
+                idempotencyKey: `drops-confirm:${String(to).toLowerCase()}`,
+                context: { marketingConsent: true },
+            });
         } catch (error) {
             console.error('❌ Drops confirmation email error:', error);
             return {
@@ -1129,24 +710,15 @@ class EmailService {
      */
     async sendDiscountCodeUpdateEmail(to, name, discountCode) {
         try {
-            const templateId = process.env.SENDGRID_DISCOUNT_CODE_UPDATE_TEMPLATE_ID || 
-                             process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 
-                             'd-discount_code_update_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Peak Mode Member',
-                discount_code: discountCode,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'DISCOUNT_CODE_UPDATE',
                 to,
-                'Your Discount Code Awaits',
-                templateId,
-                dynamicData
+                { customer_name: name || 'Peak Mode Member', discount_code: discountCode },
+                {
+                    idempotencyKey: `discount-update:${String(to).toLowerCase()}:${discountCode}`,
+                    context: { marketingConsent: true },
+                },
             );
-
         } catch (error) {
             console.error('❌ Discount code update email error:', error);
             return {
@@ -1165,23 +737,15 @@ class EmailService {
      */
     async sendUsedExpiredDiscountNotificationEmail(to, name) {
         try {
-            const templateId = process.env.SENDGRID_USED_EXPIRED_DISCOUNT_TEMPLATE_ID || 
-                             process.env.SENDGRID_DISCOUNT_REMINDER_TEMPLATE_ID || 
-                             'd-used_expired_discount_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Peak Mode Member',
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'DISCOUNT_EXPIRED',
                 to,
-                'Your Discount Code Has Expired',
-                templateId,
-                dynamicData
+                { customer_name: name || 'Peak Mode Member' },
+                {
+                    idempotencyKey: `discount-expired:${String(to).toLowerCase()}`,
+                    context: { marketingConsent: true },
+                },
             );
-
         } catch (error) {
             console.error('❌ Used/expired discount notification email error:', error);
             return {
@@ -1200,23 +764,14 @@ class EmailService {
      */
     async sendNewsletterConfirmationEmail(to, name) {
         try {
-            const templateId = process.env.SENDGRID_NEWSLETTER_CONFIRMATION_TEMPLATE_ID || 
-                             process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 
-                             'd-newsletter_confirmation_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Peak Mode Member',
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                'You\'re Subscribed to Our Newsletter!',
-                templateId,
-                dynamicData
-            );
-
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            return scheduleEmailCommunication({
+                communicationType: 'NEWSLETTER_CONFIRMATION',
+                recipient: to,
+                payload: { customer_name: name || 'Peak Mode Member' },
+                idempotencyKey: `newsletter-confirm:${String(to).toLowerCase()}`,
+                context: { marketingConsent: true },
+            });
         } catch (error) {
             console.error('❌ Newsletter confirmation email error:', error);
             return {
@@ -1235,23 +790,14 @@ class EmailService {
      */
     async sendMarketingConfirmationEmail(to, name) {
         try {
-            const templateId = process.env.SENDGRID_MARKETING_CONFIRMATION_TEMPLATE_ID || 
-                             process.env.SENDGRID_NEWSLETTER_WELCOME_TEMPLATE_ID || 
-                             'd-marketing_confirmation_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Peak Mode Member',
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                'Marketing Preferences Updated',
-                templateId,
-                dynamicData
-            );
-
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            return scheduleEmailCommunication({
+                communicationType: 'MARKETING_CONFIRMATION',
+                recipient: to,
+                payload: { customer_name: name || 'Peak Mode Member' },
+                idempotencyKey: `marketing-confirm:${String(to).toLowerCase()}`,
+                context: { marketingConsent: true },
+            });
         } catch (error) {
             console.error('❌ Marketing confirmation email error:', error);
             return {
@@ -1272,23 +818,20 @@ class EmailService {
      */
     async sendPaymentFailedEmail(to, name, orderNumber, retryUrl) {
         try {
-            const templateId = process.env.SENDGRID_PAYMENT_FAILED_TEMPLATE_ID || 'd-payment_failed_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                order_number: orderNumber || 'N/A',
-                retry_url: retryUrl || `${process.env.FRONTEND_URL || 'https://peakmode.se'}/checkout`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                `Payment Failed for Order ${orderNumber}`,
-                templateId,
-                dynamicData
-            );
-
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            const { buildCheckoutUrl } = require('../email/emailUrls');
+            const orderId = orderNumber || 'N/A';
+            return scheduleEmailCommunication({
+                communicationType: 'PAYMENT_FAILED',
+                recipient: to,
+                payload: {
+                    customer_name: name || 'Valued Customer',
+                    order_number: orderId,
+                    retry_url: retryUrl || buildCheckoutUrl({}),
+                },
+                idempotencyKey: orderId !== 'N/A' ? `payment-failed:${orderId}` : undefined,
+                correlationId: orderId,
+            });
         } catch (error) {
             console.error('❌ Payment failed email error:', error);
             return {
@@ -1311,35 +854,24 @@ class EmailService {
      */
     async sendAbandonedCartEmail(to, name, items, total, cartUrl, emailType = 'first') {
         try {
-            const templateId = emailType === 'second' 
-                ? (process.env.SENDGRID_ABANDONED_CART_SECOND_TEMPLATE_ID || process.env.SENDGRID_ABANDONED_CART_TEMPLATE_ID || 'd-abandoned_cart_second_template_id')
-                : (process.env.SENDGRID_ABANDONED_CART_TEMPLATE_ID || 'd-abandoned_cart_template_id');
-            
-            // Format items for email
+            const { scheduleEmailCommunication } = require('../communications/emailBridge');
+            const { buildCartUrl } = require('../email/emailUrls');
             const formattedItems = this.formatOrderItemsForEmail(items || [], 'SEK');
-            const currency = 'SEK';
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                cart_items: formattedItems,
-                cart_items_count: formattedItems.length,
-                cart_total: `${total || 0} ${currency}`,
-                cart_url: cartUrl || `${process.env.FRONTEND_URL || 'https://peakmode.se'}/cart`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            const subject = emailType === 'second' 
-                ? 'Complete Your Purchase - Final Reminder'
-                : 'You Left Items in Your Cart';
-
-            return await this.sendCustomEmail(
-                to,
-                subject,
-                templateId,
-                dynamicData
-            );
-
+            const typeKey = emailType === 'second' ? 'ABANDONED_CART_REMINDER' : 'ABANDONED_CART';
+            const cartLink = cartUrl || buildCartUrl({});
+            return scheduleEmailCommunication({
+                communicationType: typeKey,
+                recipient: to,
+                payload: {
+                    customer_name: name || 'Valued Customer',
+                    cart_items: formattedItems,
+                    cart_items_count: formattedItems.length,
+                    cart_total: `${total || 0} SEK`,
+                    cart_url: cartLink,
+                },
+                idempotencyKey: `${typeKey.toLowerCase()}:${String(to).toLowerCase()}`,
+                context: { marketingConsent: true },
+            });
         } catch (error) {
             console.error('❌ Abandoned cart email error:', error);
             return {
@@ -1359,24 +891,17 @@ class EmailService {
      */
     async sendReviewConfirmationEmail(to, name, reviewDetails) {
         try {
-            const templateId = process.env.SENDGRID_REVIEW_CONFIRMATION_TEMPLATE_ID || 'd-review_confirmation_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                product_name: reviewDetails.productName || 'Your Purchase',
-                rating: reviewDetails.rating || 5,
-                review_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/products/${reviewDetails.productId}`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'REVIEW_CONFIRMATION',
                 to,
-                'Thank You for Your Review!',
-                templateId,
-                dynamicData
+                {
+                    customer_name: name || 'Valued Customer',
+                    product_name: reviewDetails.productName || 'Your Purchase',
+                    rating: reviewDetails.rating || 5,
+                    product_id: reviewDetails.productId,
+                },
+                { idempotencyKey: `review-confirm:${reviewDetails.productId}:${String(to).toLowerCase()}` },
             );
-
         } catch (error) {
             console.error('❌ Review confirmation email error:', error);
             return {
@@ -1399,32 +924,23 @@ class EmailService {
      */
     async sendSupportInboxEmail({ fromEmail, fromName, subject, message, ticketId }) {
         try {
-            // Check multiple possible environment variable names (handle variations)
-            const templateId = process.env.SENDGRID_SUPPORT_INBOX_TEMPLATE_ID || 
-                               process.env.SENDGRID_SUPPORT_INBOX_ID || // Handle missing _TEMPLATE
-                               'd-support_inbox_template_id';
-            
-            const dynamicData = {
-                customer_name: fromName || 'Customer',
-                customer_email: fromEmail,
-                subject: subject,
-                message: message,
-                ticket_id: ticketId || 'N/A',
-                support_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/support`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            // Send to support inbox
             const toEmail = this.supportInboxEmail || this.adminNotificationEmail || 'support@peakmode.se';
-
-            return await this.sendCustomEmail(
+            const tid = ticketId || 'N/A';
+            return this._schedule(
+                'SUPPORT_INBOX',
                 toEmail,
-                `Support Request: ${subject} [${ticketId}]`,
-                templateId,
-                dynamicData
+                {
+                    customer_name: fromName || 'Customer',
+                    customer_email: fromEmail,
+                    subject,
+                    message,
+                    ticket_id: tid,
+                },
+                {
+                    idempotencyKey: tid !== 'N/A' ? `support-inbox:${tid}` : undefined,
+                    correlationId: tid,
+                },
             );
-
         } catch (error) {
             console.error('❌ Support inbox email error:', error);
             return {
@@ -1445,25 +961,27 @@ class EmailService {
      * @param {string} params.ticketId - Ticket ID
      * @returns {Promise<object>} Result object
      */
-    async sendSupportReplyEmail({ to, name, replyMessage, subject, ticketId }) {
+    async sendSupportReplyEmail({ to, name, replyMessage, subject, ticketId, messageId }) {
         try {
-            const templateId = process.env.SENDGRID_SUPPORT_REPLY_TEMPLATE_ID || 'd-support_reply_template_id';
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                reply_message: replyMessage,
-                original_subject: subject,
-                ticket_id: ticketId || 'N/A',
-                support_url: `${process.env.FRONTEND_URL || 'https://peakmode.se'}/support`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            const tid = ticketId || 'N/A';
+            const replyKey = messageId || crypto
+                .createHash('sha256')
+                .update(`${tid}|${replyMessage}|${subject}`)
+                .digest('hex')
+                .slice(0, 16);
+            return this._schedule(
+                'SUPPORT_REPLY',
                 to,
-                `Re: ${subject} [${ticketId}]`,
-                templateId,
-                dynamicData
+                {
+                    customer_name: name || 'Valued Customer',
+                    reply_message: replyMessage,
+                    original_subject: subject,
+                    ticket_id: tid,
+                },
+                {
+                    idempotencyKey: `support-reply:${tid}:${replyKey}`,
+                    correlationId: tid,
+                },
             );
 
         } catch (error) {
@@ -1523,107 +1041,41 @@ class EmailService {
                 };
             }
 
-            // Prepare email message
-            const msg = {
-                to: recipients,
-                from: {
-                    email: 'support@peakmode.se',
-                    name: 'Peak Mode Support'
+            const primary = recipients[0];
+            const attachmentUrls = (attachments || []).map((a) => ({
+                url: a.url || a.secure_url || a.path,
+                name: a.name || a.filename,
+                mimeType: a.mimeType || a.type,
+            })).filter((a) => a.url);
+
+            const composedKey = crypto
+                .createHash('sha256')
+                .update(`${primary}|${subject}|${message}|${recipients.join(',')}`)
+                .digest('hex')
+                .slice(0, 16);
+            return this._schedule(
+                'SUPPORT_COMPOSED',
+                primary,
+                {
+                    customer_name: 'Peak Mode Support',
+                    html: message.trim(),
+                    text: message.trim().replace(/<[^>]*>/g, ''),
+                    recipients,
+                    cc,
+                    bcc,
+                    attachmentUrls,
+                    composed_subject: subject.trim(),
                 },
-                subject: subject.trim(),
-                html: message.trim(),
-                text: message.trim().replace(/<[^>]*>/g, ''), // Strip HTML for plain text version
-            };
-
-            // Add CC if provided
-            if (cc && cc.length > 0) {
-                msg.cc = cc;
-            }
-
-            // Add BCC if provided
-            if (bcc && bcc.length > 0) {
-                msg.bcc = bcc;
-            }
-
-            // Handle attachments from Cloudinary URLs
-            if (attachments && attachments.length > 0) {
-                const https = require('https');
-                const http = require('http');
-                
-                msg.attachments = await Promise.all(
-                    attachments.map(async (attachment) => {
-                        try {
-                            const url = attachment.url || attachment.path || attachment.secure_url;
-                            if (!url) {
-                                console.warn(`⚠️ Attachment missing URL:`, attachment);
-                                return null;
-                            }
-
-                            // Download file from Cloudinary URL
-                            const fileContent = await new Promise((resolve, reject) => {
-                                const protocol = url.startsWith('https') ? https : http;
-                                protocol.get(url, (response) => {
-                                    if (response.statusCode !== 200) {
-                                        reject(new Error(`Failed to download attachment: ${response.statusCode}`));
-                                        return;
-                                    }
-                                    
-                                    const chunks = [];
-                                    response.on('data', (chunk) => chunks.push(chunk));
-                                    response.on('end', () => resolve(Buffer.concat(chunks)));
-                                    response.on('error', reject);
-                                }).on('error', reject);
-                            });
-
-                            // Convert to base64
-                            const base64Content = fileContent.toString('base64');
-                            
-                            return {
-                                content: base64Content,
-                                filename: attachment.name || attachment.filename || 'attachment',
-                                type: attachment.mimeType || attachment.type || 'application/octet-stream',
-                                disposition: 'attachment'
-                            };
-                        } catch (error) {
-                            console.error(`❌ Error processing attachment ${attachment.name}:`, error);
-                            // Continue without this attachment rather than failing the entire email
-                            return null;
-                        }
-                    })
-                );
-
-                // Filter out null attachments (failed downloads)
-                msg.attachments = msg.attachments.filter(Boolean);
-            }
-
-            this.applyTransactionalMailSettings(msg);
-            // Send email via SendGrid
-            const response = await sgMail.send(msg);
-
-            console.log(`✅ Composed email sent successfully to ${recipients.join(', ')}`, {
-                messageId: response[0]?.headers?.['x-message-id'],
-                statusCode: response[0]?.statusCode,
-                recipients: recipients.length,
-                cc: cc.length,
-                bcc: bcc.length,
-                attachments: msg.attachments?.length || 0
-            });
-
-            return {
-                success: true,
-                message: 'Email sent successfully',
-                messageId: response[0]?.headers?.['x-message-id'],
-                timestamp: new Date().toISOString()
-            };
-
+                {
+                    idempotencyKey: `support-composed:${primary}:${composedKey}`,
+                },
+            );
         } catch (error) {
             console.error('❌ Composed email error:', error);
-            const errorDetails = error.response?.body || error.message;
-            
             return {
                 success: false,
                 error: 'Failed to send composed email',
-                details: errorDetails
+                details: error.message,
             };
         }
     }
@@ -1637,23 +1089,19 @@ class EmailService {
      */
     async sendWaitlistConfirmationEmail(to, name, earlyAccessCode = null) {
         try {
-            const templateId = process.env.SENDGRID_WAITLIST_CONFIRMATION_TEMPLATE_ID || 'd-0bc36f5c95dc4f0a9a864a6ca90eb23d';
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                early_access_code: earlyAccessCode || '',
-                has_early_access_code: !!earlyAccessCode,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'WAITLIST_CONFIRMATION',
                 to,
-                earlyAccessCode ? 'Welcome to Peak Mode — You Have Early Access!' : 'Welcome to Peak Mode Waitlist!',
-                templateId,
-                dynamicData
+                {
+                    customer_name: name || 'Valued Customer',
+                    early_access_code: earlyAccessCode || '',
+                    has_early_access_code: !!earlyAccessCode,
+                },
+                {
+                    idempotencyKey: `waitlist:${String(to).toLowerCase()}`,
+                    context: { marketingConsent: true },
+                },
             );
-
         } catch (error) {
             console.error('❌ Waitlist confirmation email error:', error);
             return {
@@ -1673,23 +1121,19 @@ class EmailService {
      */
     async sendPrivateEarlyAccessNotificationEmail(to, name, earlyAccessCode = null) {
         try {
-            const templateId = process.env.SENDGRID_PRIVATE_EARLY_ACCESS_TEMPLATE_ID || 'd-00dc888e24b34a95a38a575f3f5abace';
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                early_access_code: earlyAccessCode || '',
-                has_early_access_code: !!earlyAccessCode,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'PRIVATE_EARLY_ACCESS',
                 to,
-                'Private Early Access to Peak Mode',
-                templateId,
-                dynamicData
+                {
+                    customer_name: name || 'Valued Customer',
+                    early_access_code: earlyAccessCode || '',
+                    has_early_access_code: !!earlyAccessCode,
+                },
+                {
+                    idempotencyKey: `early-access:${String(to).toLowerCase()}:${earlyAccessCode || 'none'}`,
+                    context: { marketingConsent: true },
+                },
             );
-
         } catch (error) {
             console.error('❌ Private early access notification email error:', error);
             return {
@@ -1708,9 +1152,6 @@ class EmailService {
      */
     async sendOrderStatusUpdateEmail(order, status) {
         try {
-            const templateId = process.env.SENDGRID_ORDER_STATUS_TEMPLATE_ID || 'd-17818c64b4e04e77b2c73a9df2544c77';
-            
-            // Get customer email
             const customerEmail = order.customer?.email || order.customerEmail || order.email;
             if (!customerEmail) {
                 throw new Error('Order does not have a customer email address');
@@ -1740,7 +1181,8 @@ class EmailService {
                 }
             };
 
-            // Prepare template data
+            const brand = buildBrandUrls();
+            const trackOrderUrl = buildOrderStatusUrl({ orderId: order.orderId });
             const dynamicTemplateData = {
                 customerName: order.customerName || 
                              order.customer?.name || 
@@ -1778,20 +1220,27 @@ class EmailService {
                             order.customer?.country || 
                             'Sweden'
                 },
-                supportEmail: 'support@peakmode.se',
-                trackOrderLink: `https://peakmode.se/track-order?orderId=${order.orderId}`,
-                websiteLink: 'https://peakmode.se'
+                supportEmail: brand.support_email,
+                trackOrderLink: trackOrderUrl,
+                websiteLink: brand.website_url,
             };
-
-            console.log(`📧 [ORDER STATUS EMAIL] Sending status update email to ${customerEmail} for order ${order.orderId}, status: ${status}`);
-
-            return await this.sendCustomEmail(
+            return this._schedule(
+                'ORDER_STATUS_UPDATE',
                 customerEmail,
-                `Order ${order.orderId} - ${statusText}`,
-                templateId,
-                dynamicTemplateData
+                {
+                    customer_name: dynamicTemplateData.customerName,
+                    order_number: order.orderId,
+                    track_order_url: trackOrderUrl,
+                    current_status: status,
+                    status_text: statusText,
+                    status_message: statusMessage,
+                    ...dynamicTemplateData,
+                },
+                {
+                    idempotencyKey: `order-status:${order.orderId}:${status}`,
+                    correlationId: order.orderId,
+                },
             );
-
         } catch (error) {
             console.error('❌ Order status update email error:', error);
             return {
@@ -1851,7 +1300,7 @@ class EmailService {
             'instabox': `https://track.instabox.se/${tracking}`
         };
 
-        return urls[provider] || `https://peakmode.se/track-order?orderId=${order.orderId}`;
+        return urls[provider] || buildOrderStatusUrl({ orderId: order.orderId });
     }
 
     /**
@@ -1891,48 +1340,20 @@ class EmailService {
     // --- Admin Invite Email Notifications (SendGrid dynamic templates) ---
 
     /** Template ID: email to invited admin when invite is created */
-    getAdminInviteTemplateId() {
-        return process.env.SENDGRID_ADMIN_INVITE_TEMPLATE_ID || 'd-d62edc6fd56841ca906a438abea625be';
-    }
-
-    /** Template ID: email to super admin confirming invite was sent */
-    getSuperAdminInviteNotificationTemplateId() {
-        return process.env.SENDGRID_SUPER_ADMIN_INVITE_TEMPLATE_ID || 'd-ec3c519de90a4af697e8a49f1fd36e73';
-    }
-
-    /** Template ID: email to both when admin account is activated */
-    getAdminActivatedTemplateId() {
-        return process.env.SENDGRID_ADMIN_ACTIVATED_TEMPLATE_ID || 'd-8cf19fba11dd4ff7bd34fcf9a8149ff3';
-    }
-
-    /** Template ID: Set Password (Admin) – reset link email */
-    getSetPasswordAdminTemplateId() {
-        return process.env.SENDGRID_SET_PASSWORD_ADMIN_TEMPLATE_ID || 'd-5b9b2995a206496987fa55ba5f130422';
-    }
-
-    /** Template ID: Password Set Successfully (admin) – after reset */
-    getPasswordSetSuccessfullyAdminTemplateId() {
-        return process.env.SENDGRID_PASSWORD_SET_SUCCESS_ADMIN_TEMPLATE_ID || 'd-f8b9dc0ff1d14d92b0f7e42ce3c0102e';
-    }
-
-    /**
-     * 1. Admin Invite Email – to the invited admin (after POST /api/admin/invite succeeds)
-     * @param {string} to - Invited admin email
-     * @param {object} data - { admin_name, admin_email, invited_by, invite_link, expiry_hours, year }
-     */
     async sendAdminInviteEmail(to, data) {
-        const templateId = this.getAdminInviteTemplateId();
-        const subject = "You've Been Invited to Join Peak Mode Admin";
-        const dynamicData = {
-            subject,
-            admin_name: data.admin_name || '',
-            admin_email: data.admin_email || to,
-            invited_by: data.invited_by || 'Peak Mode',
-            invite_link: data.invite_link || '',
-            expiry_hours: data.expiry_hours != null ? data.expiry_hours : 24,
-            year: data.year != null ? data.year : new Date().getFullYear()
-        };
-        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        const result = await this._schedule(
+            'ADMIN_INVITE',
+            to,
+            {
+                customer_name: data.admin_name || data.admin_email || to,
+                admin_name: data.admin_name || '',
+                admin_email: data.admin_email || to,
+                invited_by: data.invited_by || 'Peak Mode',
+                invite_link: data.invite_link || '',
+                expiry_hours: data.expiry_hours != null ? data.expiry_hours : 24,
+            },
+            { idempotencyKey: `admin-invite:${String(to).toLowerCase()}:${data.invite_link || ''}` },
+        );
         if (!result.success) {
             console.error('❌ [ADMIN INVITE EMAIL] Failed to send to invited admin:', to, result.error);
         }
@@ -1945,16 +1366,16 @@ class EmailService {
      * @param {object} data - { admin_name, admin_email, invite_link, year }
      */
     async sendSuperAdminInviteNotification(to, data) {
-        const templateId = this.getSuperAdminInviteNotificationTemplateId();
-        const subject = `Admin Invite Sent – ${data.admin_email || ''}`;
-        const dynamicData = {
-            subject,
-            admin_name: data.admin_name || '',
-            admin_email: data.admin_email || '',
-            invite_link: data.invite_link || '',
-            year: data.year != null ? data.year : new Date().getFullYear()
-        };
-        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        const result = await this._schedule(
+            'ADMIN_SUPER_INVITE_NOTIFY',
+            to,
+            {
+                admin_name: data.admin_name || '',
+                admin_email: data.admin_email || '',
+                invite_link: data.invite_link || '',
+            },
+            { idempotencyKey: `admin-invite-notify:${data.admin_email || to}` },
+        );
         if (!result.success) {
             console.error('❌ [ADMIN INVITE EMAIL] Failed to send super admin notification:', to, result.error);
         }
@@ -1967,16 +1388,16 @@ class EmailService {
      * @param {object} data - { admin_name, admin_email, activated_at, year }
      */
     async sendAdminActivatedEmail(to, data) {
-        const templateId = this.getAdminActivatedTemplateId();
-        const subject = `Admin Account Activated – ${data.admin_name || ''}`;
-        const dynamicData = {
-            subject,
-            admin_name: data.admin_name || '',
-            admin_email: data.admin_email || '',
-            activated_at: data.activated_at || new Date().toISOString(),
-            year: data.year != null ? data.year : new Date().getFullYear()
-        };
-        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        const result = await this._schedule(
+            'ADMIN_ACTIVATED',
+            to,
+            {
+                admin_name: data.admin_name || '',
+                admin_email: data.admin_email || '',
+                activated_at: data.activated_at || new Date().toISOString(),
+            },
+            { idempotencyKey: `admin-activated:${data.admin_email || to}` },
+        );
         if (!result.success) {
             console.error('❌ [ADMIN INVITE EMAIL] Failed to send activation notification:', to, result.error);
         }
@@ -1989,17 +1410,18 @@ class EmailService {
      * @param {object} data - { reset_link, admin_email, admin_name?, expiry_hours?, year }
      */
     async sendSetPasswordAdminEmail(to, data) {
-        const templateId = this.getSetPasswordAdminTemplateId();
-        const subject = 'Set Your Peak Mode Admin Password';
-        const dynamicData = {
-            subject,
-            reset_link: data.reset_link || '',
-            admin_email: data.admin_email || to,
-            admin_name: data.admin_name || '',
-            expiry_hours: data.expiry_hours != null ? data.expiry_hours : 1,
-            year: data.year != null ? data.year : new Date().getFullYear()
-        };
-        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        const link = normalizeAuthLink(data.reset_link || '');
+        const result = await this._schedule(
+            'ADMIN_SET_PASSWORD',
+            to,
+            {
+                reset_link: link,
+                admin_email: data.admin_email || to,
+                admin_name: data.admin_name || '',
+                expiry_hours: data.expiry_hours != null ? data.expiry_hours : 1,
+            },
+            { idempotencyKey: `admin-set-password:${to}:${link.slice(-12)}` },
+        );
         if (!result.success) {
             console.error('❌ [SET PASSWORD ADMIN] Failed to send reset link:', to, result.error);
         }
@@ -2012,16 +1434,18 @@ class EmailService {
      * @param {object} data - { admin_email, admin_name?, login_url?, year }
      */
     async sendPasswordSetSuccessfullyAdminEmail(to, data) {
-        const templateId = this.getPasswordSetSuccessfullyAdminTemplateId();
-        const subject = 'Password Set Successfully – Peak Mode Admin';
-        const dynamicData = {
-            subject,
-            admin_email: data.admin_email || to,
-            admin_name: data.admin_name || '',
-            login_url: data.login_url || '',
-            year: data.year != null ? data.year : new Date().getFullYear()
-        };
-        const result = await this.sendCustomEmail(to, subject, templateId, dynamicData);
+        const result = await this._schedule(
+            'ADMIN_PASSWORD_SET_SUCCESS',
+            to,
+            {
+                admin_email: data.admin_email || to,
+                admin_name: data.admin_name || '',
+                login_url: data.login_url || '',
+            },
+            {
+                idempotencyKey: `admin-password-set-ok:${to}:${data.resetEventId || 'unknown'}`,
+            },
+        );
         if (!result.success) {
             console.error('❌ [PASSWORD SET SUCCESS ADMIN] Failed to send confirmation:', to, result.error);
         }
@@ -2032,5 +1456,7 @@ class EmailService {
 // Export singleton instance
 module.exports = new EmailService();
 module.exports.getHubAuthTemplateIds = getHubAuthTemplateIds;
-module.exports.listHubTemplateConfiguration = listHubTemplateConfiguration;
+module.exports.listHubTemplateConfiguration =
+    listHubTemplateConfiguration ||
+    require('../email/emailDefinitions').listDefinitionsForDiagnostics;
 

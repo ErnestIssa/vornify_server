@@ -1,0 +1,52 @@
+/** Peak Mode email lifecycle — distinct from HTTP or SendGrid API success. */
+
+const STATUS = {
+  QUEUED: 'QUEUED',
+  PROCESSING: 'PROCESSING',
+  ACCEPTED: 'ACCEPTED',
+  DELIVERED: 'DELIVERED',
+  OPENED: 'OPENED',
+  CLICKED: 'CLICKED',
+  BOUNCED: 'BOUNCED',
+  BLOCKED: 'BLOCKED',
+  DROPPED: 'DROPPED',
+  SPAM_REPORTED: 'SPAM_REPORTED',
+  DEFERRED: 'DEFERRED',
+  FAILED: 'FAILED',
+  DEAD_LETTER: 'DEAD_LETTER',
+  CANCELLED: 'CANCELLED',
+};
+
+const CATEGORY = {
+  TRANSACTIONAL: 'TRANSACTIONAL',
+  MARKETING: 'MARKETING',
+};
+
+const PRIORITY = {
+  CRITICAL: 0,
+  HIGH: 1,
+  NORMAL: 2,
+  LOW: 3,
+};
+
+const TERMINAL_STATUSES = new Set([
+  STATUS.DELIVERED,
+  STATUS.BOUNCED,
+  STATUS.DROPPED,
+  STATUS.BLOCKED,
+  STATUS.SPAM_REPORTED,
+  STATUS.DEAD_LETTER,
+  STATUS.FAILED,
+]);
+
+function isProviderAccepted(status) {
+  return status === STATUS.ACCEPTED || status === STATUS.DELIVERED || status === STATUS.OPENED || status === STATUS.CLICKED;
+}
+
+module.exports = {
+  STATUS,
+  CATEGORY,
+  PRIORITY,
+  TERMINAL_STATUSES,
+  isProviderAccepted,
+};

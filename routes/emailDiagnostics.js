@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const emailService = require('../services/emailService');
+const { listDefinitionsForDiagnostics } = require('../email/emailDefinitions');
 
 /**
  * GET /api/email/diagnostics
@@ -33,9 +34,8 @@ router.get('/diagnostics', async (req, res) => {
                     configured: !!(process.env.HUB_ACCOUNT_PASSWORD_RESET || process.env.SENDGRID_PASSWORD_RESET_TEMPLATE_ID),
                     templateId: emailService.getHubAuthTemplateIds().passwordReset
                 },
-                hubAccountSecurity: emailService.listHubTemplateConfiguration
-                    ? emailService.listHubTemplateConfiguration()
-                    : {},
+                emailDefinitions: listDefinitionsForDiagnostics(),
+                hubAccountSecurity: listDefinitionsForDiagnostics(),
                 orderProcessing: {
                     configured: !!process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID,
                     templateId: process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID || 'not configured'

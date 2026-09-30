@@ -43,8 +43,10 @@ async function afterSuccessfulHubLogin(user, req) {
 
 async function afterLoginBlocked(user, req) {
   if (!user?.email) return;
+  const lockEvent = user.security?.lockedUntil || user.security?.lastFailedLoginAt || 'blocked';
   await hubAccountEmail.sendLoginBlockedEmail(user.email, user.name, {
     fallbackOrigin: req?.headers?.origin,
+    correlationId: lockEvent,
   });
 }
 

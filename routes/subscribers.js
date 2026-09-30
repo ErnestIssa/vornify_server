@@ -2,6 +2,7 @@ const express = require('express');
 const emailService = require('../services/emailService');
 const getDBInstance = require('../vornifydb/dbInstance');
 const crypto = require('crypto');
+const subscriberMarketing = require('../services/subscriberMarketingService');
 
 const router = express.Router();
 const db = getDBInstance();
@@ -111,26 +112,45 @@ router.post('/subscribe', async (req, res) => {
             let newWantsMarketing = originalPreferences.wantsMarketing;
             let newWantsDrops = originalPreferences.wantsDrops;
 
+            const marketingOptInRequested =
+                source === 'welcome_popup' ||
+                source === 'footer_drops' ||
+                (source === 'checkout' &&
+                    (wantsMarketing === true || wantsNewsletter === true || wantsDrops === true));
+
+            if (subscriber.unsubscribed && marketingOptInRequested) {
+                if (!req.body.explicitMarketingConsent) {
+                    devLog('[SUBSCRIBERS] skipped marketing opt-in — unsubscribed without explicit consent');
+                } else {
+                    await subscriberMarketing.applyResubscribe({
+                        email: normalizedEmail,
+                        source,
+                        ip: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip,
+                    });
+                    subscriber.unsubscribed = false;
+                }
+            }
+
             // Handle each source type
-            if (source === 'welcome_popup') {
+            if (source === 'welcome_popup' && !(subscriber.unsubscribed && !req.body.explicitMarketingConsent)) {
                 // Welcome popup: Set wantsMarketing = true
                 newWantsMarketing = true;
                 updates.wantsMarketing = true;
             } else if (source === 'checkout') {
-                // Checkout: Update flags based on what frontend sent
-                if (wantsNewsletter !== undefined) {
+                const blockMarketingFlags = subscriber.unsubscribed && !req.body.explicitMarketingConsent;
+                if (wantsNewsletter !== undefined && !(blockMarketingFlags && wantsNewsletter)) {
                     newWantsNewsletter = wantsNewsletter;
                     updates.wantsNewsletter = wantsNewsletter;
                 }
-                if (wantsMarketing !== undefined) {
+                if (wantsMarketing !== undefined && !(blockMarketingFlags && wantsMarketing)) {
                     newWantsMarketing = wantsMarketing;
                     updates.wantsMarketing = wantsMarketing;
                 }
-                if (wantsDrops !== undefined) {
+                if (wantsDrops !== undefined && !(blockMarketingFlags && wantsDrops)) {
                     newWantsDrops = wantsDrops;
                     updates.wantsDrops = wantsDrops;
                 }
-            } else if (source === 'footer_drops') {
+            } else if (source === 'footer_drops' && !(subscriber.unsubscribed && !req.body.explicitMarketingConsent)) {
                 // Footer drops: Set wantsDrops = true
                 newWantsDrops = true;
                 updates.wantsDrops = true;
@@ -548,57 +568,7 @@ router.post('/update-preferences', async (req, res) => {
     }
 });
 
-/**
- * POST /api/subscribers/unsubscribe
- * Unsubscribe from all emails
- */
-router.post('/unsubscribe', async (req, res) => {
-    try {
-        const { email } = req.body;
-
-        if (!email) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email is required'
-            });
-        }
-
-        const normalizedEmail = email.trim().toLowerCase();
-
-        const updateResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'subscribers',
-            command: '--update',
-            data: {
-                filter: { email: normalizedEmail },
-                update: {
-                    unsubscribed: true,
-                    updatedAt: new Date().toISOString()
-                }
-            }
-        });
-
-        if (!updateResult.success) {
-            return res.status(500).json({
-                success: false,
-                error: 'Failed to unsubscribe'
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'Successfully unsubscribed'
-        });
-
-    } catch (error) {
-        logger.error('subscribers_unsubscribe_error', { message: error.message });
-        res.status(500).json({
-            success: false,
-            error: 'Failed to unsubscribe',
-            details: error.message
-        });
-    }
-});
+/** Unsubscribe/resubscribe/preferences → routes/subscriberPreferences.js (mounted first on /api/subscribers) */
 
 /**
  * POST /api/subscribers/validate-discount

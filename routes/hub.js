@@ -108,4 +108,46 @@ router.post('/onboarding', authenticateMember, async (req, res) => {
   }
 });
 
+const notificationService = require('../notifications/notificationService');
+
+router.get('/notifications', authenticateMember, async (req, res) => {
+  try {
+    const userId = req.hubAuth?.userId || req.hubAuth?.id;
+    if (!userId) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const unreadOnly = req.query.unread === 'true';
+    const notifications = await notificationService.listForUser(userId, {
+      limit: parseInt(req.query.limit || '50', 10),
+      unreadOnly,
+    });
+    res.json({ success: true, notifications });
+  } catch (err) {
+    console.error('[hub notifications list]', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+router.post('/notifications/:notificationId/read', authenticateMember, async (req, res) => {
+  try {
+    const userId = req.hubAuth?.userId || req.hubAuth?.id;
+    if (!userId) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    await notificationService.markNotificationRead(req.params.notificationId, userId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[hub notifications read]', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+router.post('/notifications/read-all', authenticateMember, async (req, res) => {
+  try {
+    const userId = req.hubAuth?.userId || req.hubAuth?.id;
+    if (!userId) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    await notificationService.markAllNotificationsRead(userId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[hub notifications read-all]', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

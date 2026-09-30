@@ -7,6 +7,7 @@
     "start": "node app.js",
     "dev": "nodemon app.js",
     "test:staff-access": "node scripts/testStaffAccessPolicy.js && node scripts/staffAccessAcceptance.js",
+    "test:communications": "node scripts/testCommunications.js && node scripts/testCommunicationsIntegration.js && node scripts/testSendGridWebhookVerify.js && node scripts/testCommunicationsWorkerClaim.js && node scripts/testCommunicationsDurability.js && node scripts/testSubscriberMarketing.js",
     "vercel-build": "echo 'Building...'",
     "version:show": "npm pkg get version",
     "release:patch": "npm version patch --no-git-tag-version",

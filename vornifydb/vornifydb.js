@@ -211,6 +211,40 @@ class VortexDB {
                 }
             }
 
+            const commColl = peakmode.collection('communication_messages');
+            for (const { key, cacheKey } of [
+                { key: { status: 1, scheduledAt: 1, priority: 1 }, cacheKey: 'peakmode.communication_messages.worker' },
+                { key: { idempotencyKey: 1 }, cacheKey: 'peakmode.communication_messages.idempotencyKey' },
+                { key: { providerMessageId: 1 }, cacheKey: 'peakmode.communication_messages.providerMessageId' },
+                { key: { correlationId: 1 }, cacheKey: 'peakmode.communication_messages.correlationId' },
+                { key: { recipient: 1, createdAt: -1 }, cacheKey: 'peakmode.communication_messages.recipient_createdAt' },
+                { key: { communicationType: 1, createdAt: -1 }, cacheKey: 'peakmode.communication_messages.type_createdAt' },
+            ]) {
+                if (!this.indexCache.has(cacheKey)) {
+                    try {
+                        await commColl.createIndex(key, { background: true });
+                        this.indexCache.add(cacheKey);
+                    } catch (idxErr) {
+                        console.warn(`Warning: Could not create index ${cacheKey}:`, idxErr.message);
+                    }
+                }
+            }
+
+            const notificationsColl = peakmode.collection('notifications');
+            for (const { key, cacheKey } of [
+                { key: { userId: 1, createdAt: -1 }, cacheKey: 'peakmode.notifications.userId_createdAt' },
+                { key: { userId: 1, readAt: 1 }, cacheKey: 'peakmode.notifications.userId_readAt' },
+            ]) {
+                if (!this.indexCache.has(cacheKey)) {
+                    try {
+                        await notificationsColl.createIndex(key, { background: true });
+                        this.indexCache.add(cacheKey);
+                    } catch (idxErr) {
+                        console.warn(`Warning: Could not create index ${cacheKey}:`, idxErr.message);
+                    }
+                }
+            }
+
             // Admin shipping config collections (optional - may not exist yet)
             const shippingZonesColl = peakmode.collection('shipping_zones');
             const shippingMethodsColl = peakmode.collection('shipping_methods');

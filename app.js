@@ -24,6 +24,10 @@ const hubRoutes = require('./routes/hub');
 const emailStatsRoutes = require('./routes/emailStats');
 const emailVerificationRoutes = require('./routes/emailVerification');
 const emailDiagnosticsRoutes = require('./routes/emailDiagnostics');
+const emailWebhookRoutes = require('./routes/emailWebhook');
+const emailRouteGuard = require('./middleware/emailRouteGuard');
+const emailWorker = require('./email/emailWorker');
+const communicationsAdminRoutes = require('./routes/communicationsAdmin');
 const abandonedCartRoutes = require('./routes/abandonedCart');
 const paymentFailureRoutes = require('./routes/paymentFailure');
 const supportRoutes = require('./routes/support');
@@ -458,20 +462,22 @@ app.use('/api/vornifydb', dbRoutes);
 app.use('/api/vornifypay', paymentRoutes); // Legacy payment endpoint
 app.use('/api/payments', paymentRoutes); // New Stripe payment endpoints
 app.use('/api/storage', storageRoutes);
-app.use('/api/email', emailRoutes);
+app.use('/api/email/webhooks', emailWebhookRoutes);
+app.use('/api/email', emailRouteGuard, emailRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/uploads', cloudinaryUploadRoutes);
 app.use('/api/orders', ordersRoutes);
-app.use('/api/email-test', emailTestRoutes); // Email testing endpoints
+app.use('/api/email-test', emailRouteGuard, emailTestRoutes);
 app.use('/api/newsletter', newsletterRoutes); // Legacy newsletter endpoints (now uses new 'subscribers' collection)
+app.use('/api/subscribers', require('./routes/subscriberPreferences'));
 app.use('/api/subscribers', subscriberRoutes); // New unified subscriber system
 app.use('/api/waitlist', waitlistRoutes); // Waitlist system
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', googleAuthRoutes);
 app.use('/api/hub', hubRoutes);
 app.use('/api/email', emailStatsRoutes); // Email stats and logs
-app.use('/api/email/verify', emailVerificationRoutes); // Email verification and testing
-app.use('/api/email', emailDiagnosticsRoutes); // Email diagnostics
+app.use('/api/email/verify', emailRouteGuard, emailVerificationRoutes);
+app.use('/api/email', emailDiagnosticsRoutes);
 app.use('/api/abandoned-cart', abandonedCartRoutes); // Abandoned cart processing
 app.use('/api/payment-failure', paymentFailureRoutes); // Payment failure email processing
 app.use('/api/support', supportRoutes); // Support/contact messages
@@ -500,6 +506,7 @@ app.use('/api/admin/staff', adminStaffRoutes); // Staff access management
 app.use('/api/admin/tasks', adminTasksRoutes); // Internal tasks workspace
 app.use('/api/admin', adminSecurityRoutes); // MFA, sessions, audit
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
+app.use('/api/admin/communications', communicationsAdminRoutes);
 
 // Documentation routes
 app.get('/storage/docs', (req, res) => {
@@ -577,6 +584,22 @@ if (process.env.NODE_ENV !== 'test') {
             }, 60 * 1000)); // 1 minute
         } else {
             devLog('💳 [PAYMENT FAILURE] Service disabled (ENABLE_PAYMENT_FAILURE_EMAIL=false)');
+        }
+
+        if (process.env.ENABLE_EMAIL_WORKER !== 'false') {
+            devLog('📧 [EMAIL WORKER] Outbox processor enabled — every 30s');
+            trackTimeout(setTimeout(() => {
+                emailWorker.processPendingBatch(30).catch((err) => {
+                    console.error('❌ [EMAIL WORKER] Initial run error:', err);
+                });
+            }, 15_000));
+            trackInterval(setInterval(() => {
+                emailWorker.processPendingBatch(30).catch((err) => {
+                    console.error('❌ [EMAIL WORKER] Scheduled run error:', err);
+                });
+            }, 30_000);
+        } else {
+            devLog('📧 [EMAIL WORKER] Disabled (ENABLE_EMAIL_WORKER=false)');
         }
 
         // Start abandoned checkout processing (runs every 5 minutes to catch 10-minute windows)

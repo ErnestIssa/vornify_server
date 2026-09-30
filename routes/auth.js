@@ -9,6 +9,7 @@ const hubIdentity = require('../services/hub/hubIdentityService');
 const { normalizeEmail, authFail, authOk, CODES } = require('../lib/authResponse');
 const { buildPasswordResetLink } = require('../lib/authMailLinks');
 const { isAccountLocked, buildFailedLoginUpdate } = require('../lib/authSecurity');
+const { authEmailRateLimit } = require('../middleware/authEmailRateLimit');
 
 const db = getDBInstance();
 
@@ -20,6 +21,10 @@ function hashPassword(password) {
 // Helper function to generate random token
 function generateToken() {
     return crypto.randomBytes(32).toString('hex');
+}
+
+function hashKey(part) {
+    return crypto.createHash('sha256').update(String(part)).digest('hex').slice(0, 16);
 }
 
 // Helper function to generate JWT-like token (simplified - use jsonwebtoken in production)
@@ -125,8 +130,10 @@ router.post('/register', async (req, res) => {
         res.status(201).json({
             success: true,
             message: 'Account created successfully. Please check your email to verify your account.',
-            verificationEmailSent: Boolean(verifyDelivery.sent),
-            welcomeEmailSent: Boolean(welcomeResult.success),
+            verificationEmailSent: Boolean(verifyDelivery.sent && verifyDelivery.providerAccepted !== false),
+            verificationEmailStatus: verifyDelivery.status || null,
+            welcomeEmailSent: Boolean(welcomeResult.success || welcomeResult.providerAccepted),
+            welcomeEmailStatus: welcomeResult.status || null,
             user: {
                 email: newUser.email,
                 name: newUser.name,
@@ -355,7 +362,7 @@ router.post('/login', async (req, res) => {
 const GENERIC_RESET_SENT =
     "If an account exists for this email, we'll send you a password reset link.";
 
-router.post('/request-password-reset', async (req, res) => {
+router.post('/request-password-reset', authEmailRateLimit, async (req, res) => {
     try {
         const email = normalizeEmail(req.body.email);
 
@@ -486,8 +493,10 @@ router.post('/reset-password', async (req, res) => {
             });
         }
 
+        const resetEventId = user.resetToken ? hashKey(user.resetToken) : hashKey(normalizedEmail);
         await hubAccountEmail.sendPasswordResetSuccessEmail(user.email, user.name, {
             fallbackOrigin: req.headers.origin,
+            correlationId: resetEventId,
         });
 
         return authOk(res, { message: 'Your password has been updated.' });
@@ -506,7 +515,7 @@ router.post('/reset-password', async (req, res) => {
  * POST /api/auth/resend-verification
  * Resend verification email
  */
-router.post('/resend-verification', async (req, res) => {
+router.post('/resend-verification', authEmailRateLimit, async (req, res) => {
     try {
         const email = normalizeEmail(req.body.email);
         const genericSent = 'If this account needs verification, we sent a new link to that inbox.';
