@@ -74,6 +74,15 @@ router.post('/test', async (req, res) => {
                 );
                 break;
 
+            case 'email-verification':
+            case 'hub-email-verification':
+                result = await emailService.sendEmailVerificationEmail(
+                    email,
+                    'Test Customer',
+                    'https://peakmode.se/verify-email?token=test-token&email=' + encodeURIComponent(email)
+                );
+                break;
+
             case 'shipping-notification':
                 result = await emailService.sendShippingNotificationEmail(
                     email,

@@ -3,6 +3,7 @@ const router = express.Router();
 const authenticateMember = require('../middleware/authenticateMember');
 const hubIdentity = require('../services/hub/hubIdentityService');
 const hubAccountSecurityRoutes = require('./hubAccountSecurity');
+const hubVerificationEmail = require('../services/hub/hubVerificationEmail');
 
 /**
  * POST /api/hub/auth/check-email
@@ -18,7 +19,22 @@ router.post('/auth/check-email', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Enter a valid email address' });
     }
     const { existingCustomer, ...publicResult } = result;
-    res.json({ success: true, ...publicResult });
+    let verificationEmailSent;
+    if (publicResult.step === 'verify_email') {
+      const delivery = await hubVerificationEmail.sendVerificationEmail({
+        email,
+        fallbackOrigin: req.headers.origin,
+      });
+      verificationEmailSent = delivery.sent;
+      if (!delivery.sent && delivery.reason === 'rate_limited') {
+        verificationEmailSent = 'rate_limited';
+      }
+    }
+    res.json({
+      success: true,
+      ...publicResult,
+      ...(verificationEmailSent !== undefined ? { verificationEmailSent } : {}),
+    });
   } catch (err) {
     console.error('[hub check-email]', err);
     res.status(500).json({ success: false, error: 'Internal server error' });

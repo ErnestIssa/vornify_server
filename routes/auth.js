@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const getDBInstance = require('../vornifydb/dbInstance');
 const hubAccountEmail = require('../services/hub/hubAccountEmailService');
 const hubAuthLoginEvents = require('../services/hub/hubAuthLoginEvents');
+const hubVerificationEmail = require('../services/hub/hubVerificationEmail');
 const hubIdentity = require('../services/hub/hubIdentityService');
 const { normalizeEmail, authFail, authOk, CODES } = require('../lib/authResponse');
 const { buildPasswordResetLink } = require('../lib/authMailLinks');
@@ -103,15 +104,28 @@ router.post('/register', async (req, res) => {
             name: displayName,
         });
 
-        const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
-        await Promise.all([
+        const [welcomeResult, verifyDelivery] = await Promise.all([
             hubAccountEmail.sendAccountWelcomeEmail(normalizedRegisterEmail, displayName),
-            hubAccountEmail.sendEmailVerificationEmail(normalizedRegisterEmail, displayName, verificationLink),
+            hubVerificationEmail.sendVerificationEmail({
+                email: normalizedRegisterEmail,
+                user: { ...newUser, verificationToken, verificationExpiry: verificationExpiry.toISOString() },
+                fallbackOrigin: req.headers.origin,
+                forceNewToken: false,
+            }),
         ]);
+
+        if (!verifyDelivery.sent) {
+            console.error('[register] Verification email not sent:', verifyDelivery.reason, verifyDelivery.error);
+        }
+        if (!welcomeResult.success) {
+            console.error('[register] Welcome email not sent:', welcomeResult.error);
+        }
 
         res.status(201).json({
             success: true,
             message: 'Account created successfully. Please check your email to verify your account.',
+            verificationEmailSent: Boolean(verifyDelivery.sent),
+            welcomeEmailSent: Boolean(welcomeResult.success),
             user: {
                 email: newUser.email,
                 name: newUser.name,
@@ -284,12 +298,20 @@ router.post('/login', async (req, res) => {
         }
 
         if (!user.isVerified) {
+            const delivery = await hubVerificationEmail.sendVerificationEmail({
+                email,
+                user,
+                fallbackOrigin: req.headers.origin,
+            });
             return authFail(
                 res,
                 403,
                 CODES.EMAIL_VERIFICATION_REQUIRED,
                 'Please verify your email before signing in.',
-                { needsVerification: true }
+                {
+                    needsVerification: true,
+                    verificationEmailSent: Boolean(delivery.sent),
+                }
             );
         }
 
@@ -495,8 +517,14 @@ router.post('/resend-verification', async (req, res) => {
             return authOk(res, { message: 'Your email is already verified.', alreadyVerified: true });
         }
 
-        const lastSent = user.lastVerificationSentAt ? new Date(user.lastVerificationSentAt) : null;
-        if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) {
+        const delivery = await hubVerificationEmail.sendVerificationEmail({
+            email,
+            user,
+            fallbackOrigin: req.headers.origin,
+            forceNewToken: true,
+        });
+
+        if (delivery.reason === 'rate_limited') {
             return authFail(
                 res,
                 429,
@@ -505,28 +533,20 @@ router.post('/resend-verification', async (req, res) => {
             );
         }
 
-        const verificationToken = generateToken();
-        const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        if (!delivery.sent && delivery.reason !== 'no_account') {
+            console.error('[resend-verification] Send failed:', delivery.reason, delivery.error);
+            return authFail(
+                res,
+                503,
+                CODES.SERVICE_UNAVAILABLE,
+                'We could not send the verification email right now. Try again in a moment.'
+            );
+        }
 
-        await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--update',
-            data: {
-                filter: { email },
-                update: {
-                    verificationToken,
-                    verificationExpiry: verificationExpiry.toISOString(),
-                    lastVerificationSentAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString()
-                }
-            }
+        return authOk(res, {
+            message: genericSent,
+            verificationEmailSent: Boolean(delivery.sent),
         });
-
-        const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
-        await hubAccountEmail.sendEmailVerificationEmail(email, user.name, verificationLink);
-
-        return authOk(res, { message: genericSent });
     } catch (error) {
         console.error('Resend verification error:', error);
         return authFail(

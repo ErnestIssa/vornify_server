@@ -33,9 +33,14 @@ async function sendAccountWelcomeEmail(to, name) {
 }
 
 async function sendEmailVerificationEmail(to, name, verificationLink) {
+  const link = String(verificationLink || '').trim();
   return sendHubTemplate('emailVerification', to, 'Verify your email', {
     customer_name: customerName(name, to),
-    verification_link: verificationLink,
+    verification_link: link,
+    verification_url: link,
+    verify_link: link,
+    confirm_link: link,
+    action_url: link,
   });
 }
 
