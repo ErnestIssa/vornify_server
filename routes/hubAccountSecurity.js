@@ -67,7 +67,9 @@ router.post('/change-password', authenticateMember, async (req, res) => {
       return authFail(res, 500, CODES.INTERNAL_ERROR, 'Could not update password.');
     }
 
-    await hubAccountEmail.sendPasswordChangedEmail(email, user.name);
+    await hubAccountEmail.sendPasswordChangedEmail(email, user.name, {
+      fallbackOrigin: req.headers.origin,
+    });
     return authOk(res, { message: 'Password updated.' });
   } catch (err) {
     console.error('[hub change-password]', err);
@@ -107,7 +109,9 @@ router.post('/request-email-change', authenticateMember, async (req, res) => {
 
     const origin = getStorefrontOrigin(req.headers.origin);
     const confirmLink = `${origin}/hub/auth?email_change=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
-    await hubAccountEmail.sendEmailChangeConfirmationEmail(newEmail, user.name, confirmLink, newEmail);
+    await hubAccountEmail.sendEmailChangeConfirmationEmail(newEmail, user.name, confirmLink, newEmail, {
+      fallbackOrigin: req.headers.origin,
+    });
 
     return authOk(res, { message: 'If that address is valid, we sent a confirmation link.' });
   } catch (err) {
@@ -157,8 +161,12 @@ router.post('/confirm-email-change', async (req, res) => {
     }
 
     await Promise.all([
-      hubAccountEmail.sendEmailChangedEmail(newEmail, user.name, newEmail),
-      hubAccountEmail.sendEmailChangedEmail(oldEmail, user.name, newEmail),
+      hubAccountEmail.sendEmailChangedEmail(newEmail, user.name, newEmail, {
+        fallbackOrigin: req.headers.origin,
+      }),
+      hubAccountEmail.sendEmailChangedEmail(oldEmail, user.name, newEmail, {
+        fallbackOrigin: req.headers.origin,
+      }),
     ]);
 
     return authOk(res, { message: 'Your email address has been updated.', email: newEmail });
@@ -191,7 +199,9 @@ router.post('/recovery/request', async (req, res) => {
 
     const origin = getStorefrontOrigin(req.headers.origin);
     const recoveryLink = `${origin}/hub/auth?recovery=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
-    await hubAccountEmail.sendAccountRecoveryEmail(email, user.name, recoveryLink);
+    await hubAccountEmail.sendAccountRecoveryEmail(email, user.name, recoveryLink, {
+      fallbackOrigin: req.headers.origin,
+    });
 
     return authOk(res, { message: generic });
   } catch (err) {
@@ -222,7 +232,7 @@ router.post('/mfa/enable', authenticateMember, async (req, res) => {
       },
     });
 
-    await hubAccountEmail.sendMfaEnabledEmail(email, user.name);
+    await hubAccountEmail.sendMfaEnabledEmail(email, user.name, { fallbackOrigin: req.headers.origin });
     return authOk(res, { message: 'MFA enabled.', mfaEnabled: true });
   } catch (err) {
     console.error('[hub mfa enable]', err);
@@ -252,7 +262,7 @@ router.post('/mfa/disable', authenticateMember, async (req, res) => {
       },
     });
 
-    await hubAccountEmail.sendMfaDisabledEmail(email, user.name);
+    await hubAccountEmail.sendMfaDisabledEmail(email, user.name, { fallbackOrigin: req.headers.origin });
     return authOk(res, { message: 'MFA disabled.', mfaEnabled: false });
   } catch (err) {
     console.error('[hub mfa disable]', err);
@@ -288,7 +298,9 @@ router.post('/google/disconnect', authenticateMember, async (req, res) => {
       authProviders: providers,
     });
 
-    await hubAccountEmail.sendGoogleDisconnectedEmail(email, user.name);
+    await hubAccountEmail.sendGoogleDisconnectedEmail(email, user.name, {
+      fallbackOrigin: req.headers.origin,
+    });
     return authOk(res, { message: 'Google account disconnected.' });
   } catch (err) {
     console.error('[hub google disconnect]', err);
@@ -314,7 +326,9 @@ router.delete('/', authenticateMember, async (req, res) => {
       return authFail(res, 400, CODES.VALIDATION_ERROR, 'Confirm your email address to delete your account.');
     }
 
-    await hubAccountEmail.sendAccountDeletedEmail(email, user.name);
+    await hubAccountEmail.sendAccountDeletedEmail(email, user.name, {
+      fallbackOrigin: req.headers.origin,
+    });
 
     await db.executeOperation({
       database_name: 'peakmode',

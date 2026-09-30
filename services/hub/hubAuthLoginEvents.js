@@ -21,10 +21,18 @@ async function afterSuccessfulHubLogin(user, req) {
 
   const sends = [];
   if (isNewSession) {
-    sends.push(hubAccountEmail.sendNewLoginEmail(email, user.name, context));
+    sends.push(
+      hubAccountEmail.sendNewLoginEmail(email, user.name, context, {
+        fallbackOrigin: req.headers?.origin,
+      }),
+    );
   }
   if (suspiciousLogin) {
-    sends.push(hubAccountEmail.sendSuspiciousLoginEmail(email, user.name, context));
+    sends.push(
+      hubAccountEmail.sendSuspiciousLoginEmail(email, user.name, context, {
+        fallbackOrigin: req.headers?.origin,
+      }),
+    );
   }
   if (sends.length) {
     await Promise.all(sends);
@@ -33,9 +41,11 @@ async function afterSuccessfulHubLogin(user, req) {
   return { isNewSession, suspiciousLogin };
 }
 
-async function afterLoginBlocked(user) {
+async function afterLoginBlocked(user, req) {
   if (!user?.email) return;
-  await hubAccountEmail.sendLoginBlockedEmail(user.email, user.name);
+  await hubAccountEmail.sendLoginBlockedEmail(user.email, user.name, {
+    fallbackOrigin: req?.headers?.origin,
+  });
 }
 
 module.exports = {

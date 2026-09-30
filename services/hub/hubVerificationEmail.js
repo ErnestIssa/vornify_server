@@ -66,6 +66,7 @@ async function sendVerificationEmail({ email, user, fallbackOrigin, forceNewToke
     normalized,
     account.name,
     verificationLink,
+    { fallbackOrigin },
   );
 
   if (!mailResult.success) {

@@ -81,10 +81,11 @@ router.post('/google/code', async (req, res) => {
 
     const googleProfile = await googleOAuth.exchangeCodeForUser(String(code), 'postmessage');
     const { user, googleNewlyLinked, isNewAccount } = await googleAuthUser.upsertUserFromGoogle(googleProfile);
+    const mailOpts = { fallbackOrigin: req.headers.origin };
     if (isNewAccount) {
-      await hubAccountEmail.sendAccountWelcomeEmail(user.email, user.name);
+      await hubAccountEmail.sendAccountWelcomeEmail(user.email, user.name, mailOpts);
     } else if (googleNewlyLinked) {
-      await hubAccountEmail.sendGoogleConnectedEmail(user.email, user.name);
+      await hubAccountEmail.sendGoogleConnectedEmail(user.email, user.name, mailOpts);
     }
     await hubAuthLoginEvents.afterSuccessfulHubLogin(user, req);
     const payload = await buildGoogleAuthResponse(user, returnTo);

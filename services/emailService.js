@@ -1,6 +1,7 @@
 const sgMail = require('@sendgrid/mail');
 require('dotenv').config();
 const { normalizeAuthLink } = require('../lib/authMailLinks');
+const { subjectFields } = require('../lib/hubEmailPayload');
 
 function escapeHtml(value) {
     return String(value || '')
@@ -103,8 +104,45 @@ class EmailService {
         msg.trackingSettings = {
             ...(msg.trackingSettings || {}),
             clickTracking: { enable: false, enableText: false },
-            openTracking: { enable: process.env.SENDGRID_ENABLE_OPEN_TRACKING === 'true' }
+            openTracking: { enable: process.env.SENDGRID_ENABLE_OPEN_TRACKING === 'true' },
+            subscriptionTracking: { enable: false },
         };
+    }
+
+    /** Hub/account mail: bypass marketing suppressions, no SendGrid footer, reply-to support. */
+    applyHubAccountMailSettings(msg) {
+        this.applyTransactionalMailSettings(msg);
+        msg.mailSettings = {
+            ...(msg.mailSettings || {}),
+            bypassListManagement: { enable: true },
+            footer: { enable: false },
+            sandboxMode: { enable: false },
+        };
+        msg.replyTo = {
+            email: this.supportInboxEmail,
+            name: this.supportSenderName || 'Peak Mode Support',
+        };
+        msg.categories = ['peak-mode-hub-transactional'];
+    }
+
+    async deliverSendGridMessage(msg, meta = {}) {
+        const maxAttempts = 2;
+        let lastError;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const response = await sgMail.send(msg);
+                return response;
+            } catch (error) {
+                lastError = error;
+                const status = error.response?.statusCode;
+                const retryable = !status || status >= 500 || status === 429;
+                if (!retryable || attempt === maxAttempts) {
+                    throw error;
+                }
+                await new Promise((r) => setTimeout(r, 400 * attempt));
+            }
+        }
+        throw lastError;
     }
 
     /**
@@ -252,22 +290,26 @@ class EmailService {
                 msg.text = textContent;
                 msg.html = htmlContent;
             } else {
-                // Use template ID as normal
-                msg.templateId = cleanedTemplateId;
-                // Dynamic templates only show a subject if the template's Subject line uses a tag (e.g. {{subject}})
-                // or a static string in SendGrid. We pass several common aliases.
-                msg.dynamicTemplateData = {
+                const mergedData = {
                     ...(dynamicData || {}),
-                    subject: safeSubject,
-                    email_subject: safeSubject,
-                    Subject: safeSubject,
-                    subject_line: safeSubject
+                    ...subjectFields(safeSubject),
                 };
+                msg.templateId = cleanedTemplateId;
+                msg.personalizations = [
+                    {
+                        to: [{ email: to }],
+                        subject: safeSubject,
+                        dynamicTemplateData: mergedData,
+                    },
+                ];
+                delete msg.to;
+                delete msg.subject;
+                delete msg.dynamicTemplateData;
                 console.log(`📧 Attempting to send email to ${to} using template ${templateId.substring(0, 20)}...`);
             }
 
             this.applyTransactionalMailSettings(msg);
-            const response = await sgMail.send(msg);
+            const response = await this.deliverSendGridMessage(msg);
             
             console.log(`✅ Email sent successfully to ${to}`, {
                 messageId: response[0]?.headers?.['x-message-id'],
@@ -313,6 +355,82 @@ class EmailService {
                 error: userFriendlyError,
                 details: errorDetails,
                 timestamp: new Date().toISOString()
+            };
+        }
+    }
+
+    /**
+     * Hub account/security dynamic templates — full payload + deliverability settings.
+     */
+    async sendHubDynamicTemplateEmail(to, subject, templateId, dynamicData) {
+        try {
+            if (!process.env.SENDGRID_API_KEY) {
+                return {
+                    success: false,
+                    error: 'Email service not configured',
+                    details: 'SENDGRID_API_KEY missing',
+                };
+            }
+            if (!to) {
+                throw new Error('Recipient email address is required');
+            }
+
+            const cleanedTemplateId = (templateId || '').trim();
+            const isPlaceholder =
+                !cleanedTemplateId ||
+                (cleanedTemplateId.startsWith('d-') && cleanedTemplateId.includes('template_id'));
+            if (isPlaceholder) {
+                return {
+                    success: false,
+                    error: 'Invalid email template configuration',
+                    details: 'Template ID is not configured',
+                };
+            }
+
+            const safeSubject =
+                subject && String(subject).trim() ? String(subject).trim() : 'Peak Mode';
+            const mergedData = {
+                ...(dynamicData || {}),
+                ...subjectFields(safeSubject),
+            };
+
+            const msg = {
+                from: {
+                    email: this.fromEmail,
+                    name: this.supportSenderName || 'Peak Mode',
+                },
+                templateId: cleanedTemplateId,
+                personalizations: [
+                    {
+                        to: [{ email: to }],
+                        subject: safeSubject,
+                        dynamicTemplateData: mergedData,
+                    },
+                ],
+            };
+
+            this.applyHubAccountMailSettings(msg);
+            const response = await this.deliverSendGridMessage(msg, { hub: true });
+
+            return {
+                success: true,
+                message: 'Email sent successfully',
+                messageId: response[0]?.headers?.['x-message-id'],
+                timestamp: new Date().toISOString(),
+            };
+        } catch (error) {
+            const errorDetails = error.response?.body || error.message;
+            console.error('❌ Hub dynamic template send failed:', {
+                message: error.message,
+                response: error.response?.body,
+                to,
+                templateId,
+            });
+            return {
+                success: false,
+                error: 'Failed to send email',
+                details: errorDetails,
+                timestamp: new Date().toISOString(),
             };
         }
     }

@@ -104,8 +104,9 @@ router.post('/register', async (req, res) => {
             name: displayName,
         });
 
+        const mailOpts = { fallbackOrigin: req.headers.origin };
         const [welcomeResult, verifyDelivery] = await Promise.all([
-            hubAccountEmail.sendAccountWelcomeEmail(normalizedRegisterEmail, displayName),
+            hubAccountEmail.sendAccountWelcomeEmail(normalizedRegisterEmail, displayName, mailOpts),
             hubVerificationEmail.sendVerificationEmail({
                 email: normalizedRegisterEmail,
                 user: { ...newUser, verificationToken, verificationExpiry: verificationExpiry.toISOString() },
@@ -207,7 +208,9 @@ router.post('/verify-email', async (req, res) => {
         }
 
         const hubUrl = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/hub/dashboard`;
-        await hubAccountEmail.sendHubWelcomePostVerifyEmail(user.email, user.name, hubUrl);
+        await hubAccountEmail.sendHubWelcomePostVerifyEmail(user.email, user.name, hubUrl, {
+            fallbackOrigin: req.headers.origin,
+        });
 
         res.json({
             success: true,
@@ -269,7 +272,7 @@ router.post('/login', async (req, res) => {
             );
         }
         if (lockState.locked && lockState.reason === 'throttle') {
-            await hubAuthLoginEvents.afterLoginBlocked(user);
+            await hubAuthLoginEvents.afterLoginBlocked(user, req);
             return authFail(
                 res,
                 429,
@@ -292,7 +295,7 @@ router.post('/login', async (req, res) => {
                 }
             });
             if (failed.justLocked) {
-                await hubAuthLoginEvents.afterLoginBlocked({ ...user, security: failed.update.security });
+                await hubAuthLoginEvents.afterLoginBlocked({ ...user, security: failed.update.security }, req);
             }
             return genericFail();
         }
@@ -392,7 +395,9 @@ router.post('/request-password-reset', async (req, res) => {
             email,
             fallbackOrigin: req.headers.origin,
         });
-        await hubAccountEmail.sendPasswordResetEmail(email, resetLink);
+        await hubAccountEmail.sendPasswordResetEmail(email, resetLink, {
+            fallbackOrigin: req.headers.origin,
+        });
 
         return authOk(res, { message: GENERIC_RESET_SENT });
     } catch (error) {
@@ -481,7 +486,9 @@ router.post('/reset-password', async (req, res) => {
             });
         }
 
-        await hubAccountEmail.sendPasswordResetSuccessEmail(user.email, user.name);
+        await hubAccountEmail.sendPasswordResetSuccessEmail(user.email, user.name, {
+            fallbackOrigin: req.headers.origin,
+        });
 
         return authOk(res, { message: 'Your password has been updated.' });
     } catch (error) {
