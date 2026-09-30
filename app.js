@@ -597,7 +597,7 @@ if (process.env.NODE_ENV !== 'test') {
                 emailWorker.processPendingBatch(30).catch((err) => {
                     console.error('❌ [EMAIL WORKER] Scheduled run error:', err);
                 });
-            }, 30_000);
+            }, 30_000));
         } else {
             devLog('📧 [EMAIL WORKER] Disabled (ENABLE_EMAIL_WORKER=false)');
         }
