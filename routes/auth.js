@@ -11,7 +11,6 @@ const {
     buildFailedLoginUpdate,
     buildSuccessfulLoginUpdate,
 } = require('../lib/authSecurity');
-const { pickUserFromDbRead, hasUserFromDbRead } = require('../lib/userRead');
 
 const db = getDBInstance();
 
@@ -57,15 +56,8 @@ router.post('/register', async (req, res) => {
             });
         }
 
-        // Check if user already exists
-        const existingUser = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--read',
-            data: { filter: { email: email.toLowerCase() } }
-        });
-
-        if (existingUser.success && hasUserFromDbRead(existingUser.data)) {
+        const normalizedRegisterEmail = normalizeEmail(email);
+        if (await hubIdentity.findUserByEmail(normalizedRegisterEmail)) {
             return authFail(
                 res,
                 409,
@@ -164,15 +156,11 @@ router.post('/verify-email', async (req, res) => {
         }
 
         // Find user with token
-        const userResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--read',
-            data: { filter: { email: email.toLowerCase(), verificationToken: token } }
+        const user = await hubIdentity.findUserByEmailAndFields(email, {
+            verificationToken: token,
         });
 
-        const user = pickUserFromDbRead(userResult.data);
-        if (!userResult.success || !user) {
+        if (!user) {
             return authFail(
                 res,
                 400,
@@ -262,13 +250,6 @@ router.post('/login', async (req, res) => {
             return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter your password.');
         }
 
-        const userResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--read',
-            data: { filter: { email } }
-        });
-
         const genericFail = () =>
             authFail(
                 res,
@@ -277,11 +258,10 @@ router.post('/login', async (req, res) => {
                 "We couldn't sign you in with those details."
             );
 
-        const user = pickUserFromDbRead(userResult.data);
-        if (!userResult.success || !user) {
+        const user = await hubIdentity.findUserByEmail(email);
+        if (!user) {
             return genericFail();
         }
-
         const lockState = isAccountLocked(user);
         if (lockState.reason === 'banned') {
             return authFail(
@@ -386,18 +366,10 @@ router.post('/request-password-reset', async (req, res) => {
             return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter a valid email address.');
         }
 
-        const userResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--read',
-            data: { filter: { email } }
-        });
-
-        const user = pickUserFromDbRead(userResult.data);
-        if (!userResult.success || !user) {
+        const user = await hubIdentity.findUserByEmail(email);
+        if (!user) {
             return authOk(res, { message: GENERIC_RESET_SENT });
         }
-
         const lastSent = user.lastPasswordResetSentAt ? new Date(user.lastPasswordResetSentAt) : null;
         if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) {
             return authOk(res, { message: GENERIC_RESET_SENT });
@@ -467,15 +439,11 @@ router.post('/reset-password', async (req, res) => {
             );
         }
 
-        const userResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--read',
-            data: { filter: { email: normalizedEmail, resetToken: token } }
+        const user = await hubIdentity.findUserByEmailAndFields(normalizedEmail, {
+            resetToken: token,
         });
 
-        const user = pickUserFromDbRead(userResult.data);
-        if (!userResult.success || !user) {
+        if (!user) {
             return authFail(
                 res,
                 400,
@@ -561,15 +529,8 @@ router.post('/resend-verification', async (req, res) => {
             return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter a valid email address.');
         }
 
-        const userResult = await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--read',
-            data: { filter: { email } }
-        });
-
-        const user = pickUserFromDbRead(userResult.data);
-        if (!userResult.success || !user) {
+        const user = await hubIdentity.findUserByEmail(email);
+        if (!user) {
             return authOk(res, { message: genericSent });
         }
 

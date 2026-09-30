@@ -618,6 +618,18 @@ class VortexDB {
             if (data && data.inventoryFilter) {
                 return await this.handleInventoryQuery(collection, data);
             }
+
+            // Reads use { filter: { ... } }; updates use { filter, update }.
+            if (
+                query &&
+                typeof query === 'object' &&
+                !Array.isArray(query) &&
+                query.filter != null &&
+                typeof query.filter === 'object' &&
+                query.update === undefined
+            ) {
+                query = query.filter;
+            }
             
             // If data is empty or undefined, return all records
             if (!data || Object.keys(data).length === 0) {

@@ -3,7 +3,6 @@
  * Email is the join key until explicit customerId is stored on member.
  */
 const getDBInstance = require('../../vornifydb/dbInstance');
-const { pickUserFromDbRead } = require('../../lib/userRead');
 
 const db = getDBInstance();
 const DB = 'peakmode';
@@ -22,8 +21,10 @@ async function readOne(collection, filter) {
     data: { filter },
   });
   if (!result.success || result.data == null) return null;
-  if (Array.isArray(result.data)) return result.data.length > 0 ? result.data[0] : null;
-  return typeof result.data === 'object' ? result.data : null;
+  if (Array.isArray(result.data)) {
+    return result.data.length > 0 ? result.data[0] : null;
+  }
+  return result.data;
 }
 
 async function createDoc(collection, doc) {
@@ -47,14 +48,13 @@ async function updateDoc(collection, filter, update) {
 }
 
 async function findUserByEmail(email) {
-  const result = await db.executeOperation({
-    database_name: DB,
-    collection_name: 'users',
-    command: '--read',
-    data: { filter: { email: normalizeEmail(email) } },
-  });
-  if (!result.success || result.data == null) return null;
-  return pickUserFromDbRead(result.data);
+  return readOne('users', { email: normalizeEmail(email) });
+}
+
+async function findUserByEmailAndFields(email, fields = {}) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
+  return readOne('users', { email: normalized, ...fields });
 }
 
 async function findCustomerByEmail(email) {
@@ -277,6 +277,7 @@ async function completeOnboarding(email, payload) {
 module.exports = {
   normalizeEmail,
   findUserByEmail,
+  findUserByEmailAndFields,
   findCustomerByEmail,
   ensureCustomer,
   ensureMember,
