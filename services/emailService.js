@@ -1,5 +1,47 @@
 const sgMail = require('@sendgrid/mail');
 require('dotenv').config();
+const { normalizeAuthLink } = require('../lib/authMailLinks');
+
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function buildPasswordResetEmailBodies(resetLink, expiryHours = 1) {
+    const href = escapeHtml(resetLink);
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;line-height:1.5;color:#111;background:#f7f7f7;">
+  <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:28px 24px;">
+    <p style="margin:0 0 16px;">Hello,</p>
+    <p style="margin:0 0 20px;">We received a request to reset your Peak Mode account password. This link expires in ${expiryHours} hour.</p>
+    <p style="margin:0 0 24px;text-align:center;">
+      <a href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#000;color:#ffffff !important;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:600;font-size:16px;">Reset password</a>
+    </p>
+    <p style="margin:0 0 8px;font-size:13px;color:#555;">If the button does not work, open this link in your browser:</p>
+    <p style="margin:0 0 20px;font-size:13px;word-break:break-all;"><a href="${href}" target="_blank" rel="noopener noreferrer" style="color:#111;">${href}</a></p>
+    <p style="margin:0;font-size:13px;color:#777;">If you did not request a password reset, you can ignore this email.</p>
+    <p style="margin:24px 0 0;">— Peak Mode</p>
+  </div>
+</body>
+</html>`;
+    const text = [
+        'Hello,',
+        '',
+        `Reset your Peak Mode password (expires in ${expiryHours} hour):`,
+        '',
+        resetLink,
+        '',
+        'If you did not request this, ignore this email.',
+        '',
+        '— Peak Mode',
+    ].join('\n');
+    return { html, text };
+}
 
 /** Prefer Hub-specific Render env names, then legacy SENDGRID_* keys. */
 function resolveTemplateId(envKeys, legacyKey, fallback) {
@@ -75,6 +117,51 @@ class EmailService {
             clickTracking: { enable: false, enableText: false },
             openTracking: { enable: process.env.SENDGRID_ENABLE_OPEN_TRACKING === 'true' }
         };
+    }
+
+    /**
+     * HTML + plain text (no dynamic template) — reliable clickable links for auth mail.
+     */
+    async sendTransactionalHtmlEmail(to, subject, html, text) {
+        try {
+            if (!process.env.SENDGRID_API_KEY) {
+                return {
+                    success: false,
+                    error: 'Email service not configured',
+                    details: 'SENDGRID_API_KEY is not configured in environment variables',
+                };
+            }
+            if (!to) {
+                throw new Error('Recipient email address is required');
+            }
+            const safeSubject =
+                subject && String(subject).trim() ? String(subject).trim() : 'Email from Peak Mode';
+            const msg = {
+                to,
+                from: {
+                    email: this.fromEmail,
+                    name: this.supportSenderName || 'Peak Mode',
+                },
+                subject: safeSubject,
+                html,
+                text,
+            };
+            this.applyTransactionalMailSettings(msg);
+            const response = await sgMail.send(msg);
+            return {
+                success: true,
+                message: 'Email sent successfully',
+                messageId: response[0]?.headers?.['x-message-id'],
+                timestamp: new Date().toISOString(),
+            };
+        } catch (error) {
+            console.error('❌ Transactional HTML email error:', error.response?.body || error.message);
+            return {
+                success: false,
+                error: 'Failed to send email',
+                details: error.response?.body || error.message,
+            };
+        }
     }
 
     /**
@@ -541,28 +628,56 @@ class EmailService {
      */
     async sendPasswordResetEmail(to, resetLink) {
         try {
+            const expiryHours = 1;
+            const link = normalizeAuthLink(resetLink);
+            const { html, text } = buildPasswordResetEmailBodies(link, expiryHours);
+            const subject = 'Password Reset Request';
+
             const templateId = getHubAuthTemplateIds().passwordReset;
-            
-            const dynamicData = {
-                reset_link: resetLink,
-                expiry_hours: 1,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
+            const cleanedTemplateId = (templateId || '').trim();
+            const isPlaceholder =
+                !cleanedTemplateId ||
+                (cleanedTemplateId.startsWith('d-') && cleanedTemplateId.includes('template_id'));
+            const useSendGridTemplate =
+                process.env.HUB_ACCOUNT_PASSWORD_RESET_USE_SENDGRID_TEMPLATE === 'true';
 
-            return await this.sendCustomEmail(
-                to,
-                'Password Reset Request',
-                templateId,
-                dynamicData
-            );
+            if (useSendGridTemplate && !isPlaceholder) {
+                const href = escapeHtml(link);
+                const dynamicData = {
+                    reset_link: link,
+                    resetLink: link,
+                    reset_url: link,
+                    password_reset_link: link,
+                    action_url: link,
+                    button_url: link,
+                    reset_link_html: `<a href="${href}" target="_blank" rel="noopener noreferrer" style="color:#111;">Reset password</a>`,
+                    reset_button_html: `<a href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#000;color:#fff !important;text-decoration:none;padding:14px 24px;border-radius:8px;font-weight:600;">Reset password</a>`,
+                    expiry_hours: expiryHours,
+                    website_url: 'https://peakmode.se',
+                    year: new Date().getFullYear(),
+                };
+                const templateResult = await this.sendCustomEmail(
+                    to,
+                    subject,
+                    cleanedTemplateId,
+                    dynamicData,
+                );
+                if (templateResult.success) {
+                    return templateResult;
+                }
+                console.warn(
+                    '⚠️ Password reset SendGrid template failed; sending built-in HTML email instead.',
+                    templateResult.error,
+                );
+            }
 
+            return await this.sendTransactionalHtmlEmail(to, subject, html, text);
         } catch (error) {
             console.error('❌ Password reset email error:', error);
             return {
                 success: false,
                 error: 'Failed to send password reset email',
-                details: error.message
+                details: error.message,
             };
         }
     }

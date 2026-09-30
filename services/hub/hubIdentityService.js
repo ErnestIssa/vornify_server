@@ -3,6 +3,7 @@
  * Email is the join key until explicit customerId is stored on member.
  */
 const getDBInstance = require('../../vornifydb/dbInstance');
+const { pickUserFromDbRead } = require('../../lib/userRead');
 
 const db = getDBInstance();
 const DB = 'peakmode';
@@ -20,8 +21,9 @@ async function readOne(collection, filter) {
     command: '--read',
     data: { filter },
   });
-  if (!result.success || !result.data) return null;
-  return Array.isArray(result.data) ? result.data[0] : result.data;
+  if (!result.success || result.data == null) return null;
+  if (Array.isArray(result.data)) return result.data.length > 0 ? result.data[0] : null;
+  return typeof result.data === 'object' ? result.data : null;
 }
 
 async function createDoc(collection, doc) {
@@ -45,7 +47,14 @@ async function updateDoc(collection, filter, update) {
 }
 
 async function findUserByEmail(email) {
-  return readOne('users', { email: normalizeEmail(email) });
+  const result = await db.executeOperation({
+    database_name: DB,
+    collection_name: 'users',
+    command: '--read',
+    data: { filter: { email: normalizeEmail(email) } },
+  });
+  if (!result.success || result.data == null) return null;
+  return pickUserFromDbRead(result.data);
 }
 
 async function findCustomerByEmail(email) {

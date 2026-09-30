@@ -5,11 +5,13 @@ const getDBInstance = require('../vornifydb/dbInstance');
 const emailService = require('../services/emailService');
 const hubIdentity = require('../services/hub/hubIdentityService');
 const { normalizeEmail, authFail, authOk, CODES } = require('../lib/authResponse');
+const { buildPasswordResetLink } = require('../lib/authMailLinks');
 const {
     isAccountLocked,
     buildFailedLoginUpdate,
     buildSuccessfulLoginUpdate,
 } = require('../lib/authSecurity');
+const { pickUserFromDbRead, hasUserFromDbRead } = require('../lib/userRead');
 
 const db = getDBInstance();
 
@@ -63,7 +65,7 @@ router.post('/register', async (req, res) => {
             data: { filter: { email: email.toLowerCase() } }
         });
 
-        if (existingUser.success && existingUser.data) {
+        if (existingUser.success && hasUserFromDbRead(existingUser.data)) {
             return authFail(
                 res,
                 409,
@@ -169,7 +171,8 @@ router.post('/verify-email', async (req, res) => {
             data: { filter: { email: email.toLowerCase(), verificationToken: token } }
         });
 
-        if (!userResult.success || !userResult.data) {
+        const user = pickUserFromDbRead(userResult.data);
+        if (!userResult.success || !user) {
             return authFail(
                 res,
                 400,
@@ -177,8 +180,6 @@ router.post('/verify-email', async (req, res) => {
                 'This verification link is no longer valid.'
             );
         }
-
-        const user = userResult.data;
 
         if (user.isVerified) {
             return authOk(res, { message: 'Your email is already verified.', alreadyVerified: true });
@@ -276,11 +277,11 @@ router.post('/login', async (req, res) => {
                 "We couldn't sign you in with those details."
             );
 
-        if (!userResult.success || !userResult.data) {
+        const user = pickUserFromDbRead(userResult.data);
+        if (!userResult.success || !user) {
             return genericFail();
         }
 
-        const user = userResult.data;
         const lockState = isAccountLocked(user);
         if (lockState.reason === 'banned') {
             return authFail(
@@ -392,11 +393,11 @@ router.post('/request-password-reset', async (req, res) => {
             data: { filter: { email } }
         });
 
-        if (!userResult.success || !userResult.data) {
+        const user = pickUserFromDbRead(userResult.data);
+        if (!userResult.success || !user) {
             return authOk(res, { message: GENERIC_RESET_SENT });
         }
 
-        const user = userResult.data;
         const lastSent = user.lastPasswordResetSentAt ? new Date(user.lastPasswordResetSentAt) : null;
         if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) {
             return authOk(res, { message: GENERIC_RESET_SENT });
@@ -421,7 +422,11 @@ router.post('/request-password-reset', async (req, res) => {
         });
 
         try {
-            const resetLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
+            const resetLink = buildPasswordResetLink({
+                token: resetToken,
+                email,
+                fallbackOrigin: req.headers.origin,
+            });
             await emailService.sendPasswordResetEmail(email, resetLink);
             console.log(`✅ Password reset email sent to ${email}`);
         } catch (emailError) {
@@ -469,7 +474,8 @@ router.post('/reset-password', async (req, res) => {
             data: { filter: { email: normalizedEmail, resetToken: token } }
         });
 
-        if (!userResult.success || !userResult.data) {
+        const user = pickUserFromDbRead(userResult.data);
+        if (!userResult.success || !user) {
             return authFail(
                 res,
                 400,
@@ -477,8 +483,6 @@ router.post('/reset-password', async (req, res) => {
                 'This password reset link is no longer valid.'
             );
         }
-
-        const user = userResult.data;
 
         if (new Date() > new Date(user.resetExpiry)) {
             return authFail(
@@ -564,11 +568,10 @@ router.post('/resend-verification', async (req, res) => {
             data: { filter: { email } }
         });
 
-        if (!userResult.success || !userResult.data) {
+        const user = pickUserFromDbRead(userResult.data);
+        if (!userResult.success || !user) {
             return authOk(res, { message: genericSent });
         }
-
-        const user = userResult.data;
 
         if (user.isVerified) {
             return authOk(res, { message: 'Your email is already verified.', alreadyVerified: true });

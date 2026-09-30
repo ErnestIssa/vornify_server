@@ -14,8 +14,7 @@ router.post('/auth/check-email', async (req, res) => {
     if (result.step === 'invalid') {
       return res.status(400).json({ success: false, error: 'Enter a valid email address' });
     }
-    const { existingCustomer, ...publicResult } = result;
-    res.json({ success: true, ...publicResult });
+    res.json({ success: true, ...result });
   } catch (err) {
     console.error('[hub check-email]', err);
     res.status(500).json({ success: false, error: 'Internal server error' });

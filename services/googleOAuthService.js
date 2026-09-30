@@ -17,8 +17,8 @@ function getOAuthConfig() {
 }
 
 function isGoogleOAuthConfigured() {
-  const { clientId, clientSecret, redirectUri } = getOAuthConfig();
-  return Boolean(clientId && clientSecret && redirectUri);
+  const { clientId, clientSecret } = getOAuthConfig();
+  return Boolean(clientId && clientSecret);
 }
 
 function stateSecret() {
@@ -87,8 +87,9 @@ function sanitizeReturnTo(returnTo) {
   return path;
 }
 
-async function exchangeCodeForUser(code) {
-  const { clientId, clientSecret, redirectUri } = getOAuthConfig();
+async function exchangeCodeForUser(code, redirectUriOverride) {
+  const { clientId, clientSecret, redirectUri: configuredRedirect } = getOAuthConfig();
+  const redirectUri = redirectUriOverride || configuredRedirect;
   if (!clientId || !clientSecret || !redirectUri) {
     throw new Error('Google OAuth is not configured');
   }
