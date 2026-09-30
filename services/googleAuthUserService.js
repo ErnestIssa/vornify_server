@@ -14,15 +14,7 @@ function randomPasswordPlaceholder() {
 }
 
 async function readUserByEmail(email) {
-  const normalized = hubIdentity.normalizeEmail(email);
-  const result = await db.executeOperation({
-    database_name: DB,
-    collection_name: 'users',
-    command: '--read',
-    data: { filter: { email: normalized } },
-  });
-  if (!result.success || !result.data) return null;
-  return result.data;
+  return hubIdentity.findUserByEmail(email);
 }
 
 /**
@@ -32,10 +24,15 @@ async function upsertUserFromGoogle(googleProfile) {
   const email = hubIdentity.normalizeEmail(googleProfile.email);
   const now = new Date().toISOString();
   let user = await readUserByEmail(email);
+  let googleNewlyLinked = false;
+  let isNewAccount = false;
 
   if (user) {
     const authProviders = Array.isArray(user.authProviders) ? [...user.authProviders] : [];
-    if (!authProviders.includes('google')) authProviders.push('google');
+    if (!authProviders.includes('google')) {
+      authProviders.push('google');
+      googleNewlyLinked = true;
+    }
 
     const update = {
       googleId: googleProfile.googleId,
@@ -56,8 +53,10 @@ async function upsertUserFromGoogle(googleProfile) {
       command: '--update',
       data: { filter: { email }, update },
     });
-    user = { ...user, ...update, email };
+    user = { ...user, ...update, email, googleNewlyLinked };
   } else {
+    googleNewlyLinked = true;
+    isNewAccount = true;
     const newUser = {
       email,
       password: randomPasswordPlaceholder(),
@@ -79,7 +78,7 @@ async function upsertUserFromGoogle(googleProfile) {
     if (!result.success) {
       throw new Error('failed_to_create_user');
     }
-    user = newUser;
+    user = { ...newUser, googleNewlyLinked };
   }
 
   await hubIdentity.ensureCustomer({ email, name: user.name });
@@ -90,7 +89,11 @@ async function upsertUserFromGoogle(googleProfile) {
     name: user.name,
   });
 
-  return user;
+  return {
+    user,
+    googleNewlyLinked: Boolean(googleNewlyLinked),
+    isNewAccount,
+  };
 }
 
 async function createLoginExchangeCode(sessionPayload) {

@@ -2,15 +2,12 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const getDBInstance = require('../vornifydb/dbInstance');
-const emailService = require('../services/emailService');
+const hubAccountEmail = require('../services/hub/hubAccountEmailService');
+const hubAuthLoginEvents = require('../services/hub/hubAuthLoginEvents');
 const hubIdentity = require('../services/hub/hubIdentityService');
 const { normalizeEmail, authFail, authOk, CODES } = require('../lib/authResponse');
 const { buildPasswordResetLink } = require('../lib/authMailLinks');
-const {
-    isAccountLocked,
-    buildFailedLoginUpdate,
-    buildSuccessfulLoginUpdate,
-} = require('../lib/authSecurity');
+const { isAccountLocked, buildFailedLoginUpdate } = require('../lib/authSecurity');
 
 const db = getDBInstance();
 
@@ -74,6 +71,7 @@ router.post('/register', async (req, res) => {
         const newUser = {
             email: email.toLowerCase(),
             password: hashPassword(password),
+            passwordUserSet: true,
             name: displayName,
             phone: phone || '',
             isVerified: false,
@@ -105,21 +103,11 @@ router.post('/register', async (req, res) => {
             name: displayName,
         });
 
-        // Send email verification email
-        try {
-            const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
-            
-            await emailService.sendEmailVerificationEmail(
-                email,
-                name,
-                verificationLink
-            );
-            
-            console.log(`✅ Verification email sent to ${email}`);
-        } catch (emailError) {
-            console.error('⚠️ Failed to send verification email:', emailError);
-            // Don't fail registration if email fails
-        }
+        const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
+        await Promise.all([
+            hubAccountEmail.sendAccountWelcomeEmail(normalizedRegisterEmail, displayName),
+            hubAccountEmail.sendEmailVerificationEmail(normalizedRegisterEmail, displayName, verificationLink),
+        ]);
 
         res.status(201).json({
             success: true,
@@ -204,21 +192,8 @@ router.post('/verify-email', async (req, res) => {
             });
         }
 
-        // Send account setup confirmation email
-        try {
-            const hubUrl = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/hub/dashboard`;
-            
-            await emailService.sendAccountSetupEmail(
-                user.email,
-                user.name,
-                hubUrl
-            );
-            
-            console.log(`✅ Account setup email sent to ${user.email}`);
-        } catch (emailError) {
-            console.error('⚠️ Failed to send account setup email:', emailError);
-            // Don't fail verification if email fails
-        }
+        const hubUrl = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/hub/dashboard`;
+        await hubAccountEmail.sendHubWelcomePostVerifyEmail(user.email, user.name, hubUrl);
 
         res.json({
             success: true,
@@ -280,6 +255,7 @@ router.post('/login', async (req, res) => {
             );
         }
         if (lockState.locked && lockState.reason === 'throttle') {
+            await hubAuthLoginEvents.afterLoginBlocked(user);
             return authFail(
                 res,
                 429,
@@ -291,15 +267,19 @@ router.post('/login', async (req, res) => {
 
         const hashedPassword = hashPassword(password);
         if (user.password !== hashedPassword) {
+            const failed = buildFailedLoginUpdate(user);
             await db.executeOperation({
                 database_name: 'peakmode',
                 collection_name: 'users',
                 command: '--update',
                 data: {
                     filter: { email },
-                    update: buildFailedLoginUpdate(user)
+                    update: failed.update
                 }
             });
+            if (failed.justLocked) {
+                await hubAuthLoginEvents.afterLoginBlocked({ ...user, security: failed.update.security });
+            }
             return genericFail();
         }
 
@@ -313,15 +293,7 @@ router.post('/login', async (req, res) => {
             );
         }
 
-        await db.executeOperation({
-            database_name: 'peakmode',
-            collection_name: 'users',
-            command: '--update',
-            data: {
-                filter: { email },
-                update: buildSuccessfulLoginUpdate(user)
-            }
-        });
+        await hubAuthLoginEvents.afterSuccessfulHubLogin(user, req);
 
         const authToken = generateAuthToken(user._id || user.email, user.email);
         const hubSession = await hubIdentity.provisionForAuthenticatedUser(user);
@@ -393,17 +365,12 @@ router.post('/request-password-reset', async (req, res) => {
             }
         });
 
-        try {
-            const resetLink = buildPasswordResetLink({
-                token: resetToken,
-                email,
-                fallbackOrigin: req.headers.origin,
-            });
-            await emailService.sendPasswordResetEmail(email, resetLink);
-            console.log(`✅ Password reset email sent to ${email}`);
-        } catch (emailError) {
-            console.error('⚠️ Failed to send password reset email:', emailError);
-        }
+        const resetLink = buildPasswordResetLink({
+            token: resetToken,
+            email,
+            fallbackOrigin: req.headers.origin,
+        });
+        await hubAccountEmail.sendPasswordResetEmail(email, resetLink);
 
         return authOk(res, { message: GENERIC_RESET_SENT });
     } catch (error) {
@@ -470,6 +437,7 @@ router.post('/reset-password', async (req, res) => {
                 filter: { email: normalizedEmail },
                 update: {
                     password: hashPassword(newPassword),
+                    passwordUserSet: true,
                     resetToken: null,
                     resetExpiry: null,
                     security: {
@@ -491,18 +459,7 @@ router.post('/reset-password', async (req, res) => {
             });
         }
 
-        // Send password reset success email
-        try {
-            await emailService.sendPasswordResetSuccessEmail(
-                user.email,
-                user.name
-            );
-            
-            console.log(`✅ Password reset success email sent to ${user.email}`);
-        } catch (emailError) {
-            console.error('⚠️ Failed to send password reset success email:', emailError);
-            // Don't fail password reset if email fails
-        }
+        await hubAccountEmail.sendPasswordResetSuccessEmail(user.email, user.name);
 
         return authOk(res, { message: 'Your password has been updated.' });
     } catch (error) {
@@ -567,7 +524,7 @@ router.post('/resend-verification', async (req, res) => {
         });
 
         const verificationLink = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
-        await emailService.sendEmailVerificationEmail(email, user.name, verificationLink);
+        await hubAccountEmail.sendEmailVerificationEmail(email, user.name, verificationLink);
 
         return authOk(res, { message: genericSent });
     } catch (error) {

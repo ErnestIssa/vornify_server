@@ -2,11 +2,14 @@ const express = require('express');
 const router = express.Router();
 const authenticateMember = require('../middleware/authenticateMember');
 const hubIdentity = require('../services/hub/hubIdentityService');
+const hubAccountSecurityRoutes = require('./hubAccountSecurity');
 
 /**
  * POST /api/hub/auth/check-email
  * Two-step login: determine next screen (password | register | verify_email).
  */
+router.use('/account', hubAccountSecurityRoutes);
+
 router.post('/auth/check-email', async (req, res) => {
   try {
     const { email } = req.body;

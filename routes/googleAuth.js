@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const hubIdentity = require('../services/hub/hubIdentityService');
+const hubAccountEmail = require('../services/hub/hubAccountEmailService');
+const hubAuthLoginEvents = require('../services/hub/hubAuthLoginEvents');
 const googleOAuth = require('../services/googleOAuthService');
 const googleAuthUser = require('../services/googleAuthUserService');
 const { authFail, authOk, CODES } = require('../lib/authResponse');
@@ -78,7 +80,13 @@ router.post('/google/code', async (req, res) => {
     }
 
     const googleProfile = await googleOAuth.exchangeCodeForUser(String(code), 'postmessage');
-    const user = await googleAuthUser.upsertUserFromGoogle(googleProfile);
+    const { user, googleNewlyLinked, isNewAccount } = await googleAuthUser.upsertUserFromGoogle(googleProfile);
+    if (isNewAccount) {
+      await hubAccountEmail.sendAccountWelcomeEmail(user.email, user.name);
+    } else if (googleNewlyLinked) {
+      await hubAccountEmail.sendGoogleConnectedEmail(user.email, user.name);
+    }
+    await hubAuthLoginEvents.afterSuccessfulHubLogin(user, req);
     const payload = await buildGoogleAuthResponse(user, returnTo);
 
     return authOk(res, payload);

@@ -33,20 +33,9 @@ router.get('/diagnostics', async (req, res) => {
                     configured: !!(process.env.HUB_ACCOUNT_PASSWORD_RESET || process.env.SENDGRID_PASSWORD_RESET_TEMPLATE_ID),
                     templateId: emailService.getHubAuthTemplateIds().passwordReset
                 },
-                hubAuth: {
-                    emailVerification: {
-                        configured: !!(process.env.EMAIL_VERIFICATION_HUB_ACCOUNT || process.env.SENDGRID_EMAIL_VERIFICATION_TEMPLATE_ID),
-                        templateId: emailService.getHubAuthTemplateIds().emailVerification
-                    },
-                    passwordResetSuccess: {
-                        configured: !!(process.env.HUB_ACCOUNT_PASSWORD_RESET_SUCCESS || process.env.SENDGRID_PASSWORD_RESET_SUCCESS_TEMPLATE_ID),
-                        templateId: emailService.getHubAuthTemplateIds().passwordResetSuccess
-                    },
-                    hubWelcome: {
-                        configured: !!(process.env.HUB_WELCOME_EMAIL || process.env.SENDGRID_ACCOUNT_SETUP_TEMPLATE_ID),
-                        templateId: emailService.getHubAuthTemplateIds().hubWelcome
-                    }
-                },
+                hubAccountSecurity: emailService.listHubTemplateConfiguration
+                    ? emailService.listHubTemplateConfiguration()
+                    : {},
                 orderProcessing: {
                     configured: !!process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID,
                     templateId: process.env.SENDGRID_ORDER_PROCESSING_TEMPLATE_ID || 'not configured'

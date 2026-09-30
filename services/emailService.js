@@ -59,29 +59,17 @@ function resolveTemplateId(envKeys, legacyKey, fallback) {
     return fallback;
 }
 
+const {
+    getHubAuthTemplateIds: getHubAuthTemplateIdsFromLib,
+    listHubTemplateConfiguration,
+} = require('../lib/hubAuthTemplates');
+
+function hubAccountEmail() {
+    return require('./hub/hubAccountEmailService');
+}
+
 function getHubAuthTemplateIds() {
-    return {
-        emailVerification: resolveTemplateId(
-            'EMAIL_VERIFICATION_HUB_ACCOUNT',
-            'SENDGRID_EMAIL_VERIFICATION_TEMPLATE_ID',
-            'd-email_verification_template_id'
-        ),
-        passwordReset: resolveTemplateId(
-            'HUB_ACCOUNT_PASSWORD_RESET',
-            'SENDGRID_PASSWORD_RESET_TEMPLATE_ID',
-            'd-password_reset_template_id'
-        ),
-        passwordResetSuccess: resolveTemplateId(
-            'HUB_ACCOUNT_PASSWORD_RESET_SUCCESS',
-            'SENDGRID_PASSWORD_RESET_SUCCESS_TEMPLATE_ID',
-            'd-password_reset_success_template_id'
-        ),
-        hubWelcome: resolveTemplateId(
-            'HUB_WELCOME_EMAIL',
-            'SENDGRID_ACCOUNT_SETUP_TEMPLATE_ID',
-            'd-account_setup_template_id'
-        ),
-    };
+    return getHubAuthTemplateIdsFromLib();
 }
 
 /**
@@ -627,59 +615,8 @@ class EmailService {
      * @returns {Promise<object>} Result object
      */
     async sendPasswordResetEmail(to, resetLink) {
-        try {
-            const expiryHours = 1;
-            const link = normalizeAuthLink(resetLink);
-            const { html, text } = buildPasswordResetEmailBodies(link, expiryHours);
-            const subject = 'Password Reset Request';
-
-            const templateId = getHubAuthTemplateIds().passwordReset;
-            const cleanedTemplateId = (templateId || '').trim();
-            const isPlaceholder =
-                !cleanedTemplateId ||
-                (cleanedTemplateId.startsWith('d-') && cleanedTemplateId.includes('template_id'));
-            const useSendGridTemplate =
-                process.env.HUB_ACCOUNT_PASSWORD_RESET_USE_SENDGRID_TEMPLATE === 'true';
-
-            if (useSendGridTemplate && !isPlaceholder) {
-                const href = escapeHtml(link);
-                const dynamicData = {
-                    reset_link: link,
-                    resetLink: link,
-                    reset_url: link,
-                    password_reset_link: link,
-                    action_url: link,
-                    button_url: link,
-                    reset_link_html: `<a href="${href}" target="_blank" rel="noopener noreferrer" style="color:#111;">Reset password</a>`,
-                    reset_button_html: `<a href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#000;color:#fff !important;text-decoration:none;padding:14px 24px;border-radius:8px;font-weight:600;">Reset password</a>`,
-                    expiry_hours: expiryHours,
-                    website_url: 'https://peakmode.se',
-                    year: new Date().getFullYear(),
-                };
-                const templateResult = await this.sendCustomEmail(
-                    to,
-                    subject,
-                    cleanedTemplateId,
-                    dynamicData,
-                );
-                if (templateResult.success) {
-                    return templateResult;
-                }
-                console.warn(
-                    '⚠️ Password reset SendGrid template failed; sending built-in HTML email instead.',
-                    templateResult.error,
-                );
-            }
-
-            return await this.sendTransactionalHtmlEmail(to, subject, html, text);
-        } catch (error) {
-            console.error('❌ Password reset email error:', error);
-            return {
-                success: false,
-                error: 'Failed to send password reset email',
-                details: error.message,
-            };
-        }
+        const link = normalizeAuthLink(resetLink);
+        return hubAccountEmail().sendPasswordResetEmail(to, link);
     }
 
     /**
@@ -921,31 +858,11 @@ class EmailService {
      * @returns {Promise<object>} Result object
      */
     async sendAccountSetupEmail(to, name, hubUrl) {
-        try {
-            const templateId = getHubAuthTemplateIds().hubWelcome;
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                hub_url: hubUrl || `${process.env.FRONTEND_URL || 'https://peakmode.se'}/hub/dashboard`,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                'Welcome to Peak Mode Hub',
-                templateId,
-                dynamicData
-            );
-
-        } catch (error) {
-            console.error('❌ Account setup email error:', error);
-            return {
-                success: false,
-                error: 'Failed to send account setup email',
-                details: error.message
-            };
-        }
+        return hubAccountEmail().sendHubWelcomePostVerifyEmail(
+            to,
+            name,
+            hubUrl || `${process.env.FRONTEND_URL || 'https://peakmode.se'}/hub/dashboard`,
+        );
     }
 
     /**
@@ -956,31 +873,7 @@ class EmailService {
      * @returns {Promise<object>} Result object
      */
     async sendEmailVerificationEmail(to, name, verificationLink) {
-        try {
-            const templateId = getHubAuthTemplateIds().emailVerification;
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                verification_link: verificationLink,
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                'Verify Your Email Address',
-                templateId,
-                dynamicData
-            );
-
-        } catch (error) {
-            console.error('❌ Email verification error:', error);
-            return {
-                success: false,
-                error: 'Failed to send email verification',
-                details: error.message
-            };
-        }
+        return hubAccountEmail().sendEmailVerificationEmail(to, name, verificationLink);
     }
 
     /**
@@ -990,30 +883,7 @@ class EmailService {
      * @returns {Promise<object>} Result object
      */
     async sendPasswordResetSuccessEmail(to, name) {
-        try {
-            const templateId = getHubAuthTemplateIds().passwordResetSuccess;
-            
-            const dynamicData = {
-                customer_name: name || 'Valued Customer',
-                website_url: 'https://peakmode.se',
-                year: new Date().getFullYear()
-            };
-
-            return await this.sendCustomEmail(
-                to,
-                'Password Successfully Reset',
-                templateId,
-                dynamicData
-            );
-
-        } catch (error) {
-            console.error('❌ Password reset success email error:', error);
-            return {
-                success: false,
-                error: 'Failed to send password reset success email',
-                details: error.message
-            };
-        }
+        return hubAccountEmail().sendPasswordResetSuccessEmail(to, name);
     }
 
     /**
@@ -2044,4 +1914,5 @@ class EmailService {
 // Export singleton instance
 module.exports = new EmailService();
 module.exports.getHubAuthTemplateIds = getHubAuthTemplateIds;
+module.exports.listHubTemplateConfiguration = listHubTemplateConfiguration;
 
