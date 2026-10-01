@@ -41,6 +41,7 @@ function buildBrandUrls(fallbackOrigin) {
     company_name: 'Peak Mode',
     brand_name: 'Peak Mode',
     year: new Date().getFullYear(),
+    current_year: new Date().getFullYear(),
   };
 }
 

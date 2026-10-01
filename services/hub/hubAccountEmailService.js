@@ -229,12 +229,15 @@ async function sendMfaDisabledEmail(to, name, options = {}) {
 
 async function sendAccountRecoveryEmail(to, name, recoveryLink, options = {}) {
   const requestedAt = options.requestedAt || new Date().toISOString();
+  const link = String(recoveryLink || '').trim();
   return sendLegacy(
     'accountRecovery',
     to,
     {
       customer_name: customerName(name, to),
-      recoveryUrl: recoveryLink,
+      recoveryUrl: link,
+      recovery_url: link,
+      recoveryLink: link,
       request_date: requestedAt,
       recovery_requested_at: requestedAt,
     },

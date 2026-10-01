@@ -56,14 +56,20 @@ function formatDisplayName(rawName, email) {
 
 function formatDateTime(iso, lang) {
   if (!iso) return '';
+  const raw = String(iso).trim();
+  if (!raw) return '';
+  if (!/\dT\d/.test(raw) && !/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    return raw;
+  }
   try {
-    const d = new Date(iso);
+    const d = new Date(raw);
+    if (Number.isNaN(d.getTime())) return raw;
     return d.toLocaleString(lang === 'sv' ? 'sv-SE' : 'en-GB', {
       dateStyle: 'medium',
       timeStyle: 'short',
     });
   } catch {
-    return String(iso);
+    return raw;
   }
 }
 
@@ -106,30 +112,43 @@ function applyFooterMirrors(data) {
   return data;
 }
 
-function applyRecoveryFields(data, lang) {
-  if (!data.recoveryUrl && !data.recovery_url && !data.recovery_link) return data;
+function applyRecoveryFields(data, lang, { force = false } = {}) {
+  const link = data.recoveryUrl || data.recovery_url || data.recovery_link || data.recoveryLink;
+  if (!link && !force) return data;
+
   const c = COPY[lang] || COPY.en;
-  const requestedAt = data.request_date || data.recovery_requested_at || new Date().toISOString();
-  data.request_date = formatDateTime(requestedAt, lang);
-  data.recovery_request_date = data.request_date;
-  data.recovery_date = data.request_date;
-  data.recovery_status = data.recovery_status || c.recovery_status;
-  data.recovery_status_label = data.recovery_status_label || c.recovery_status_label;
+  const requestedAt =
+    data.recovery_requested_at ||
+    data.request_date ||
+    data.recovery_date ||
+    new Date().toISOString();
+  const formattedDate = formatDateTime(requestedAt, lang);
+  data.request_date = formattedDate;
+  data.recovery_request_date = formattedDate;
+  data.recovery_date = formattedDate;
+  data.recovery_status = (data.recovery_status && String(data.recovery_status).trim()) || c.recovery_status;
+  data.recovery_status_label =
+    (data.recovery_status_label && String(data.recovery_status_label).trim()) || c.recovery_status_label;
   data.recovery_message = data.recovery_message || c.recovery_intro;
 
-  const link = data.recoveryUrl || data.recovery_url || data.recovery_link;
-  Object.assign(
-    data,
-    mirrorUrl(link, [
-      'recovery_url',
-      'recovery_link',
-      'continue_recovery_url',
-      'continue_account_recovery_url',
-      'account_recovery_url',
-      'recover_account_url',
-      ...BUTTON_URL_ALIASES,
-    ]),
-  );
+  if (link) {
+    data.recoveryUrl = link;
+    Object.assign(
+      data,
+      mirrorUrl(link, [
+        'recovery_url',
+        'recovery_link',
+        'continue_recovery_url',
+        'continue_account_recovery_url',
+        'account_recovery_url',
+        'recover_account_url',
+        ...BUTTON_URL_ALIASES,
+      ]),
+    );
+  } else if (force && data.account_url) {
+    Object.assign(data, mirrorUrl(data.account_url, ['recovery_url', 'recovery_link', ...BUTTON_URL_ALIASES]));
+  }
+
   return data;
 }
 
@@ -190,7 +209,8 @@ function enrichTemplateData(data, emailType) {
     'confirm_link',
     'email_change_url',
   ]);
-  applyRecoveryFields(out, lang);
+  const isRecoveryEmail = emailType === 'HUB_ACCOUNT_RECOVERY';
+  applyRecoveryFields(out, lang, { force: isRecoveryEmail });
   applyActionUrlMirrors(out, 'hubUrl', ['hub_url', 'hub_home_url', 'dashboard_url']);
   applyLoginFields(out, lang);
 

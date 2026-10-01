@@ -10,6 +10,12 @@ function buildDynamicPayload(emailType, payload) {
   const brand = buildBrandUrls(fallbackOrigin);
   let data = { ...brand, ...(payload || {}) };
   data.recipient = data.recipient || payload?.email;
+  if (!data.recoveryUrl && data.recoveryLink) {
+    data.recoveryUrl = data.recoveryLink;
+  }
+  if (!data.recoveryUrl && data.recovery_url) {
+    data.recoveryUrl = data.recovery_url;
+  }
   const def = getDefinition(emailType);
   const to = payload?.recipient || payload?.email;
   if (def?.category === CATEGORY.MARKETING && to) {
@@ -24,7 +30,7 @@ function buildDynamicPayload(emailType, payload) {
     ['verificationUrl', ['verification_link', 'verification_url', 'verify_link']],
     ['resetUrl', ['reset_link', 'reset_url', 'password_reset_link']],
     ['confirmationUrl', ['confirmation_link', 'confirm_link']],
-    ['recoveryUrl', ['recovery_link']],
+    ['recoveryUrl', ['recovery_url', 'recovery_link', 'continue_account_recovery_url']],
     ['hubUrl', ['hub_url', 'hub_home_url', 'dashboard_url']],
     ['order_status_url', ['order_status_link', 'track_order_url', 'tracking_url']],
     ['tracking_url', ['tracking_link', 'shipment_url']],
