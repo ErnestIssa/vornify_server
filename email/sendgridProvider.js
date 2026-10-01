@@ -7,6 +7,34 @@ function initFromEnv() {
 
 initFromEnv();
 
+/**
+ * SendGrid dynamic templates expect flat string-friendly values.
+ * Skips null/undefined; coerces primitives to strings so Handlebars substitution is reliable.
+ */
+const CAMEL_TO_SNAKE_URL = [
+  ['recoveryUrl', 'recovery_url'],
+  ['verificationUrl', 'verification_url'],
+  ['resetUrl', 'reset_url'],
+  ['confirmationUrl', 'confirmation_url'],
+  ['hubUrl', 'hub_url'],
+];
+
+function sanitizeDynamicTemplateData(data) {
+  const out = {};
+  for (const [key, value] of Object.entries(data || {})) {
+    if (value == null || key.startsWith('_')) continue;
+    if (typeof value === 'object') continue;
+    const s = String(value).trim();
+    if (s === '') continue;
+    out[key] = s;
+  }
+  for (const [camel, snake] of CAMEL_TO_SNAKE_URL) {
+    if (out[camel] && !out[snake]) out[snake] = out[camel];
+  }
+  if (out.year && !out.current_year) out.current_year = out.year;
+  return out;
+}
+
 function applyMailSettings(msg, { bypassListManagement = true } = {}) {
   if (process.env.SENDGRID_ENABLE_CLICK_TRACKING !== 'true') {
     msg.trackingSettings = {
@@ -51,13 +79,13 @@ async function sendDynamicTemplate({
   }
 
   const safeSubject = String(subject || '').trim() || 'Peak Mode';
-  const merged = {
+  const merged = sanitizeDynamicTemplateData({
     ...(dynamicData || {}),
     subject: safeSubject,
     email_subject: safeSubject,
     Subject: safeSubject,
     title: safeSubject,
-  };
+  });
 
   const msg = {
     from: { email: fromEmail, name: fromName || 'Peak Mode' },
@@ -166,4 +194,5 @@ module.exports = {
   sendDynamicTemplate,
   sendHtmlEmail,
   verifyConfiguration,
+  sanitizeDynamicTemplateData,
 };

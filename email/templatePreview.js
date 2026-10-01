@@ -20,6 +20,12 @@ const SAMPLE_PAYLOADS = {
     order_number: 'PM-1001',
     retry_url: 'https://peakmode.se/checkout',
   },
+  HUB_ACCOUNT_RECOVERY: {
+    customer_name: 'Alex',
+    recoveryUrl: 'https://peakmode.se/hub/auth?recovery=sample&email=alex%40example.com',
+    request_date: new Date().toISOString(),
+    language: 'en',
+  },
 };
 
 function extractUrlFields(payload) {
