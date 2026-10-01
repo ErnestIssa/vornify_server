@@ -4,16 +4,27 @@ function normalizeUrl(raw, fallbackOrigin) {
   return normalizeAuthLink(raw, fallbackOrigin);
 }
 
+function resolveEmailLogoUrl(origin) {
+  const fromEnv = (process.env.EMAIL_LOGO_URL || process.env.RECEIPT_LOGO_URL || '').trim();
+  if (fromEnv) return fromEnv;
+  const base = String(origin || getStorefrontOrigin()).replace(/\/+$/, '');
+  return `${base}/favicon.svg`;
+}
+
 function buildBrandUrls(fallbackOrigin) {
   const origin = getStorefrontOrigin(fallbackOrigin);
   const supportEmail = (process.env.SUPPORT_INBOX_EMAIL || process.env.EMAIL_FROM || 'support@peakmode.se').trim();
+  const logoImage = resolveEmailLogoUrl(origin);
 
   return {
     website_url: origin,
     site_url: origin,
     home_url: origin,
     shop_url: origin,
-    logo_url: origin,
+    logo_url: logoImage,
+    logo_image_url: logoImage,
+    brand_logo_url: logoImage,
+    logo_src: logoImage,
     logo_link: origin,
     hub_url: `${origin}/peak-mode-hub`,
     hub_home_url: `${origin}/peak-mode-hub`,
@@ -109,6 +120,7 @@ function mirrorUrl(url, keys) {
 }
 
 module.exports = {
+  resolveEmailLogoUrl,
   buildBrandUrls,
   buildHubVerificationUrl,
   buildPasswordResetUrl,

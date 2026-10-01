@@ -551,6 +551,77 @@ function resolveProviderTemplateId(emailType, options = {}) {
   return pickEnv(def.templateEnvKeys);
 }
 
+const HUB_SUBJECT_BY_LANG = {
+  HUB_WELCOME_REGISTRATION: {
+    en: 'Welcome to Peak Mode',
+    sv: 'Välkommen till Peak Mode',
+  },
+  HUB_VERIFY_EMAIL: {
+    en: 'Verify your Peak Mode account',
+    sv: 'Verifiera ditt Peak Mode-konto',
+  },
+  HUB_PASSWORD_RESET: {
+    en: 'Reset your Peak Mode password',
+    sv: 'Återställ ditt Peak Mode-lösenord',
+  },
+  HUB_PASSWORD_RESET_SUCCESS: {
+    en: 'Your Peak Mode password was reset',
+    sv: 'Ditt Peak Mode-lösenord har återställts',
+  },
+  HUB_PASSWORD_CHANGED: {
+    en: 'Your Peak Mode password was changed',
+    sv: 'Ditt Peak Mode-lösenord har ändrats',
+  },
+  HUB_NEW_LOGIN: {
+    en: 'New sign-in to your Peak Mode account',
+    sv: 'Ny inloggning på ditt Peak Mode-konto',
+  },
+  HUB_SUSPICIOUS_LOGIN: {
+    en: 'Unusual sign-in activity on your Peak Mode account',
+    sv: 'Ovanlig inloggningsaktivitet på ditt Peak Mode-konto',
+  },
+  HUB_LOGIN_BLOCKED: {
+    en: 'Sign-in attempt blocked on your Peak Mode account',
+    sv: 'Inloggningsförsök blockerades på ditt Peak Mode-konto',
+  },
+  HUB_EMAIL_CHANGE_CONFIRM: {
+    en: 'Confirm your new Peak Mode email address',
+    sv: 'Bekräfta din nya Peak Mode-e-postadress',
+  },
+  HUB_EMAIL_CHANGED: {
+    en: 'Your Peak Mode email address was updated',
+    sv: 'Din Peak Mode-e-postadress har uppdaterats',
+  },
+  HUB_GOOGLE_CONNECTED: {
+    en: 'Google account connected to Peak Mode',
+    sv: 'Google-konto kopplat till Peak Mode',
+  },
+  HUB_GOOGLE_DISCONNECTED: {
+    en: 'Google account disconnected from Peak Mode',
+    sv: 'Google-konto bortkopplat från Peak Mode',
+  },
+  HUB_MFA_ENABLED: {
+    en: 'Two-step verification enabled on Peak Mode',
+    sv: 'Tvåstegsverifiering aktiverad på Peak Mode',
+  },
+  HUB_MFA_DISABLED: {
+    en: 'Two-step verification disabled on Peak Mode',
+    sv: 'Tvåstegsverifiering inaktiverad på Peak Mode',
+  },
+  HUB_ACCOUNT_RECOVERY: {
+    en: 'Peak Mode account recovery',
+    sv: 'Återställning av ditt Peak Mode-konto',
+  },
+  HUB_ACCOUNT_DELETED: {
+    en: 'Your Peak Mode account was deleted',
+    sv: 'Ditt Peak Mode-konto har tagits bort',
+  },
+  HUB_WELCOME_POST_VERIFY: {
+    en: 'Welcome to Peak Mode Hub',
+    sv: 'Välkommen till Peak Mode Hub',
+  },
+};
+
 function resolveSubjectForJob(emailType, payload) {
   const def = getDefinition(emailType);
   if (!def) return '';
@@ -558,9 +629,12 @@ function resolveSubjectForJob(emailType, payload) {
   if (data.composed_subject && String(data.composed_subject).trim()) {
     return String(data.composed_subject).trim();
   }
-  const lang = String(data.language || 'en').toLowerCase();
+  const lang = String(data.language || 'en').toLowerCase() === 'sv' ? 'sv' : 'en';
   let subject = def.subject || '';
-  if (def.subjectByLang && def.subjectByLang[lang]) {
+  const hubSubjects = HUB_SUBJECT_BY_LANG[emailType];
+  if (hubSubjects) {
+    subject = hubSubjects[lang] || hubSubjects.en || subject;
+  } else if (def.subjectByLang && def.subjectByLang[lang]) {
     subject = def.subjectByLang[lang];
   } else if (def.subjectByLang && def.subjectByLang.en) {
     subject = def.subjectByLang.en;
@@ -568,7 +642,7 @@ function resolveSubjectForJob(emailType, payload) {
   if (data.order_number && def.subjectByLang) {
     subject = `${subject} - ${data.order_number}`;
   }
-  return String(subject).trim();
+  return String(subject || 'Peak Mode').trim();
 }
 
 function emailTypeFromLegacyHubKey(legacyKey) {

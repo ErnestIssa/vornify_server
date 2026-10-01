@@ -28,7 +28,14 @@ function canSendVerificationNow(user) {
 /**
  * Create a fresh token if needed, send verification via SendGrid, return delivery status.
  */
-async function sendVerificationEmail({ email, user, fallbackOrigin, forceNewToken = false }) {
+async function sendVerificationEmail({
+  email,
+  user,
+  fallbackOrigin,
+  forceNewToken = false,
+  language,
+  acceptLanguage,
+}) {
   const normalized = hubIdentity.normalizeEmail(email);
   if (!normalized) {
     return { sent: false, reason: 'invalid_email' };
@@ -61,7 +68,12 @@ async function sendVerificationEmail({ email, user, fallbackOrigin, forceNewToke
     normalized,
     account.name,
     verificationLink,
-    { fallbackOrigin },
+    {
+      fallbackOrigin,
+      user: account,
+      language: language || account.language,
+      acceptLanguage,
+    },
   );
 
   if (!mailResult.success && !mailResult.providerAccepted) {

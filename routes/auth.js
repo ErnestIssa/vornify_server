@@ -10,6 +10,8 @@ const { normalizeEmail, authFail, authOk, CODES } = require('../lib/authResponse
 const { buildPasswordResetLink } = require('../lib/authMailLinks');
 const { isAccountLocked, buildFailedLoginUpdate } = require('../lib/authSecurity');
 const { authEmailRateLimit } = require('../middleware/authEmailRateLimit');
+const { hubMailOptions } = require('../lib/hubMailContext');
+const { normalizeLang } = require('../lib/resolveHubEmailLanguage');
 
 const db = getDBInstance();
 
@@ -43,7 +45,8 @@ function generateAuthToken(userId, email) {
  */
 router.post('/register', async (req, res) => {
     try {
-        const { email, password, name, phone } = req.body;
+        const { email, password, name, phone, language: registerLanguage } = req.body;
+        const preferredLanguage = normalizeLang(registerLanguage) || 'en';
         const displayName =
             (name && String(name).trim()) ||
             String(email || '')
@@ -83,6 +86,7 @@ router.post('/register', async (req, res) => {
             isVerified: false,
             verificationToken,
             verificationExpiry: verificationExpiry.toISOString(),
+            language: preferredLanguage,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
@@ -109,7 +113,7 @@ router.post('/register', async (req, res) => {
             name: displayName,
         });
 
-        const mailOpts = { fallbackOrigin: req.headers.origin };
+        const mailOpts = hubMailOptions(req, { ...newUser, email: normalizedRegisterEmail });
         const [welcomeResult, verifyDelivery] = await Promise.all([
             hubAccountEmail.sendAccountWelcomeEmail(normalizedRegisterEmail, displayName, mailOpts),
             hubVerificationEmail.sendVerificationEmail({
@@ -117,6 +121,8 @@ router.post('/register', async (req, res) => {
                 user: { ...newUser, verificationToken, verificationExpiry: verificationExpiry.toISOString() },
                 fallbackOrigin: req.headers.origin,
                 forceNewToken: false,
+                language: preferredLanguage,
+                acceptLanguage: req.headers['accept-language'],
             }),
         ]);
 
@@ -214,10 +220,9 @@ router.post('/verify-email', async (req, res) => {
             });
         }
 
-        const hubUrl = `${process.env.FRONTEND_URL || req.headers.origin || 'https://peakmode.se'}/hub/dashboard`;
-        await hubAccountEmail.sendHubWelcomePostVerifyEmail(user.email, user.name, hubUrl, {
-            fallbackOrigin: req.headers.origin,
-        });
+        const { getStorefrontOrigin } = require('../lib/authMailLinks');
+        const hubUrl = `${getStorefrontOrigin(req.headers.origin)}/peak-mode-hub`;
+        await hubAccountEmail.sendHubWelcomePostVerifyEmail(user.email, user.name, hubUrl, hubMailOptions(req, user));
 
         res.json({
             success: true,
@@ -402,9 +407,7 @@ router.post('/request-password-reset', authEmailRateLimit, async (req, res) => {
             email,
             fallbackOrigin: req.headers.origin,
         });
-        await hubAccountEmail.sendPasswordResetEmail(email, resetLink, {
-            fallbackOrigin: req.headers.origin,
-        });
+        await hubAccountEmail.sendPasswordResetEmail(email, resetLink, hubMailOptions(req, user));
 
         return authOk(res, { message: GENERIC_RESET_SENT });
     } catch (error) {
@@ -495,7 +498,7 @@ router.post('/reset-password', async (req, res) => {
 
         const resetEventId = user.resetToken ? hashKey(user.resetToken) : hashKey(normalizedEmail);
         await hubAccountEmail.sendPasswordResetSuccessEmail(user.email, user.name, {
-            fallbackOrigin: req.headers.origin,
+            ...hubMailOptions(req, user),
             correlationId: resetEventId,
         });
 

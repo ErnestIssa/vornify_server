@@ -24,6 +24,8 @@ async function afterSuccessfulHubLogin(user, req) {
     sends.push(
       hubAccountEmail.sendNewLoginEmail(email, user.name, context, {
         fallbackOrigin: req.headers?.origin,
+        user,
+        acceptLanguage: req.headers?.['accept-language'],
       }),
     );
   }
@@ -31,6 +33,8 @@ async function afterSuccessfulHubLogin(user, req) {
     sends.push(
       hubAccountEmail.sendSuspiciousLoginEmail(email, user.name, context, {
         fallbackOrigin: req.headers?.origin,
+        user,
+        acceptLanguage: req.headers?.['accept-language'],
       }),
     );
   }
@@ -47,6 +51,8 @@ async function afterLoginBlocked(user, req) {
   await hubAccountEmail.sendLoginBlockedEmail(user.email, user.name, {
     fallbackOrigin: req?.headers?.origin,
     correlationId: lockEvent,
+    user,
+    acceptLanguage: req?.headers?.['accept-language'],
   });
 }
 

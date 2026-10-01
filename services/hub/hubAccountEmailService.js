@@ -3,6 +3,7 @@
  */
 const crypto = require('crypto');
 const orchestrator = require('../../communications/communicationOrchestrator');
+const { resolveHubEmailLanguage } = require('../../lib/resolveHubEmailLanguage');
 
 function customerName(name, email) {
   return (name && String(name).trim()) || String(email || '').split('@')[0] || 'Member';
@@ -18,14 +19,22 @@ async function sendLegacy(legacyHubKey, to, payload, options = {}) {
   if (!emailType) {
     return { success: false, error: 'UNKNOWN_LEGACY_HUB_EMAIL', legacyHubKey };
   }
+  const language = resolveHubEmailLanguage({ ...options, email: to });
   return orchestrator.schedule({
     communicationType: emailType,
     channel: 'email',
     recipient: to,
-    payload,
+    payload: {
+      ...payload,
+      language,
+      fallbackOrigin: options.fallbackOrigin,
+      email: to,
+      recipient: to,
+    },
+    context: { language, ...(options.context || {}) },
     idempotencyKey: options.idempotencyKey,
     correlationId: options.correlationId,
-    userId: options.userId,
+    userId: options.userId || options.user?.id || options.user?._id,
     processImmediately: options.processImmediately !== false,
   });
 }
@@ -219,10 +228,16 @@ async function sendMfaDisabledEmail(to, name, options = {}) {
 }
 
 async function sendAccountRecoveryEmail(to, name, recoveryLink, options = {}) {
+  const requestedAt = options.requestedAt || new Date().toISOString();
   return sendLegacy(
     'accountRecovery',
     to,
-    { customer_name: customerName(name, to), recoveryUrl: recoveryLink },
+    {
+      customer_name: customerName(name, to),
+      recoveryUrl: recoveryLink,
+      request_date: requestedAt,
+      recovery_requested_at: requestedAt,
+    },
     {
       ...options,
       idempotencyKey:

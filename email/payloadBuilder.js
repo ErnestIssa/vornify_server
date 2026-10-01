@@ -2,10 +2,14 @@ const { buildBrandUrls, mirrorUrl, buildUnsubscribeUrl } = require('./emailUrls'
 const { signUnsubscribeToken } = require('../lib/unsubscribeToken');
 const { getDefinition } = require('./emailDefinitions');
 const { CATEGORY } = require('./emailTypes');
+const { enrichTemplateData } = require('./templateDataEnrichment');
+const { resolveSubjectForJob } = require('./emailDefinitions');
 
 function buildDynamicPayload(emailType, payload) {
-  const brand = buildBrandUrls();
-  const data = { ...brand, ...(payload || {}) };
+  const fallbackOrigin = payload?.fallbackOrigin || payload?.site_origin;
+  const brand = buildBrandUrls(fallbackOrigin);
+  let data = { ...brand, ...(payload || {}) };
+  data.recipient = data.recipient || payload?.email;
   const def = getDefinition(emailType);
   const to = payload?.recipient || payload?.email;
   if (def?.category === CATEGORY.MARKETING && to) {
@@ -31,8 +35,21 @@ function buildDynamicPayload(emailType, payload) {
 
   for (const [canonical, keys] of urlMaps) {
     if (data[canonical]) {
-      Object.assign(data, mirrorUrl(data[canonical], keys));
+      Object.assign(data, mirrorUrl(data[canonical], [...keys, 'button_url', 'cta_url', 'action_url']));
     }
+  }
+
+  data = enrichTemplateData(data, emailType);
+
+  const subject = resolveSubjectForJob(emailType, data);
+  if (subject) {
+    data.subject = subject;
+    data.email_subject = subject;
+    data.Subject = subject;
+    data.subject_line = subject;
+    data.emailSubject = subject;
+    data.title = subject;
+    data.email_title = subject;
   }
 
   return data;

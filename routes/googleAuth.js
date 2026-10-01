@@ -6,6 +6,7 @@ const hubAuthLoginEvents = require('../services/hub/hubAuthLoginEvents');
 const googleOAuth = require('../services/googleOAuthService');
 const googleAuthUser = require('../services/googleAuthUserService');
 const { authFail, authOk, CODES } = require('../lib/authResponse');
+const { hubMailOptions } = require('../lib/hubMailContext');
 
 function generateAuthToken(userId, email) {
   const payload = { userId, email, timestamp: Date.now() };
@@ -81,7 +82,7 @@ router.post('/google/code', async (req, res) => {
 
     const googleProfile = await googleOAuth.exchangeCodeForUser(String(code), 'postmessage');
     const { user, googleNewlyLinked, isNewAccount } = await googleAuthUser.upsertUserFromGoogle(googleProfile);
-    const mailOpts = { fallbackOrigin: req.headers.origin };
+    const mailOpts = hubMailOptions(req, user);
     if (isNewAccount) {
       await hubAccountEmail.sendAccountWelcomeEmail(user.email, user.name, mailOpts);
     } else if (googleNewlyLinked) {

@@ -30,6 +30,15 @@ function isHttpsUrl(value) {
   }
 }
 
+function readPayloadField(data, field) {
+  if (field === 'customer_name') {
+    const val =
+      data.customer_name ?? data.name ?? data.first_name ?? data.firstName ?? data.user_name;
+    return val != null && String(val).trim() !== '' ? val : null;
+  }
+  return data[field] ?? data[field.replace(/Url$/, '_url')] ?? data[field.replace(/Url$/, '_link')];
+}
+
 function validateEmailJob({ emailType, recipient, payload }) {
   const def = getDefinition(emailType);
   if (!def) {
@@ -50,7 +59,7 @@ function validateEmailJob({ emailType, recipient, payload }) {
     }
   }
   for (const field of def.requiredFields || []) {
-    const val = data[field] ?? data[field.replace(/Url$/, '_url')] ?? data[field.replace(/Url$/, '_link')];
+    const val = readPayloadField(data, field);
     if (val == null || String(val).trim() === '') {
       return { valid: false, error: 'MISSING_REQUIRED_FIELD', field };
     }
