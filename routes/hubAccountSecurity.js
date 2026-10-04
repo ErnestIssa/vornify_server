@@ -175,6 +175,67 @@ router.post('/confirm-email-change', async (req, res) => {
   }
 });
 
+/** POST /api/hub/account/recovery/complete — set new password from account recovery email link */
+router.post('/recovery/complete', async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const token = String(req.body?.token || req.body?.recovery || '').trim();
+    const newPassword = req.body?.newPassword;
+
+    if (!email || !token || !newPassword) {
+      return authFail(res, 400, CODES.VALIDATION_ERROR, 'Enter a valid recovery link and password.');
+    }
+    if (String(newPassword).length < 8) {
+      return authFail(res, 400, CODES.VALIDATION_ERROR, 'Password must be at least 8 characters.');
+    }
+
+    const user = await hubIdentity.findUserByEmailAndFields(email, { recoveryToken: token });
+    if (!user) {
+      return authFail(
+        res,
+        400,
+        CODES.VALIDATION_ERROR,
+        'This recovery link is no longer valid. Request a new one.',
+      );
+    }
+    if (user.recoveryExpiry && new Date() > new Date(user.recoveryExpiry)) {
+      return authFail(res, 400, CODES.VALIDATION_ERROR, 'This recovery link has expired. Request a new one.');
+    }
+
+    const sec = user.security || {};
+    const passwordChangedAt = new Date().toISOString();
+    const result = await updateUserByEmail(email, {
+      password: hashPassword(newPassword),
+      passwordUserSet: true,
+      recoveryToken: null,
+      recoveryExpiry: null,
+      resetToken: null,
+      resetExpiry: null,
+      security: {
+        ...sec,
+        failedLoginCount: 0,
+        lockedUntil: null,
+        lockReason: null,
+        passwordChangedAt,
+      },
+    });
+
+    if (!result.success) {
+      return authFail(res, 500, CODES.INTERNAL_ERROR, 'Could not update your password.');
+    }
+
+    await hubAccountEmail.sendPasswordResetSuccessEmail(email, user.name, {
+      ...hubMailOptions(req, user),
+      correlationId: passwordChangedAt,
+    });
+
+    return authOk(res, { message: 'Your password has been updated.' });
+  } catch (err) {
+    console.error('[hub recovery/complete]', err);
+    return authFail(res, 500, CODES.INTERNAL_ERROR, 'Something went wrong.');
+  }
+});
+
 /** POST /api/hub/account/recovery/request */
 router.post('/recovery/request', async (req, res) => {
   const generic = 'If an account exists, we sent recovery instructions.';
