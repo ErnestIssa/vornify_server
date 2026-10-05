@@ -112,6 +112,33 @@ function applyFooterMirrors(data) {
   return data;
 }
 
+function applyPasswordResetFields(data, { force = false } = {}) {
+  const link =
+    data.resetUrl ||
+    data.reset_url ||
+    data.reset_link ||
+    data.password_reset_url ||
+    data.password_reset_link;
+  if (!link && !force) return data;
+
+  if (link) {
+    data.resetUrl = link;
+    Object.assign(
+      data,
+      mirrorUrl(link, [
+        'reset_url',
+        'reset_link',
+        'password_reset_url',
+        'password_reset_link',
+        'reset_password_url',
+        'password_reset_link',
+        ...BUTTON_URL_ALIASES,
+      ]),
+    );
+  }
+  return data;
+}
+
 function applyRecoveryFields(data, lang, { force = false } = {}) {
   const link = data.recoveryUrl || data.recovery_url || data.recovery_link || data.recoveryLink;
   if (!link && !force) return data;
@@ -210,6 +237,8 @@ function enrichTemplateData(data, emailType) {
     'email_change_url',
   ]);
   const isRecoveryEmail = emailType === 'HUB_ACCOUNT_RECOVERY';
+  const isPasswordResetEmail = emailType === 'HUB_PASSWORD_RESET';
+  applyPasswordResetFields(out, { force: isPasswordResetEmail });
   applyRecoveryFields(out, lang, { force: isRecoveryEmail });
   applyActionUrlMirrors(out, 'hubUrl', ['hub_url', 'hub_home_url', 'dashboard_url']);
   applyLoginFields(out, lang);

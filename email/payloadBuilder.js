@@ -28,7 +28,10 @@ function buildDynamicPayload(emailType, payload) {
 
   const urlMaps = [
     ['verificationUrl', ['verification_link', 'verification_url', 'verify_link']],
-    ['resetUrl', ['reset_link', 'reset_url', 'password_reset_link']],
+    [
+      'resetUrl',
+      ['reset_url', 'reset_link', 'password_reset_link', 'password_reset_url', 'reset_password_url'],
+    ],
     ['confirmationUrl', ['confirmation_link', 'confirm_link']],
     ['recoveryUrl', ['recovery_url', 'recovery_link', 'continue_account_recovery_url']],
     ['hubUrl', ['hub_url', 'hub_home_url', 'dashboard_url']],

@@ -73,7 +73,15 @@ async function sendPasswordResetEmail(to, resetLink, options = {}) {
   return sendLegacy(
     'passwordReset',
     to,
-    { resetUrl: link, expiry_hours: 1 },
+    {
+      resetUrl: link,
+      reset_url: link,
+      reset_link: link,
+      password_reset_url: link,
+      password_reset_link: link,
+      reset_password_url: link,
+      expiry_hours: 1,
+    },
     {
       ...options,
       idempotencyKey: options.idempotencyKey || `hub-reset:${hashKey(to)}:${hashKey(link)}`,

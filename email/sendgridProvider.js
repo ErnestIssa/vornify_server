@@ -31,6 +31,23 @@ function sanitizeDynamicTemplateData(data) {
   for (const [camel, snake] of CAMEL_TO_SNAKE_URL) {
     if (out[camel] && !out[snake]) out[snake] = out[camel];
   }
+
+  const urlAliasGroups = [
+    ['reset_url', ['reset_link', 'password_reset_url', 'password_reset_link', 'reset_password_url']],
+    ['recovery_url', ['recovery_link', 'continue_account_recovery_url', 'account_recovery_url']],
+    ['verification_url', ['verification_link', 'verify_url', 'verify_link']],
+  ];
+  for (const [primary, aliases] of urlAliasGroups) {
+    const link = out[primary];
+    if (!link) continue;
+    for (const alias of aliases) {
+      if (!out[alias]) out[alias] = link;
+    }
+    for (const alias of ['action_url', 'button_url', 'cta_url', 'primary_action_url', 'link', 'url']) {
+      if (!out[alias]) out[alias] = link;
+    }
+  }
+
   if (out.year && !out.current_year) out.current_year = out.year;
   return out;
 }
