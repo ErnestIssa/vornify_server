@@ -50,6 +50,7 @@ const publicNoticeBarsRoutes = require('./routes/publicNoticeBars');
 const adminReleasesRoutes = require('./routes/adminReleases');
 const adminStaffRoutes = require('./routes/adminStaff');
 const adminTasksRoutes = require('./routes/adminTasks');
+const adminRecordsRoutes = require('./routes/adminRecords');
 const adminSecurityRoutes = require('./routes/adminSecurity');
 const publicReleasesRoutes = require('./routes/publicReleases');
 const releaseStore = require('./services/releaseStore');
@@ -504,6 +505,7 @@ app.use('/api/admin', adminNotificationsRoutes); // Admin notifications (list, c
 app.use('/api/admin/shipping', adminShippingRoutes); // Admin shipping config (zones, methods, prices, free-areas)
 app.use('/api/admin/staff', adminStaffRoutes); // Staff access management
 app.use('/api/admin/tasks', adminTasksRoutes); // Internal tasks workspace
+app.use('/api/admin/records', adminRecordsRoutes); // Private business Records room
 app.use('/api/admin', adminSecurityRoutes); // MFA, sessions, audit
 app.use('/api/admin', adminRoutes); // Admin utilities (cleanup, maintenance)
 app.use('/api/admin/communications', communicationsAdminRoutes);
