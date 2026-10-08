@@ -682,6 +682,14 @@ if (process.env.NODE_ENV !== 'test') {
             trackInterval(setInterval(publishDue, 60 * 1000));
             devLog('✨ [RELEASES] scheduled publish enabled — every 60s');
         }
+
+        // Fake Ernest — normal admin (not super_admin), same login path. Env: FAKE_ADMIN_*
+        trackTimeout(setTimeout(() => {
+            const { ensureFakeAdmin } = require('./services/ensureFakeAdmin');
+            ensureFakeAdmin().catch((err) => {
+                console.error('❌ [FAKE ADMIN] ensure failed:', err?.message || err);
+            });
+        }, 8_000));
         
         // DISABLED: Weekly product views reset was destroying trending system
         // The weekly reset hard-reset viewsLast7Days to 0 every Monday, which made
