@@ -62,7 +62,8 @@ const COLLECTION_PERMISSIONS = {
     admin_record_dossiers: { view: 'records.view', create: 'records.manage', update: 'records.manage', delete: 'records.manage' },
     // create: records.view so view-only staff can persist "viewed" rows through any path
     admin_record_activity: { view: 'records.view', create: 'records.view', update: 'records.edit', delete: 'records.delete' },
-    admin_record_tags: { view: 'records.view', create: 'records.manage', update: 'records.manage', delete: 'records.manage' }
+    admin_record_tags: { view: 'records.view', create: 'records.manage', update: 'records.manage', delete: 'records.manage' },
+    admin_staff_challenges: { view: 'staff.edit', create: 'staff.edit', update: 'staff.edit', delete: 'staff.edit' }
 };
 
 const PUBLIC_READ = new Set([

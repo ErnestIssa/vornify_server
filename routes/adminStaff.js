@@ -14,6 +14,7 @@
 const express = require('express');
 const authenticateAdmin = require('../middleware/authenticateAdmin');
 const { requirePermission } = require('../middleware/requirePermission');
+const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 const {
     listAdmins,
     loadAdminById,
@@ -35,10 +36,63 @@ const {
     toPublicSession
 } = require('../services/adminSessions');
 const { auditFromReq } = require('../services/adminAudit');
+const { issueChallenge, consumeChallenge } = require('../services/staffActionChallenge');
 const getDBInstance = require('../vornifydb/dbInstance');
 
 const router = express.Router();
 const db = getDBInstance();
+
+async function requireStaffChallenge(req, res, action) {
+    const check = await consumeChallenge({
+        actorId: req.admin.id,
+        targetStaffId: req.params.id,
+        action,
+        challengeId: req.body?.challengeId,
+        challenge: req.body?.challenge
+    });
+    if (!check.ok) {
+        res.status(403).json({
+            success: false,
+            message: check.error || 'Challenge confirmation required',
+            errorCode: check.code || 'CHALLENGE_REQUIRED'
+        });
+        return false;
+    }
+    return true;
+}
+
+async function recentStaffActivity(staffId, email, limit = 20) {
+    const id = String(staffId || '');
+    const mail = String(email || '').toLowerCase();
+    try {
+        const result = await db.executeOperation({
+            database_name: 'peakmode',
+            collection_name: 'admin_audit_logs',
+            command: '--read',
+            data: {}
+        });
+        if (!result.success || !result.data) return [];
+        const rows = Array.isArray(result.data) ? result.data : [result.data];
+        return rows
+            .filter((row) => {
+                const actor = String(row.actorId || '');
+                const actorEmail = String(row.actorEmail || '').toLowerCase();
+                const resourceId = String(row.resourceId || '');
+                return actor === id || resourceId === id || (mail && actorEmail === mail);
+            })
+            .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+            .slice(0, limit)
+            .map((row) => ({
+                id: String(row._id || row.id || ''),
+                action: row.action || '',
+                resource: row.resource || null,
+                createdAt: row.createdAt || null,
+                success: row.success !== false
+            }));
+    } catch {
+        return [];
+    }
+}
 
 function lastActiveAt(admin) {
     const sessions = Array.isArray(admin.refreshTokens) ? admin.refreshTokens : [];
@@ -117,6 +171,52 @@ router.get('/', authenticateAdmin, requirePermission('staff.view'), async (_req,
     }
 });
 
+router.post(
+    '/:id/challenge',
+    authenticateAdmin,
+    requireSuperAdmin,
+    requirePermission('staff.edit'),
+    async (req, res) => {
+        try {
+            const admin = await loadAdminById(req.params.id);
+            if (!admin) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Staff account not found',
+                    errorCode: 'ADMIN_NOT_FOUND'
+                });
+            }
+            const issued = await issueChallenge({
+                actorId: req.admin.id,
+                targetStaffId: adminIdString(admin),
+                action: req.body?.action
+            });
+            if (!issued.ok) {
+                return res.status(400).json({
+                    success: false,
+                    message: issued.error,
+                    errorCode: issued.code
+                });
+            }
+            res.json({
+                success: true,
+                data: {
+                    challengeId: issued.challengeId,
+                    challenge: issued.challenge,
+                    action: issued.action,
+                    expiresAt: issued.expiresAt
+                }
+            });
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: 'Failed to issue challenge',
+                errorCode: 'INTERNAL_SERVER_ERROR'
+            });
+        }
+    }
+);
+
 router.get('/:id', authenticateAdmin, requirePermission('staff.view'), async (req, res) => {
     try {
         const admin = await loadAdminById(req.params.id);
@@ -127,11 +227,27 @@ router.get('/:id', authenticateAdmin, requirePermission('staff.view'), async (re
                 errorCode: 'ADMIN_NOT_FOUND'
             });
         }
+        const isSuper = req.admin.role === 'super_admin';
+        const publicStaff = toStaffPublic(admin, { includeSessions: isSuper });
+        const activityLog = Array.isArray(admin.activityLog)
+            ? admin.activityLog.slice(-15).reverse().map((entry, index) => ({
+                  id: `nav_${index}_${entry.at || entry.timestamp || index}`,
+                  action: entry.label || entry.path || 'activity',
+                  path: entry.path || null,
+                  createdAt: entry.at || entry.timestamp || null,
+                  success: true
+              }))
+            : [];
+        const auditActivity = await recentStaffActivity(adminIdString(admin), admin.email, 15);
         res.json({
             success: true,
             data: {
-                ...toStaffPublic(admin, { includeSessions: true }),
-                permissions: getPermissionsForRole(admin.role)
+                ...publicStaff,
+                permissions: getPermissionsForRole(admin.role),
+                canManage: isSuper,
+                recentActivity: [...auditActivity, ...activityLog]
+                    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+                    .slice(0, 20)
             }
         });
     } catch (error) {
@@ -143,8 +259,10 @@ router.get('/:id', authenticateAdmin, requirePermission('staff.view'), async (re
     }
 });
 
-router.patch('/:id', authenticateAdmin, requirePermission('staff.edit'), async (req, res) => {
+router.patch('/:id', authenticateAdmin, requireSuperAdmin, requirePermission('staff.edit'), async (req, res) => {
     try {
+        if (!(await requireStaffChallenge(req, res, 'update'))) return;
+
         const admin = await loadAdminById(req.params.id);
         if (!admin) {
             return res.status(404).json({
@@ -229,8 +347,9 @@ router.patch('/:id', authenticateAdmin, requirePermission('staff.edit'), async (
     }
 });
 
-router.post('/:id/suspend', authenticateAdmin, requirePermission('staff.suspend'), async (req, res) => {
+router.post('/:id/suspend', authenticateAdmin, requireSuperAdmin, requirePermission('staff.suspend'), async (req, res) => {
     try {
+        if (!(await requireStaffChallenge(req, res, 'suspend'))) return;
         const admin = await loadAdminById(req.params.id);
         if (!admin) {
             return res.status(404).json({
@@ -272,8 +391,9 @@ router.post('/:id/suspend', authenticateAdmin, requirePermission('staff.suspend'
     }
 });
 
-router.post('/:id/reactivate', authenticateAdmin, requirePermission('staff.suspend'), async (req, res) => {
+router.post('/:id/reactivate', authenticateAdmin, requireSuperAdmin, requirePermission('staff.suspend'), async (req, res) => {
     try {
+        if (!(await requireStaffChallenge(req, res, 'reactivate'))) return;
         const admin = await loadAdminById(req.params.id);
         if (!admin) {
             return res.status(404).json({
@@ -319,8 +439,9 @@ router.post('/:id/reactivate', authenticateAdmin, requirePermission('staff.suspe
     }
 });
 
-router.post('/:id/remove', authenticateAdmin, requirePermission('staff.remove'), async (req, res) => {
+router.post('/:id/remove', authenticateAdmin, requireSuperAdmin, requirePermission('staff.remove'), async (req, res) => {
     try {
+        if (!(await requireStaffChallenge(req, res, 'remove'))) return;
         const admin = await loadAdminById(req.params.id);
         if (!admin) {
             return res.status(404).json({
@@ -367,8 +488,9 @@ router.post('/:id/remove', authenticateAdmin, requirePermission('staff.remove'),
     }
 });
 
-router.post('/:id/revoke-sessions', authenticateAdmin, requirePermission('staff.edit'), async (req, res) => {
+router.post('/:id/revoke-sessions', authenticateAdmin, requireSuperAdmin, requirePermission('staff.edit'), async (req, res) => {
     try {
+        if (!(await requireStaffChallenge(req, res, 'revoke_sessions'))) return;
         const admin = await loadAdminById(req.params.id);
         if (!admin) {
             return res.status(404).json({
@@ -396,8 +518,9 @@ router.post('/:id/revoke-sessions', authenticateAdmin, requirePermission('staff.
     }
 });
 
-router.post('/:id/reset-mfa', authenticateAdmin, requirePermission('staff.edit'), async (req, res) => {
+router.post('/:id/reset-mfa', authenticateAdmin, requireSuperAdmin, requirePermission('staff.edit'), async (req, res) => {
     try {
+        if (!(await requireStaffChallenge(req, res, 'reset_mfa'))) return;
         const admin = await loadAdminById(req.params.id);
         if (!admin) {
             return res.status(404).json({

@@ -78,8 +78,9 @@ const ALL_PERMISSIONS = PERMISSIONS;
 const ROLE_PERMISSIONS = Object.freeze({
     super_admin: ALL_PERMISSIONS,
 
+    // staff.view only — list/view colleagues. Mutating staff stays Super Admin only.
     admin: PERMISSIONS.filter((p) =>
-        !p.startsWith('staff.') &&
+        (p === 'staff.view' || !p.startsWith('staff.')) &&
         p !== 'security.manage' &&
         p !== 'audit.view'
     ),

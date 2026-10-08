@@ -13,7 +13,12 @@ const { authorizeVornifyDb } = require('../services/vornifydbAccess');
 const { closeDBInstance } = require('../vornifydb/dbInstance');
 
 assert.ok(getPermissionsForRole('super_admin').includes('staff.remove'));
+assert.ok(getPermissionsForRole('admin').includes('staff.view'));
+assert.ok(!getPermissionsForRole('admin').includes('staff.edit'));
 assert.ok(!getPermissionsForRole('admin').includes('staff.invite'));
+assert.ok(getPermissionsForRole('admin').includes('records.view'));
+assert.ok(getPermissionsForRole('manager').includes('records.view'));
+assert.ok(getPermissionsForRole('support').includes('records.view'));
 assert.ok(!getPermissionsForRole('manager').includes('releases.publish'));
 assert.ok(getPermissionsForRole('support').includes('messages.reply'));
 assert.ok(getPermissionsForRole('support').includes('tasks.view'));

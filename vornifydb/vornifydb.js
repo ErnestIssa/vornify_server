@@ -278,6 +278,7 @@ class VortexDB {
             const adminRecordDossiersColl = peakmode.collection('admin_record_dossiers');
             const adminRecordActivityColl = peakmode.collection('admin_record_activity');
             const adminRecordTagsColl = peakmode.collection('admin_record_tags');
+            const adminStaffChallengesColl = peakmode.collection('admin_staff_challenges');
             for (const [coll, spec] of [
                 [adminRecordsColl, [
                     { key: { id: 1 }, cacheKey: 'peakmode.admin_records.id' },
@@ -304,6 +305,11 @@ class VortexDB {
                 [adminRecordTagsColl, [
                     { key: { id: 1 }, cacheKey: 'peakmode.admin_record_tags.id' },
                     { key: { name: 1 }, cacheKey: 'peakmode.admin_record_tags.name', options: { unique: true } }
+                ]],
+                [adminStaffChallengesColl, [
+                    { key: { id: 1 }, cacheKey: 'peakmode.admin_staff_challenges.id' },
+                    { key: { actorId: 1, createdAt: -1 }, cacheKey: 'peakmode.admin_staff_challenges.actor_created' },
+                    { key: { expiresAt: 1 }, cacheKey: 'peakmode.admin_staff_challenges.expiresAt' }
                 ]]
             ]) {
                 for (const { key, cacheKey, options } of spec) {
