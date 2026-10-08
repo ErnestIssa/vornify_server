@@ -131,6 +131,39 @@ async function updateAdmin(id, update) {
     });
 }
 
+/**
+ * Re-check the signed-in admin's password for sensitive actions.
+ * Returns { ok: true } or { ok: false, error, code }.
+ */
+async function verifyAdminPassword(adminId, password) {
+    const bcrypt = require('bcrypt');
+    const raw = String(password || '');
+    if (!raw) {
+        return { ok: false, error: 'Password is required', code: 'PASSWORD_REQUIRED' };
+    }
+    const admin = await loadAdminById(adminId);
+    if (!admin) {
+        return { ok: false, error: 'Admin not found', code: 'ADMIN_NOT_FOUND' };
+    }
+    if (!admin.password || typeof admin.password !== 'string') {
+        return { ok: false, error: 'Password verification failed', code: 'PASSWORD_MISMATCH' };
+    }
+    const looksLikeBcrypt =
+        admin.password.startsWith('$2a$') ||
+        admin.password.startsWith('$2b$') ||
+        admin.password.startsWith('$2y$');
+    let match = false;
+    if (looksLikeBcrypt) {
+        match = await bcrypt.compare(raw, admin.password);
+    } else {
+        match = admin.password === raw;
+    }
+    if (!match) {
+        return { ok: false, error: 'Password does not match', code: 'PASSWORD_MISMATCH' };
+    }
+    return { ok: true, admin };
+}
+
 module.exports = {
     adminIdString,
     adminIdFilter,
@@ -143,5 +176,6 @@ module.exports = {
     listAdmins,
     countActiveSuperAdmins,
     isLastActiveSuperAdmin,
-    updateAdmin
+    updateAdmin,
+    verifyAdminPassword
 };

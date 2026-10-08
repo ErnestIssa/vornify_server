@@ -1,13 +1,29 @@
 /**
  * Admin Records — document shape, validation, filtering, visibility.
  * Backend is the source of truth. Activity is a separate collection from audit logs.
+ * Visibility is enforced by permissions (not role name strings).
  */
+
+const { getPermissionsForRole, hasPermission } = require('./staffAccessPolicy');
 
 const TYPES = Object.freeze(['file', 'photo', 'link', 'note']);
 const STATUSES = Object.freeze(['draft', 'active', 'signed', 'expired', 'archived']);
 const LIVE_STATUSES = Object.freeze(['draft', 'active', 'signed', 'expired']);
 const VISIBILITIES = Object.freeze(['everyone', 'finance', 'admin_only']);
-const ACTIVITY_ACTIONS = Object.freeze(['viewed', 'uploaded', 'edited', 'archived', 'restored', 'deleted']);
+const ACTIVITY_ACTIONS = Object.freeze([
+    'viewed',
+    'uploaded',
+    'edited',
+    'archived',
+    'restored',
+    'deleted',
+    'locked',
+    'unlocked',
+    'exclusive_granted',
+    'exclusive_revoked'
+]);
+/** Suppress repeat "viewed" rows for the same admin + record within this window. */
+const VIEW_DEDUPE_MS = 10 * 60 * 1000;
 const FLAGS = Object.freeze(['all', 'pinned', 'expiring', 'awaiting']);
 
 const TITLE_MAX = 200;
@@ -51,7 +67,11 @@ const ACTIVITY_ACTION_LABELS = Object.freeze({
     edited: 'Edited',
     archived: 'Archived',
     restored: 'Restored',
-    deleted: 'Deleted'
+    deleted: 'Deleted',
+    locked: 'Locked',
+    unlocked: 'Unlocked',
+    exclusive_granted: 'Exclusive granted',
+    exclusive_revoked: 'Exclusive revoked'
 });
 
 function nowIso() {
@@ -147,25 +167,92 @@ function isOverdue(doc) {
     return expires < Date.now();
 }
 
+function adminPermissions(admin) {
+    if (Array.isArray(admin?.permissions) && admin.permissions.length) return admin.permissions;
+    return getPermissionsForRole(admin?.role);
+}
+
+/**
+ * Visibility access:
+ * - everyone   → any staff with records.view
+ * - finance    → records.finance or records.manage
+ * - admin_only → records.manage (admins / super admins)
+ */
 function canSeeVisibility(admin, visibility) {
-    const role = String(admin?.role || '');
-    const permissions = Array.isArray(admin?.permissions) ? admin.permissions : [];
-    if (visibility === 'everyone') return true;
-    if (visibility === 'admin_only') return role === 'super_admin' || role === 'admin';
-    if (visibility === 'finance') {
-        return (
-            role === 'super_admin' ||
-            role === 'admin' ||
-            permissions.includes('records.finance') ||
-            permissions.includes('records.manage')
-        );
+    const permissions = adminPermissions(admin);
+    if (!hasPermission(permissions, 'records.view')) return false;
+    const level = String(visibility || 'everyone');
+    if (level === 'everyone') return true;
+    if (level === 'finance') {
+        return hasPermission(permissions, 'records.finance') || hasPermission(permissions, 'records.manage');
+    }
+    if (level === 'admin_only') {
+        return hasPermission(permissions, 'records.manage');
     }
     return false;
 }
 
-function toPublic(doc) {
+function canSetVisibility(admin, visibility) {
+    return canSeeVisibility(admin, visibility);
+}
+
+function allowedVisibilities(admin) {
+    return VISIBILITIES.filter((visibility) => canSetVisibility(admin, visibility));
+}
+
+function adminIdOf(admin) {
+    return admin?.id != null ? String(admin.id) : '';
+}
+
+function isSuperAdmin(admin) {
+    return String(admin?.role || '') === 'super_admin';
+}
+
+/** Super admin, manager, or anyone with records.manage may lock. */
+function canLockRecords(admin) {
+    const role = String(admin?.role || '');
+    if (role === 'super_admin' || role === 'manager') return true;
+    return hasPermission(adminPermissions(admin), 'records.manage');
+}
+
+function isRecordLocked(doc) {
+    return Boolean(doc?.locked);
+}
+
+function exclusiveAdminIds(doc) {
+    return (Array.isArray(doc?.exclusiveAdminIds) ? doc.exclusiveAdminIds : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean);
+}
+
+/**
+ * Locked records block CRUD for other admins unless:
+ * - actor is super_admin
+ * - actor locked the record
+ * - actor was granted exclusive access by a super admin
+ */
+function canMutateRecord(admin, doc) {
+    if (!doc) return false;
+    if (!isRecordLocked(doc)) return true;
+    if (isSuperAdmin(admin)) return true;
+    const id = adminIdOf(admin);
+    if (id && String(doc.lockedById || '') === id) return true;
+    if (id && exclusiveAdminIds(doc).includes(id)) return true;
+    return false;
+}
+
+function lockedDenial() {
+    return {
+        error: 'This record is locked. Only the locker, a Super Admin, or an exclusively granted admin can change it.',
+        code: 'RECORD_LOCKED'
+    };
+}
+
+function toPublic(doc, admin) {
     const row = normalizeId(doc);
     if (!row) return null;
+    const locked = Boolean(row.locked);
+    const exclusives = exclusiveAdminIds(row);
     return {
         id: row.id,
         type: row.type,
@@ -192,7 +279,14 @@ function toPublic(doc) {
         cloudinaryResourceType: row.cloudinaryResourceType || undefined,
         cloudinaryFolder: row.cloudinaryFolder || undefined,
         url: row.url || undefined,
-        body: row.body || undefined
+        body: row.body || undefined,
+        locked,
+        lockedAt: row.lockedAt || null,
+        lockedById: row.lockedById || null,
+        lockedBy: row.lockedBy || null,
+        exclusiveAdminIds: exclusives,
+        canMutate: admin ? canMutateRecord(admin, row) : !locked,
+        canLock: admin ? canLockRecords(admin) : false
     };
 }
 
@@ -236,19 +330,25 @@ function toPublicActivity(doc) {
     };
 }
 
-function catalog() {
+function catalog(admin) {
+    const allowed = admin ? allowedVisibilities(admin) : [...VISIBILITIES];
     return {
         types: TYPES,
         statuses: STATUSES,
         liveStatuses: LIVE_STATUSES,
         visibilities: VISIBILITIES,
+        allowedVisibilities: allowed,
         flags: FLAGS,
         activityActions: ACTIVITY_ACTIONS,
         typeLabels: TYPE_LABELS,
         statusLabels: STATUS_LABELS,
         visibilityLabels: VISIBILITY_LABELS,
         activityActionLabels: ACTIVITY_ACTION_LABELS,
-        expiringSoonDays: EXPIRING_SOON_DAYS
+        expiringSoonDays: EXPIRING_SOON_DAYS,
+        canSeeFinance: allowed.includes('finance'),
+        canSeeAdminOnly: allowed.includes('admin_only'),
+        canLock: admin ? canLockRecords(admin) : false,
+        isSuperAdmin: admin ? isSuperAdmin(admin) : false
     };
 }
 
@@ -479,6 +579,29 @@ function actorPerson(admin) {
     };
 }
 
+/**
+ * Build a persistable activity row for admin_record_activity.
+ * Returns null when the action is not a known activity action.
+ */
+function buildActivityEntry({ admin, action, item, detail }) {
+    const normalized = String(action || '').trim();
+    if (!ACTIVITY_ACTIONS.includes(normalized)) return null;
+    const person = actorPerson(admin);
+    const stamp = nowIso();
+    return {
+        id: newId('act'),
+        actor: person.name,
+        actorId: person.id,
+        actorEmail: person.email,
+        action: normalized,
+        itemId: item?.id || null,
+        itemTitle: item?.title || '',
+        at: stamp,
+        detail: detail ? str(detail, 1000) : undefined,
+        createdAt: stamp
+    };
+}
+
 function resolveDaysFromNow(value) {
     if (value == null) return null;
     if (typeof value === 'string') return value;
@@ -503,6 +626,7 @@ module.exports = {
     VISIBILITY_LABELS,
     ACTIVITY_ACTION_LABELS,
     EXPIRING_SOON_DAYS,
+    VIEW_DEDUPE_MS,
     nowIso,
     newId,
     normalizeId,
@@ -513,10 +637,20 @@ module.exports = {
     isExpiringSoon,
     isOverdue,
     canSeeVisibility,
+    canSetVisibility,
+    allowedVisibilities,
+    adminIdOf,
+    isSuperAdmin,
+    canLockRecords,
+    isRecordLocked,
+    exclusiveAdminIds,
+    canMutateRecord,
+    lockedDenial,
     toPublic,
     toPublicCategory,
     toPublicDossier,
     toPublicActivity,
+    buildActivityEntry,
     catalog,
     validateCreateInput,
     applyUpdate,

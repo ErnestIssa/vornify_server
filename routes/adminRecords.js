@@ -9,6 +9,7 @@ const { requirePermission, requireAnyPermission } = require('../middleware/requi
 const recordService = require('../services/recordService');
 const recordStore = require('../services/recordStore');
 const recordFileService = require('../services/recordFileService');
+const { verifyAdminPassword, loadAdminById, adminIdString } = require('../services/adminAccountState');
 
 const router = express.Router();
 
@@ -47,20 +48,40 @@ function queryOf(req) {
     };
 }
 
+/**
+ * Persist to admin_record_activity. Never throws — mutations must not fail because logging failed.
+ * Views are deduped per admin + record within VIEW_DEDUPE_MS.
+ */
 async function writeActivity({ admin, action, item, detail }) {
-    const person = recordService.actorPerson(admin);
-    const stamp = recordService.nowIso();
-    return recordStore.createActivity({
-        id: recordService.newId('act'),
-        actor: person.name,
-        actorId: person.id,
-        action,
-        itemId: item?.id || null,
-        itemTitle: item?.title || '',
-        at: stamp,
-        detail: detail || undefined,
-        createdAt: stamp
-    });
+    try {
+        const entry = recordService.buildActivityEntry({ admin, action, item, detail });
+        if (!entry) {
+            console.warn('[RECORDS] skipped activity with unknown action:', action);
+            return { success: false, skipped: true };
+        }
+
+        if (entry.action === 'viewed' && entry.actorId && entry.itemId) {
+            const since = new Date(Date.now() - recordService.VIEW_DEDUPE_MS).toISOString();
+            const recent = await recordStore.findRecentActivity({
+                actorId: entry.actorId,
+                itemId: entry.itemId,
+                action: 'viewed',
+                sinceIso: since
+            });
+            if (recent) {
+                return { success: true, deduped: true, data: recent };
+            }
+        }
+
+        const created = await recordStore.createActivity(entry);
+        if (!created.success) {
+            console.error('[RECORDS] activity write failed:', created.error || 'unknown');
+        }
+        return created;
+    } catch (err) {
+        console.error('[RECORDS] activity write error:', err?.message || err);
+        return { success: false, error: err?.message || 'activity write failed' };
+    }
 }
 
 function rejectMissing(doc, res, label = 'Record') {
@@ -83,15 +104,62 @@ function rejectVisibility(doc, req, res) {
     return false;
 }
 
+function rejectLocked(doc, req, res) {
+    if (!recordService.canMutateRecord(req.admin, doc)) {
+        res.status(403).json({ success: false, ...recordService.lockedDenial() });
+        return true;
+    }
+    return false;
+}
+
+function publicItem(doc, req) {
+    return recordService.toPublic(doc, req.admin);
+}
+
+async function requirePassword(req, res) {
+    const check = await verifyAdminPassword(req.admin.id, req.body?.password);
+    if (!check.ok) {
+        res.status(401).json({
+            success: false,
+            error: check.error || 'Password does not match',
+            code: check.code || 'PASSWORD_MISMATCH'
+        });
+        return false;
+    }
+    return true;
+}
+
+function lockPatch(admin) {
+    const person = recordService.actorPerson(admin);
+    return {
+        locked: true,
+        lockedAt: recordService.nowIso(),
+        lockedById: person.id,
+        lockedBy: person.name,
+        updatedAt: recordService.nowIso()
+    };
+}
+
+function unlockPatch() {
+    return {
+        locked: false,
+        lockedAt: null,
+        lockedById: null,
+        lockedBy: null,
+        exclusiveAdminIds: [],
+        updatedAt: recordService.nowIso()
+    };
+}
+
 /* ---------- catalog ---------- */
 
-router.get('/catalog', authenticateAdmin, requirePermission('records.view'), (_req, res) => {
-    res.json({ success: true, catalog: recordService.catalog() });
+router.get('/catalog', authenticateAdmin, requirePermission('records.view'), (req, res) => {
+    res.json({ success: true, catalog: recordService.catalog(req.admin) });
 });
 
 /* ---------- categories ---------- */
 
-router.get('/categories', authenticateAdmin, requirePermission('records.view'), async (_req, res) => {
+router.get('/categories', authenticateAdmin, requirePermission('records.view'), async (req, res) => {
     try {
         const items = await recordStore.readItems();
         const categories = (await recordStore.readCategories())
@@ -100,7 +168,12 @@ router.get('/categories', authenticateAdmin, requirePermission('records.view'), 
             .sort((a, b) => a.title.localeCompare(b.title))
             .map((category) => ({
                 ...category,
-                count: items.filter((item) => item.categoryId === category.id && recordService.isLive(item)).length
+                count: items.filter(
+                    (item) =>
+                        item.categoryId === category.id &&
+                        recordService.isLive(item) &&
+                        recordService.canSeeVisibility(req.admin, item.visibility)
+                ).length
             }));
         res.json({ success: true, items: categories });
     } catch (err) {
@@ -226,7 +299,7 @@ router.get('/dossiers/:id', authenticateAdmin, requirePermission('records.view')
                     recordService.isLive(item) &&
                     recordService.canSeeVisibility(req.admin, item.visibility)
             )
-            .map(recordService.toPublic);
+            .map((item) => publicItem(item, req));
         res.json({
             success: true,
             item: recordService.toPublicDossier(dossier),
@@ -363,9 +436,20 @@ router.delete('/tags/:tag', authenticateAdmin, requirePermission('records.manage
 router.get('/activity', authenticateAdmin, requirePermission('records.view'), async (req, res) => {
     try {
         const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
-        const items = (await recordStore.readActivity())
+        const recordsById = new Map(
+            (await recordStore.readItems()).map((item) => [String(item.id), item])
+        );
+        // Over-fetch then filter by visibility so the page still fills after redactions.
+        const raw = await recordStore.readActivity(Math.min(500, limit * 4));
+        const items = raw
             .map(recordService.toPublicActivity)
             .filter(Boolean)
+            .filter((entry) => {
+                if (!entry.itemId) return true;
+                const related = recordsById.get(String(entry.itemId));
+                if (!related) return true;
+                return recordService.canSeeVisibility(req.admin, related.visibility);
+            })
             .slice(0, limit);
         res.json({ success: true, items });
     } catch (err) {
@@ -382,7 +466,7 @@ router.get('/reminders', authenticateAdmin, requirePermission('records.view'), a
                 (await recordStore.readItems()).filter((item) => recordService.matchesFilters(item, query, req.admin)),
                 'expiry'
             )
-            .map(recordService.toPublic);
+            .map((item) => publicItem(item, req));
         res.json({ success: true, items });
     } catch (err) {
         console.error('[RECORDS] reminders error:', err);
@@ -412,10 +496,10 @@ router.get('/', authenticateAdmin, requirePermission('records.view'), async (req
 
         res.json({
             success: true,
-            items: filtered.map(recordService.toPublic),
+            items: filtered.map((item) => publicItem(item, req)),
             stats,
             people,
-            catalog: recordService.catalog()
+            catalog: recordService.catalog(req.admin)
         });
     } catch (err) {
         console.error('[RECORDS] list error:', err);
@@ -434,11 +518,12 @@ router.post('/', authenticateAdmin, requirePermission('records.create'), async (
             const dossier = await recordStore.readDossierById(parsed.value.dossierId);
             if (!dossier) return res.status(400).json({ success: false, error: 'Unknown dossier' });
         }
-        if (!recordService.canSeeVisibility(req.admin, parsed.value.visibility)) {
+        if (!recordService.canSetVisibility(req.admin, parsed.value.visibility)) {
             return res.status(403).json({
                 success: false,
                 error: 'You cannot create a record with this visibility',
-                code: 'RECORD_VISIBILITY_DENIED'
+                code: 'RECORD_VISIBILITY_DENIED',
+                allowedVisibilities: recordService.allowedVisibilities(req.admin)
             });
         }
 
@@ -464,7 +549,7 @@ router.post('/', authenticateAdmin, requirePermission('records.create'), async (
             detail: `Added "${created.data.title}" to Records.`
         });
 
-        res.status(201).json({ success: true, item: recordService.toPublic(created.data) });
+        res.status(201).json({ success: true, item: publicItem(created.data, req) });
     } catch (err) {
         console.error('[RECORDS] create error:', err);
         res.status(500).json({ success: false, error: 'Failed to create record' });
@@ -484,7 +569,7 @@ router.get('/:id', authenticateAdmin, requirePermission('records.view'), async (
             detail: `Opened "${item.title}".`
         });
 
-        res.json({ success: true, item: recordService.toPublic(item) });
+        res.json({ success: true, item: publicItem(item, req) });
     } catch (err) {
         console.error('[RECORDS] get error:', err);
         res.status(500).json({ success: false, error: 'Failed to load record' });
@@ -496,6 +581,7 @@ router.patch('/:id', authenticateAdmin, requirePermission('records.edit'), async
         const existing = await recordStore.readItemById(req.params.id);
         if (rejectMissing(existing, res)) return;
         if (rejectVisibility(existing, req, res)) return;
+        if (rejectLocked(existing, req, res)) return;
 
         const applied = recordService.applyUpdate(existing, req.body || {});
         if (applied.error) return res.status(400).json({ success: false, error: applied.error });
@@ -508,11 +594,12 @@ router.patch('/:id', authenticateAdmin, requirePermission('records.edit'), async
             const dossier = await recordStore.readDossierById(applied.value.dossierId);
             if (!dossier) return res.status(400).json({ success: false, error: 'Unknown dossier' });
         }
-        if (!recordService.canSeeVisibility(req.admin, applied.value.visibility)) {
+        if (!recordService.canSetVisibility(req.admin, applied.value.visibility)) {
             return res.status(403).json({
                 success: false,
                 error: 'You cannot set this visibility',
-                code: 'RECORD_VISIBILITY_DENIED'
+                code: 'RECORD_VISIBILITY_DENIED',
+                allowedVisibilities: recordService.allowedVisibilities(req.admin)
             });
         }
 
@@ -538,7 +625,7 @@ router.patch('/:id', authenticateAdmin, requirePermission('records.edit'), async
             detail: `Edited "${updated.title}".`
         });
 
-        res.json({ success: true, item: recordService.toPublic(updated) });
+        res.json({ success: true, item: publicItem(updated, req) });
     } catch (err) {
         console.error('[RECORDS] update error:', err);
         res.status(500).json({ success: false, error: 'Failed to update record' });
@@ -550,8 +637,9 @@ router.post('/:id/archive', authenticateAdmin, requirePermission('records.edit')
         const existing = await recordStore.readItemById(req.params.id);
         if (rejectMissing(existing, res)) return;
         if (rejectVisibility(existing, req, res)) return;
+        if (rejectLocked(existing, req, res)) return;
         if (recordService.isArchived(existing)) {
-            return res.json({ success: true, item: recordService.toPublic(existing) });
+            return res.json({ success: true, item: publicItem(existing, req) });
         }
         const stamp = recordService.nowIso();
         await recordStore.updateItemById(existing.id, {
@@ -566,7 +654,7 @@ router.post('/:id/archive', authenticateAdmin, requirePermission('records.edit')
             item: updated,
             detail: `Moved "${updated.title}" to Archive.`
         });
-        res.json({ success: true, item: recordService.toPublic(updated) });
+        res.json({ success: true, item: publicItem(updated, req) });
     } catch (err) {
         console.error('[RECORDS] archive error:', err);
         res.status(500).json({ success: false, error: 'Failed to archive record' });
@@ -578,6 +666,7 @@ router.post('/:id/restore', authenticateAdmin, requirePermission('records.edit')
         const existing = await recordStore.readItemById(req.params.id);
         if (rejectMissing(existing, res)) return;
         if (rejectVisibility(existing, req, res)) return;
+        if (rejectLocked(existing, req, res)) return;
         const stamp = recordService.nowIso();
         await recordStore.updateItemById(existing.id, {
             status: 'active',
@@ -591,7 +680,7 @@ router.post('/:id/restore', authenticateAdmin, requirePermission('records.edit')
             item: updated,
             detail: `Restored "${updated.title}" from Archive.`
         });
-        res.json({ success: true, item: recordService.toPublic(updated) });
+        res.json({ success: true, item: publicItem(updated, req) });
     } catch (err) {
         console.error('[RECORDS] restore error:', err);
         res.status(500).json({ success: false, error: 'Failed to restore record' });
@@ -603,13 +692,20 @@ router.post('/:id/pin', authenticateAdmin, requirePermission('records.edit'), as
         const existing = await recordStore.readItemById(req.params.id);
         if (rejectMissing(existing, res)) return;
         if (rejectVisibility(existing, req, res)) return;
+        if (rejectLocked(existing, req, res)) return;
         if (recordService.isArchived(existing)) {
             return res.status(409).json({ success: false, error: 'Restore this record before pinning it' });
         }
         const pinned = req.body?.pinned != null ? Boolean(req.body.pinned) : !existing.pinned;
         await recordStore.updateItemById(existing.id, { pinned, updatedAt: recordService.nowIso() });
         const updated = await recordStore.readItemById(existing.id);
-        res.json({ success: true, item: recordService.toPublic(updated) });
+        await writeActivity({
+            admin: req.admin,
+            action: 'edited',
+            item: updated,
+            detail: pinned ? `Pinned "${updated.title}".` : `Unpinned "${updated.title}".`
+        });
+        res.json({ success: true, item: publicItem(updated, req) });
     } catch (err) {
         console.error('[RECORDS] pin error:', err);
         res.status(500).json({ success: false, error: 'Failed to update pin' });
@@ -641,6 +737,7 @@ router.post(
             const existing = await recordStore.readItemById(req.params.id);
             if (rejectMissing(existing, res)) return;
             if (rejectVisibility(existing, req, res)) return;
+            if (rejectLocked(existing, req, res)) return;
             if (existing.type !== 'file' && existing.type !== 'photo') {
                 return res.status(400).json({ success: false, error: 'Only file or photo records can store an upload' });
             }
@@ -650,6 +747,18 @@ router.post(
 
             const allowed = recordFileService.assertAllowed(req.file, existing.type);
             if (allowed.error) return res.status(400).json({ success: false, error: allowed.error });
+
+            const wantLock =
+                String(req.body?.lock || '') === 'true' ||
+                String(req.body?.lock || '') === '1' ||
+                req.body?.lock === true;
+            if (wantLock && !recordService.canLockRecords(req.admin)) {
+                return res.status(403).json({
+                    success: false,
+                    error: 'Only Super Admin, Manager, or Records managers can lock a record',
+                    code: 'RECORD_LOCK_DENIED'
+                });
+            }
 
             const uploaded = await recordFileService.uploadBuffer({
                 buffer: req.file.buffer,
@@ -675,7 +784,8 @@ router.post(
                 cloudinaryPublicId: uploaded.cloudinaryPublicId,
                 cloudinaryResourceType: uploaded.resourceType,
                 cloudinaryFolder: uploaded.folder,
-                updatedAt: recordService.nowIso()
+                updatedAt: recordService.nowIso(),
+                ...(wantLock ? lockPatch(req.admin) : {})
             };
             await recordStore.updateItemById(existing.id, patch);
             const updated = await recordStore.readItemById(existing.id);
@@ -684,10 +794,12 @@ router.post(
                 admin: req.admin,
                 action: 'edited',
                 item: updated,
-                detail: `Uploaded file "${fileName}" to "${updated.title}".`
+                detail: wantLock
+                    ? `Uploaded and locked file "${fileName}" on "${updated.title}".`
+                    : `Uploaded file "${fileName}" to "${updated.title}".`
             });
 
-            res.status(201).json({ success: true, item: recordService.toPublic(updated) });
+            res.status(201).json({ success: true, item: publicItem(updated, req) });
         } catch (err) {
             console.error('[RECORDS] file upload error:', err);
             res.status(500).json({ success: false, error: err.message || 'Failed to upload file' });
@@ -717,13 +829,20 @@ router.get('/:id/file', authenticateAdmin, requirePermission('records.view'), as
     }
 });
 
-router.delete('/:id/file', authenticateAdmin, requirePermission('records.edit'), async (req, res) => {
+/** Password-confirmed file removal (wrong password never deletes). */
+router.post('/:id/file/remove', authenticateAdmin, requirePermission('records.edit'), async (req, res) => {
     try {
+        if (!(await requirePassword(req, res))) return;
+
         const existing = await recordStore.readItemById(req.params.id);
         if (rejectMissing(existing, res)) return;
         if (rejectVisibility(existing, req, res)) return;
+        if (rejectLocked(existing, req, res)) return;
         if (existing.status === 'signed') {
             return res.status(409).json({ success: false, error: 'Signed records are locked' });
+        }
+        if (!existing.fileUrl && !existing.cloudinaryPublicId) {
+            return res.status(404).json({ success: false, error: 'No file attached to this record' });
         }
 
         if (existing.cloudinaryPublicId) {
@@ -748,12 +867,149 @@ router.delete('/:id/file', authenticateAdmin, requirePermission('records.edit'),
             admin: req.admin,
             action: 'edited',
             item: updated,
-            detail: `Removed stored file from "${updated.title}".`
+            detail: `Removed stored file from "${updated.title}" (password confirmed).`
         });
-        res.json({ success: true, item: recordService.toPublic(updated) });
+        res.json({ success: true, item: publicItem(updated, req) });
     } catch (err) {
         console.error('[RECORDS] file delete error:', err);
         res.status(500).json({ success: false, error: 'Failed to remove file' });
+    }
+});
+
+router.post('/:id/lock', authenticateAdmin, requirePermission('records.edit'), async (req, res) => {
+    try {
+        const existing = await recordStore.readItemById(req.params.id);
+        if (rejectMissing(existing, res)) return;
+        if (rejectVisibility(existing, req, res)) return;
+        if (!recordService.canLockRecords(req.admin)) {
+            return res.status(403).json({
+                success: false,
+                error: 'Only Super Admin, Manager, or Records managers can lock records',
+                code: 'RECORD_LOCK_DENIED'
+            });
+        }
+        if (recordService.isRecordLocked(existing) && rejectLocked(existing, req, res)) return;
+
+        await recordStore.updateItemById(existing.id, lockPatch(req.admin));
+        const updated = await recordStore.readItemById(existing.id);
+        await writeActivity({
+            admin: req.admin,
+            action: 'locked',
+            item: updated,
+            detail: `Locked "${updated.title}".`
+        });
+        res.json({ success: true, item: publicItem(updated, req) });
+    } catch (err) {
+        console.error('[RECORDS] lock error:', err);
+        res.status(500).json({ success: false, error: 'Failed to lock record' });
+    }
+});
+
+router.post('/:id/unlock', authenticateAdmin, requirePermission('records.edit'), async (req, res) => {
+    try {
+        if (!(await requirePassword(req, res))) return;
+
+        const existing = await recordStore.readItemById(req.params.id);
+        if (rejectMissing(existing, res)) return;
+        if (rejectVisibility(existing, req, res)) return;
+        if (!recordService.isRecordLocked(existing)) {
+            return res.json({ success: true, item: publicItem(existing, req) });
+        }
+        const isLocker = String(existing.lockedById || '') === recordService.adminIdOf(req.admin);
+        if (!recordService.isSuperAdmin(req.admin) && !isLocker) {
+            return res.status(403).json({
+                success: false,
+                error: 'Only the locker or a Super Admin can unlock this record',
+                code: 'RECORD_UNLOCK_DENIED'
+            });
+        }
+
+        await recordStore.updateItemById(existing.id, unlockPatch());
+        const updated = await recordStore.readItemById(existing.id);
+        await writeActivity({
+            admin: req.admin,
+            action: 'unlocked',
+            item: updated,
+            detail: `Unlocked "${updated.title}" (password confirmed).`
+        });
+        res.json({ success: true, item: publicItem(updated, req) });
+    } catch (err) {
+        console.error('[RECORDS] unlock error:', err);
+        res.status(500).json({ success: false, error: 'Failed to unlock record' });
+    }
+});
+
+/** Super Admin grants exclusive CRUD access on a locked record to one admin. */
+router.post('/:id/exclusive', authenticateAdmin, requirePermission('records.manage'), async (req, res) => {
+    try {
+        if (!recordService.isSuperAdmin(req.admin)) {
+            return res.status(403).json({
+                success: false,
+                error: 'Only a Super Admin can grant exclusive access',
+                code: 'RECORD_EXCLUSIVE_DENIED'
+            });
+        }
+        const existing = await recordStore.readItemById(req.params.id);
+        if (rejectMissing(existing, res)) return;
+        if (rejectVisibility(existing, req, res)) return;
+        if (!recordService.isRecordLocked(existing)) {
+            return res.status(409).json({ success: false, error: 'Lock the record before granting exclusive access' });
+        }
+
+        const adminId = String(req.body?.adminId || '').trim();
+        if (!adminId) return res.status(400).json({ success: false, error: 'adminId is required' });
+        const target = await loadAdminById(adminId);
+        if (!target) return res.status(404).json({ success: false, error: 'Admin not found' });
+        const targetId = adminIdString(target);
+        const next = [...new Set([...recordService.exclusiveAdminIds(existing), targetId])];
+        await recordStore.updateItemById(existing.id, {
+            exclusiveAdminIds: next,
+            updatedAt: recordService.nowIso()
+        });
+        const updated = await recordStore.readItemById(existing.id);
+        await writeActivity({
+            admin: req.admin,
+            action: 'exclusive_granted',
+            item: updated,
+            detail: `Granted exclusive access on "${updated.title}" to ${target.name || target.email || targetId}.`
+        });
+        res.json({ success: true, item: publicItem(updated, req) });
+    } catch (err) {
+        console.error('[RECORDS] exclusive grant error:', err);
+        res.status(500).json({ success: false, error: 'Failed to grant exclusive access' });
+    }
+});
+
+router.post('/:id/exclusive/revoke', authenticateAdmin, requirePermission('records.manage'), async (req, res) => {
+    try {
+        if (!recordService.isSuperAdmin(req.admin)) {
+            return res.status(403).json({
+                success: false,
+                error: 'Only a Super Admin can revoke exclusive access',
+                code: 'RECORD_EXCLUSIVE_DENIED'
+            });
+        }
+        const existing = await recordStore.readItemById(req.params.id);
+        if (rejectMissing(existing, res)) return;
+        if (rejectVisibility(existing, req, res)) return;
+        const adminId = String(req.body?.adminId || '').trim();
+        if (!adminId) return res.status(400).json({ success: false, error: 'adminId is required' });
+        const next = recordService.exclusiveAdminIds(existing).filter((id) => id !== adminId);
+        await recordStore.updateItemById(existing.id, {
+            exclusiveAdminIds: next,
+            updatedAt: recordService.nowIso()
+        });
+        const updated = await recordStore.readItemById(existing.id);
+        await writeActivity({
+            admin: req.admin,
+            action: 'exclusive_revoked',
+            item: updated,
+            detail: `Revoked exclusive access on "${updated.title}" for ${adminId}.`
+        });
+        res.json({ success: true, item: publicItem(updated, req) });
+    } catch (err) {
+        console.error('[RECORDS] exclusive revoke error:', err);
+        res.status(500).json({ success: false, error: 'Failed to revoke exclusive access' });
     }
 });
 
@@ -762,6 +1018,7 @@ router.delete('/:id', authenticateAdmin, requirePermission('records.delete'), as
         const existing = await recordStore.readItemById(req.params.id);
         if (rejectMissing(existing, res)) return;
         if (rejectVisibility(existing, req, res)) return;
+        if (rejectLocked(existing, req, res)) return;
         await writeActivity({
             admin: req.admin,
             action: 'deleted',

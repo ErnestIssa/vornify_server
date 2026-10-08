@@ -147,12 +147,42 @@ async function deleteDossierById(id) {
     return deleteById(DOSSIERS, id);
 }
 
-async function readActivity() {
+async function readActivity(limit = 200) {
+    const cap = Math.min(500, Math.max(1, Number(limit) || 200));
     const rows = await readAll(ACTIVITY);
-    return rows.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+    return rows
+        .sort((a, b) => String(b.at || b.createdAt || '').localeCompare(String(a.at || a.createdAt || '')))
+        .slice(0, cap);
+}
+
+/**
+ * Recent match for view-dedupe (same admin + record + action after `sinceIso`).
+ */
+async function findRecentActivity({ actorId, itemId, action, sinceIso }) {
+    const aid = String(actorId || '').trim();
+    const iid = String(itemId || '').trim();
+    const act = String(action || '').trim();
+    if (!aid || !iid || !act || !sinceIso) return null;
+
+    const result = await db.executeOperation({
+        database_name: DATABASE_NAME,
+        collection_name: ACTIVITY,
+        command: '--read',
+        data: { actorId: aid, itemId: iid, action: act }
+    });
+    if (!result.success || !result.data) return null;
+    const rows = (Array.isArray(result.data) ? result.data : [result.data])
+        .map(recordService.normalizeId)
+        .filter(Boolean)
+        .filter((row) => String(row.at || row.createdAt || '') >= String(sinceIso))
+        .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+    return rows[0] || null;
 }
 
 async function createActivity(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return { success: false, error: 'Invalid activity entry' };
+    }
     return createDoc(ACTIVITY, entry);
 }
 
@@ -259,6 +289,7 @@ module.exports = {
     updateDossierById,
     deleteDossierById,
     readActivity,
+    findRecentActivity,
     createActivity,
     readTags,
     readTagByName,
