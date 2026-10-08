@@ -195,7 +195,49 @@ async function deleteTagByName(name) {
     });
 }
 
+async function renameTag(oldName, newName) {
+    const from = String(oldName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^#/, '');
+    const to = String(newName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^#/, '');
+    if (!from || !to) return { success: false, error: 'Invalid tag' };
+    if (from === to) return { success: true, name: to, renamedOn: 0 };
+
+    const existing = await readTagByName(from);
+    const clash = await readTagByName(to);
+    if (clash && (!existing || clash.id !== existing.id)) {
+        return { success: false, error: 'That tag name already exists' };
+    }
+
+    const items = await readItems();
+    let renamedOn = 0;
+    for (const item of items) {
+        const tags = Array.isArray(item.tags) ? item.tags : [];
+        if (!tags.includes(from)) continue;
+        const next = [...new Set(tags.map((tag) => (tag === from ? to : tag)))];
+        await updateItemById(item.id, { tags: next, updatedAt: recordService.nowIso() });
+        renamedOn += 1;
+    }
+
+    if (existing) {
+        await updateById(TAGS, existing.id, { name: to });
+    } else {
+        await createTag({
+            id: recordService.newId('tag'),
+            name: to,
+            createdAt: recordService.nowIso()
+        });
+    }
+
+    return { success: true, name: to, renamedOn };
+}
+
 module.exports = {
+    DATABASE_NAME,
     ITEMS,
     CATEGORIES,
     DOSSIERS,
@@ -221,5 +263,6 @@ module.exports = {
     readTags,
     readTagByName,
     createTag,
-    deleteTagByName
+    deleteTagByName,
+    renameTag
 };

@@ -8,9 +8,18 @@ const authenticateAdmin = require('../middleware/authenticateAdmin');
 const { requirePermission, requireAnyPermission } = require('../middleware/requirePermission');
 const recordService = require('../services/recordService');
 const recordStore = require('../services/recordStore');
-const recordSeedService = require('../services/recordSeedService');
+const recordFileService = require('../services/recordFileService');
 
 const router = express.Router();
+
+function runUpload(req, res) {
+    return new Promise((resolve, reject) => {
+        recordFileService.uploadMiddleware(req, res, (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+}
 
 function actor(req) {
     return recordService.actorPerson(req.admin);
@@ -74,25 +83,10 @@ function rejectVisibility(doc, req, res) {
     return false;
 }
 
-/* ---------- catalog / bootstrap ---------- */
+/* ---------- catalog ---------- */
 
 router.get('/catalog', authenticateAdmin, requirePermission('records.view'), (_req, res) => {
     res.json({ success: true, catalog: recordService.catalog() });
-});
-
-router.post('/seed', authenticateAdmin, requirePermission('records.manage'), async (req, res) => {
-    try {
-        const force = Boolean(req.body?.force);
-        const result = await recordSeedService.seedFromFile({ force });
-        if (!result.success) {
-            const status = result.code === 'NOT_EMPTY' ? 409 : 400;
-            return res.status(status).json(result);
-        }
-        res.json(result);
-    } catch (err) {
-        console.error('[RECORDS] seed error:', err);
-        res.status(500).json({ success: false, error: 'Failed to seed records' });
-    }
 });
 
 /* ---------- categories ---------- */
@@ -322,6 +316,25 @@ router.post('/tags', authenticateAdmin, requirePermission('records.manage'), asy
     } catch (err) {
         console.error('[RECORDS] tag create error:', err);
         res.status(500).json({ success: false, error: 'Failed to create tag' });
+    }
+});
+
+router.patch('/tags/:tag', authenticateAdmin, requirePermission('records.manage'), async (req, res) => {
+    try {
+        const current = recordService.normalizeTags([req.params.tag])[0];
+        const next = recordService.normalizeTags([req.body?.name || req.body?.tag])[0];
+        if (!current) return res.status(400).json({ success: false, error: 'Invalid tag' });
+        if (!next) return res.status(400).json({ success: false, error: 'Tag name is required' });
+        const result = await recordStore.renameTag(current, next);
+        if (!result.success) return res.status(409).json(result);
+        const items = (await recordStore.readItems()).filter(
+            (item) => recordService.isLive(item) && recordService.canSeeVisibility(req.admin, item.visibility)
+        );
+        const count = items.filter((item) => (item.tags || []).includes(result.name)).length;
+        res.json({ success: true, item: { name: result.name, count }, renamedOn: result.renamedOn || 0 });
+    } catch (err) {
+        console.error('[RECORDS] tag rename error:', err);
+        res.status(500).json({ success: false, error: 'Failed to rename tag' });
     }
 });
 
@@ -603,6 +616,147 @@ router.post('/:id/pin', authenticateAdmin, requirePermission('records.edit'), as
     }
 });
 
+/* ---------- file storage (Cloudinary under peakmode/records/{files|photos}) ---------- */
+
+router.post(
+    '/:id/file',
+    authenticateAdmin,
+    requireAnyPermission('records.create', 'records.edit'),
+    async (req, res) => {
+        try {
+            await runUpload(req, res);
+        } catch (err) {
+            const message =
+                err?.code === 'LIMIT_FILE_SIZE'
+                    ? 'File is too large (max 25 MB)'
+                    : err.message || 'Upload failed';
+            return res.status(400).json({ success: false, error: message });
+        }
+
+        try {
+            if (!recordFileService.cloudinaryReady()) {
+                return res.status(503).json({ success: false, error: 'Cloudinary is not configured' });
+            }
+
+            const existing = await recordStore.readItemById(req.params.id);
+            if (rejectMissing(existing, res)) return;
+            if (rejectVisibility(existing, req, res)) return;
+            if (existing.type !== 'file' && existing.type !== 'photo') {
+                return res.status(400).json({ success: false, error: 'Only file or photo records can store an upload' });
+            }
+            if (existing.status === 'signed') {
+                return res.status(409).json({ success: false, error: 'Signed records are locked' });
+            }
+
+            const allowed = recordFileService.assertAllowed(req.file, existing.type);
+            if (allowed.error) return res.status(400).json({ success: false, error: allowed.error });
+
+            const uploaded = await recordFileService.uploadBuffer({
+                buffer: req.file.buffer,
+                mimeType: allowed.mime,
+                originalName: req.file.originalname,
+                recordType: existing.type,
+                recordId: existing.id
+            });
+
+            if (existing.cloudinaryPublicId) {
+                await recordFileService.destroyAsset(
+                    existing.cloudinaryPublicId,
+                    existing.cloudinaryResourceType || 'raw'
+                );
+            }
+
+            const fileName = recordFileService.sanitizeFilename(req.file.originalname);
+            const patch = {
+                fileName,
+                fileSize: recordFileService.formatBytes(uploaded.bytes),
+                fileMime: allowed.mime,
+                fileUrl: uploaded.fileUrl,
+                cloudinaryPublicId: uploaded.cloudinaryPublicId,
+                cloudinaryResourceType: uploaded.resourceType,
+                cloudinaryFolder: uploaded.folder,
+                updatedAt: recordService.nowIso()
+            };
+            await recordStore.updateItemById(existing.id, patch);
+            const updated = await recordStore.readItemById(existing.id);
+
+            await writeActivity({
+                admin: req.admin,
+                action: 'edited',
+                item: updated,
+                detail: `Uploaded file "${fileName}" to "${updated.title}".`
+            });
+
+            res.status(201).json({ success: true, item: recordService.toPublic(updated) });
+        } catch (err) {
+            console.error('[RECORDS] file upload error:', err);
+            res.status(500).json({ success: false, error: err.message || 'Failed to upload file' });
+        }
+    }
+);
+
+router.get('/:id/file', authenticateAdmin, requirePermission('records.view'), async (req, res) => {
+    try {
+        const existing = await recordStore.readItemById(req.params.id);
+        if (rejectMissing(existing, res)) return;
+        if (rejectVisibility(existing, req, res)) return;
+        if (!existing.fileUrl && !existing.cloudinaryPublicId) {
+            return res.status(404).json({ success: false, error: 'No file attached to this record' });
+        }
+
+        const body = await recordFileService.readRemote(existing.fileUrl);
+        const filename = recordFileService.sanitizeFilename(existing.fileName || 'record-file');
+        const inline = String(req.query.inline || '') === '1' || String(req.query.disposition || '') === 'inline';
+        res.setHeader('Content-Type', existing.fileMime || 'application/octet-stream');
+        res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${filename}"`);
+        res.setHeader('Content-Length', String(body.length));
+        res.send(body);
+    } catch (err) {
+        console.error('[RECORDS] file download error:', err);
+        res.status(500).json({ success: false, error: err.message || 'Failed to download file' });
+    }
+});
+
+router.delete('/:id/file', authenticateAdmin, requirePermission('records.edit'), async (req, res) => {
+    try {
+        const existing = await recordStore.readItemById(req.params.id);
+        if (rejectMissing(existing, res)) return;
+        if (rejectVisibility(existing, req, res)) return;
+        if (existing.status === 'signed') {
+            return res.status(409).json({ success: false, error: 'Signed records are locked' });
+        }
+
+        if (existing.cloudinaryPublicId) {
+            await recordFileService.destroyAsset(
+                existing.cloudinaryPublicId,
+                existing.cloudinaryResourceType || 'raw'
+            );
+        }
+
+        await recordStore.updateItemById(existing.id, {
+            fileName: null,
+            fileSize: null,
+            fileMime: null,
+            fileUrl: null,
+            cloudinaryPublicId: null,
+            cloudinaryResourceType: null,
+            cloudinaryFolder: null,
+            updatedAt: recordService.nowIso()
+        });
+        const updated = await recordStore.readItemById(existing.id);
+        await writeActivity({
+            admin: req.admin,
+            action: 'edited',
+            item: updated,
+            detail: `Removed stored file from "${updated.title}".`
+        });
+        res.json({ success: true, item: recordService.toPublic(updated) });
+    } catch (err) {
+        console.error('[RECORDS] file delete error:', err);
+        res.status(500).json({ success: false, error: 'Failed to remove file' });
+    }
+});
+
 router.delete('/:id', authenticateAdmin, requirePermission('records.delete'), async (req, res) => {
     try {
         const existing = await recordStore.readItemById(req.params.id);
@@ -614,6 +768,12 @@ router.delete('/:id', authenticateAdmin, requirePermission('records.delete'), as
             item: existing,
             detail: `Deleted "${existing.title}".`
         });
+        if (existing.cloudinaryPublicId) {
+            await recordFileService.destroyAsset(
+                existing.cloudinaryPublicId,
+                existing.cloudinaryResourceType || 'raw'
+            );
+        }
         await recordStore.deleteItemById(existing.id);
         res.json({ success: true });
     } catch (err) {

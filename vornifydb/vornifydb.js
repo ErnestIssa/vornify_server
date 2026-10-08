@@ -272,6 +272,52 @@ class VortexDB {
                 }
             }
 
+            // Admin Records metadata (items, categories, dossiers, activity, tags)
+            const adminRecordsColl = peakmode.collection('admin_records');
+            const adminRecordCategoriesColl = peakmode.collection('admin_record_categories');
+            const adminRecordDossiersColl = peakmode.collection('admin_record_dossiers');
+            const adminRecordActivityColl = peakmode.collection('admin_record_activity');
+            const adminRecordTagsColl = peakmode.collection('admin_record_tags');
+            for (const [coll, spec] of [
+                [adminRecordsColl, [
+                    { key: { id: 1 }, cacheKey: 'peakmode.admin_records.id' },
+                    { key: { status: 1, updatedAt: -1 }, cacheKey: 'peakmode.admin_records.status_updatedAt' },
+                    { key: { categoryId: 1, status: 1 }, cacheKey: 'peakmode.admin_records.categoryId_status' },
+                    { key: { type: 1, status: 1 }, cacheKey: 'peakmode.admin_records.type_status' },
+                    { key: { dossierId: 1 }, cacheKey: 'peakmode.admin_records.dossierId' },
+                    { key: { pinned: 1, status: 1 }, cacheKey: 'peakmode.admin_records.pinned_status' },
+                    { key: { expiresAt: 1 }, cacheKey: 'peakmode.admin_records.expiresAt' },
+                    { key: { visibility: 1 }, cacheKey: 'peakmode.admin_records.visibility' },
+                    { key: { tags: 1 }, cacheKey: 'peakmode.admin_records.tags' }
+                ]],
+                [adminRecordCategoriesColl, [
+                    { key: { id: 1 }, cacheKey: 'peakmode.admin_record_categories.id' }
+                ]],
+                [adminRecordDossiersColl, [
+                    { key: { id: 1 }, cacheKey: 'peakmode.admin_record_dossiers.id' }
+                ]],
+                [adminRecordActivityColl, [
+                    { key: { id: 1 }, cacheKey: 'peakmode.admin_record_activity.id' },
+                    { key: { at: -1 }, cacheKey: 'peakmode.admin_record_activity.at' },
+                    { key: { itemId: 1, at: -1 }, cacheKey: 'peakmode.admin_record_activity.itemId_at' }
+                ]],
+                [adminRecordTagsColl, [
+                    { key: { id: 1 }, cacheKey: 'peakmode.admin_record_tags.id' },
+                    { key: { name: 1 }, cacheKey: 'peakmode.admin_record_tags.name', options: { unique: true } }
+                ]]
+            ]) {
+                for (const { key, cacheKey, options } of spec) {
+                    if (!this.indexCache.has(cacheKey)) {
+                        try {
+                            await coll.createIndex(key, { background: true, ...(options || {}) });
+                            this.indexCache.add(cacheKey);
+                        } catch (idxErr) {
+                            console.warn(`Warning: Could not create index ${cacheKey}:`, idxErr.message);
+                        }
+                    }
+                }
+            }
+
         } catch (error) {
             console.error('Error setting up indexes:', error);
         }

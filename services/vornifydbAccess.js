@@ -56,7 +56,12 @@ const COLLECTION_PERMISSIONS = {
     tracking: { view: 'orders.view', create: 'orders.edit', update: 'orders.edit', delete: 'orders.edit' },
     admin_tasks: { view: 'tasks.view', create: 'tasks.create', update: 'tasks.edit', delete: 'tasks.delete' },
     task_activity: { view: 'tasks.view', create: 'tasks.edit', update: 'tasks.edit', delete: 'tasks.delete' },
-    admin_task_files: { view: 'tasks.view', create: 'tasks.create', update: 'tasks.edit', delete: 'tasks.delete' }
+    admin_task_files: { view: 'tasks.view', create: 'tasks.create', update: 'tasks.edit', delete: 'tasks.delete' },
+    admin_records: { view: 'records.view', create: 'records.create', update: 'records.edit', delete: 'records.delete' },
+    admin_record_categories: { view: 'records.view', create: 'records.manage', update: 'records.manage', delete: 'records.manage' },
+    admin_record_dossiers: { view: 'records.view', create: 'records.manage', update: 'records.manage', delete: 'records.manage' },
+    admin_record_activity: { view: 'records.view', create: 'records.edit', update: 'records.edit', delete: 'records.delete' },
+    admin_record_tags: { view: 'records.view', create: 'records.manage', update: 'records.manage', delete: 'records.manage' }
 };
 
 const PUBLIC_READ = new Set([

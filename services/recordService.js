@@ -186,8 +186,11 @@ function toPublic(doc) {
         updatedAt: row.updatedAt,
         fileName: row.fileName || undefined,
         fileSize: row.fileSize || undefined,
+        fileMime: row.fileMime || undefined,
         fileUrl: row.fileUrl || undefined,
         cloudinaryPublicId: row.cloudinaryPublicId || undefined,
+        cloudinaryResourceType: row.cloudinaryResourceType || undefined,
+        cloudinaryFolder: row.cloudinaryFolder || undefined,
         url: row.url || undefined,
         body: row.body || undefined
     };
@@ -337,6 +340,12 @@ function applyUpdate(existing, input) {
     if (input.fileUrl !== undefined) next.fileUrl = str(input.fileUrl, URL_MAX) || undefined;
     if (input.cloudinaryPublicId !== undefined) {
         next.cloudinaryPublicId = str(input.cloudinaryPublicId, 240) || undefined;
+    }
+    if (input.cloudinaryResourceType !== undefined) {
+        next.cloudinaryResourceType = str(input.cloudinaryResourceType, 20) || undefined;
+    }
+    if (input.cloudinaryFolder !== undefined) {
+        next.cloudinaryFolder = str(input.cloudinaryFolder, 120) || undefined;
     }
     if (next.type === 'link' && !next.url) return { error: 'Link address is required' };
     next.updatedAt = nowIso();
